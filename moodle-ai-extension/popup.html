@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AcademIQ Dashboard</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="container">
+    <header>
+      <h1>AcademIQ Assistant</h1>
+      <p id="lastUpdated" class="subtle">No extraction data yet</p>
+    </header>
+
+    <section id="emptyState" class="card empty hidden">
+      <p>No course data found yet. Open Moodle course pages first.</p>
+    </section>
+
+    <section id="dashboard" class="hidden">
+      <section class="card">
+        <div class="row">
+          <h2>Course</h2>
+          <select id="courseSelector"></select>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Extracted Performance Data</h2>
+        <div class="stats-grid" id="performanceStats"></div>
+      </section>
+
+      <section class="card">
+        <div class="row">
+          <h2>Extracted Learning Materials</h2>
+          <button id="downloadAllPdfsBtn" class="primary" type="button">Download All Files</button>
+        </div>
+        <p id="downloadMeta" class="subtle">Download-ready files: 0</p>
+        <div id="materialsList" class="materials-list"></div>
+      </section>
+    </section>
+
+    <!-- ── Sync to AcademIQ Dashboard ── -->
+    <section class="card" id="syncSection">
+      <h2>Sync to Dashboard</h2>
+      <p class="subtle">Paste your Dashboard token to send Moodle data to your AcademIQ account.</p>
+      <input
+        id="syncTokenInput"
+        type="password"
+        placeholder="Bearer token from AcademIQ sign-in"
+        style="width:100%;margin-bottom:8px;padding:6px 8px;border-radius:6px;border:1px solid #ccc;font-size:13px;"
+      />
+      <div class="row" style="gap:8px;">
+        <button id="syncBtn" type="button" class="primary" style="flex:1;">Sync Now</button>
+        <span id="syncStatus" class="subtle" style="align-self:center;"></span>
+      </div>
+    </section>
+
+    <section class="card actions">
+      <button id="refreshBtn" type="button">Refresh</button>
+      <button id="downloadJsonBtn" type="button">Download JSON</button>
+      <button id="clearDataBtn" type="button" class="danger">Clear Data</button>
+    </section>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

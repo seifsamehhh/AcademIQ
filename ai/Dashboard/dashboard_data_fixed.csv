@@ -1,0 +1,176 @@
+student_id,avg_score,engagement_level,login_frequency,risk_cluster,prediction_label,prediction_probability,recommendation_text
+S_1,6.300887414335906,114,4.2105263157894735,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_2,6.720570648863651,112,3.0357142857142856,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_3,6.558969789132269,110,3.090909090909091,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_4,6.517085916774841,116,3.706896551724138,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_5,6.294759026571986,111,2.612612612612613,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_6,6.7866575922960015,110,3.090909090909091,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_7,6.270822547397249,112,3.0357142857142856,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_8,6.709071457458815,109,2.293577981651376,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_9,6.391409133573783,118,3.220338983050848,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_10,6.53017550198762,114,2.631578947368421,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_11,6.097267931768916,107,2.242990654205608,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_12,6.121994662837083,106,1.981132075471698,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_13,6.40993128487491,106,3.207547169811321,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_14,6.342085627435578,115,3.739130434782609,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_15,6.3009359218164,105,2.0,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_16,6.473226702238457,107,2.710280373831776,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_17,6.333525062066103,109,2.293577981651376,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_18,6.516078635135073,95,2.1052631578947367,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_19,6.915356364211333,110,3.090909090909091,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_20,6.134321314580186,100,2.0,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_21,6.632920461685216,100,2.0,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_22,6.401914784474136,115,3.391304347826087,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_23,6.502950039383456,114,3.333333333333333,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_24,6.551299347562678,108,2.685185185185185,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_25,6.226709118669644,88,1.818181818181818,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_26,6.443773501513425,115,3.391304347826087,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_27,6.264225910418955,96,2.1875,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_28,6.2936371215487,109,3.1192660550458715,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_29,6.631860731184055,107,2.710280373831776,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_30,6.437072938011367,115,3.391304347826087,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_31,6.268152117056628,111,2.612612612612613,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_32,6.5005617903765565,115,3.3043478260869565,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_33,6.304440645681714,113,3.008849557522124,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_34,6.337326282390729,117,3.247863247863248,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_35,6.526731824580911,111,2.702702702702702,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_36,6.439000033767568,107,2.803738317757009,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_37,6.509308497822134,111,2.702702702702702,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_38,6.550810806512634,115,2.869565217391304,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_39,6.710464368614626,112,2.946428571428572,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_40,6.585656044291812,112,3.0357142857142856,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_41,5.946239491540905,108,2.685185185185185,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_42,6.63920215949238,116,2.931034482758621,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_43,6.436551594459155,114,2.982456140350877,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_44,6.554042504739579,104,2.4038461538461537,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_45,6.4188396700811206,100,2.1,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_46,6.456792040490591,113,3.008849557522124,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_47,6.501563423255905,119,3.613445378151261,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_48,6.457668792791391,113,3.4513274336283186,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_49,6.205015267682072,108,2.7777777777777777,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_50,6.223851000035922,113,3.008849557522124,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_51,6.241016218214569,85,1.8823529411764703,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_52,6.713179999214253,113,3.008849557522124,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_53,6.624943557976708,117,3.247863247863248,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_54,6.706463130894923,106,2.7358490566037736,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_55,6.557573111091055,112,3.0357142857142856,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_56,6.25588701760133,105,2.2857142857142856,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_57,6.390906938973307,111,2.972972972972973,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_58,6.5892669311744365,108,2.314814814814815,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_59,6.578763860846853,83,1.927710843373494,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_60,6.425902929714907,101,2.4752475247524752,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_61,6.445741542848219,116,3.2758620689655173,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_62,6.520016411862069,115,3.3043478260869565,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_63,6.6078343470990415,108,2.7777777777777777,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_64,6.655549916221174,107,2.336448598130841,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_65,6.439388496761972,110,2.636363636363636,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_66,6.28634534081741,118,3.6440677966101696,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_67,6.3775016128194055,119,4.033613445378151,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_68,6.435344619337145,113,3.008849557522124,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_69,6.659606741965298,115,2.9565217391304346,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_70,6.101838791772453,70,1.7142857142857142,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_71,6.466703893732212,106,3.207547169811321,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_72,6.434894423110542,113,2.2123893805309733,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_73,6.701328985633068,106,2.358490566037736,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_74,6.363585036400288,107,2.710280373831776,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_75,6.335754814968614,106,2.7358490566037736,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_76,6.488793908157716,95,2.1052631578947367,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_77,6.229179801811666,117,2.905982905982906,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_78,6.552722548388151,115,3.739130434782609,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_79,6.600363366345561,113,3.008849557522124,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_80,6.390890940007068,117,3.333333333333333,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_81,6.011952359245268,97,1.649484536082474,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_82,6.79266214194992,117,3.247863247863248,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_83,6.512377458351784,113,3.008849557522124,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_84,6.554624870216761,104,2.4038461538461537,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_85,6.304081924410833,104,2.4038461538461537,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_86,6.084725033014232,99,2.0202020202020203,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_87,6.581866609871543,113,3.008849557522124,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_88,6.125919723031912,104,2.7884615384615383,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_89,6.877318931577396,112,2.5892857142857144,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_90,6.38184782462648,99,2.0202020202020203,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_91,6.381156643044343,115,3.739130434782609,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_92,6.411834513123822,113,3.008849557522124,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_93,6.333651521843114,86,1.8604651162790693,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_94,6.44635108640869,97,2.164948453608248,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_95,6.594348049639716,107,2.336448598130841,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_96,6.346371964729233,101,2.4752475247524752,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_97,6.83968603775117,98,2.0408163265306123,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_98,6.655820137271994,110,2.727272727272727,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_99,6.512579854834623,104,2.4038461538461537,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_100,6.511110556477551,113,2.566371681415929,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_101,6.29420142658918,112,2.6785714285714284,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_102,6.694209058237194,101,2.4752475247524752,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_103,6.432350083827105,115,3.3043478260869565,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_104,6.549583376039205,84,1.9047619047619049,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_105,6.1952791500083775,110,2.636363636363636,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_106,6.735750690546452,118,3.305084745762712,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_107,6.597605251946908,107,2.336448598130841,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_108,6.62563626802026,107,2.336448598130841,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_109,6.167484833856392,96,2.1875,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_110,6.456751756859244,105,2.380952380952381,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_111,6.65290710770212,107,2.803738317757009,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_112,6.585197522326153,97,2.061855670103093,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_113,6.244731560292864,113,3.008849557522124,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_114,6.584124108744752,95,2.1052631578947367,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_115,6.233811467789697,108,2.314814814814815,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_116,6.738939647494926,96,2.083333333333333,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_117,6.232753825662029,108,2.314814814814815,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_118,6.428179891965952,81,1.4814814814814814,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_119,6.362420001964183,107,2.616822429906542,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_120,6.527856378758503,115,2.9565217391304346,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_121,6.393587446354854,118,4.067796610169491,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_122,6.497971161375468,118,3.305084745762712,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_123,6.58524644143681,115,2.608695652173913,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_124,6.550290919351598,104,2.019230769230769,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_125,6.493100143041487,106,2.358490566037736,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_126,6.824653205126452,110,2.636363636363636,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_127,6.569223309600893,114,3.333333333333333,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_128,6.525745556978404,98,2.0408163265306123,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_129,6.247174197056853,115,3.739130434782609,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_130,6.447993462353158,104,2.3076923076923075,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_131,6.542067199369134,113,2.920353982300885,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_132,6.633903644948248,110,2.636363636363636,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_133,6.23778995489042,117,3.247863247863248,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_134,6.571201943081984,116,3.362068965517241,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_135,6.070922763696463,95,2.1052631578947367,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_136,6.574791896968424,116,2.931034482758621,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_137,6.2106852108717945,106,2.830188679245283,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_138,6.725607674195118,115,2.869565217391304,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_139,6.290095777390014,112,3.392857142857143,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_140,6.559716867819772,105,2.761904761904762,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_141,6.355705157048277,107,2.336448598130841,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_142,6.061470427788829,112,3.0357142857142856,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_143,6.719928981387074,113,2.920353982300885,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_144,6.596152350926673,104,2.3076923076923075,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_145,6.860762950032572,97,2.164948453608248,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_146,6.605385288831468,110,2.636363636363636,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_147,6.380054596505877,111,2.612612612612613,Low,Pass,0.85,Maintain current performance and steady engagement.
+S_148,6.488710656598899,109,2.293577981651376,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_149,6.361784285930565,113,3.008849557522124,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_150,6.47074544462258,107,2.710280373831776,High,Fail,0.25,Immediate intervention needed. Increase engagement and seek academic support.
+S_151,3.184054989762944,53,1.3457943925233644,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_152,3.6140268033701264,52,1.2,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_153,4.264155635126163,47,1.263157894736842,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_154,4.409840287523384,50,1.2,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_155,3.0151979492540115,44,1.0909090909090908,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_156,2.594658465069646,48,1.3125,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_157,2.543364758713864,42,1.1294117647058823,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_158,4.354136549673992,52,1.3714285714285712,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_159,3.24723923189092,54,1.3888888888888888,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_160,4.1376257971906,41,1.1566265060240963,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_161,4.056488219865046,53,1.4018691588785046,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_162,4.178393548683304,35,1.0285714285714285,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_163,2.73681958209869,47,1.263157894736842,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_164,2.526941787243812,49,1.2121212121212122,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_165,3.6360471958985054,53,1.4018691588785046,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_166,4.322432250135885,49,1.2244897959183674,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_167,2.9506483923302573,52,1.4423076923076923,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_168,2.5100472944984604,48,1.3125,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_169,3.1480384458619866,48,1.2371134020618555,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_170,3.218833659383246,47,1.263157894736842,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_171,2.6889983225211287,40,0.8888888888888888,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_172,2.8551595710575963,49,1.2244897959183674,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_173,3.659463736755772,47,1.263157894736842,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_174,3.0638273030240644,52,1.3846153846153844,Medium,At Risk,0.55,Increase consistency and focus on weak topics.
+S_175,4.338389881646459,48,1.2989690721649485,Medium,At Risk,0.55,Increase consistency and focus on weak topics.

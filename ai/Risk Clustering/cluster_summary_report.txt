@@ -1,0 +1,15 @@
+Risk Level: Low Risk
+Students: 85
+Profile: Consistent engagement with strong performance
+Recommendation: Maintain current study habits. Explore advanced materials and optional challenges.
+--------------------------------------------------
+Risk Level: High Risk
+Students: 25
+Profile: Low engagement, poor performance, and high academic risk
+Recommendation: Immediate intervention needed. Reduce procrastination, review fundamentals, and seek academic support.
+--------------------------------------------------
+Risk Level: Medium Risk
+Students: 65
+Profile: Moderate engagement with signs of inconsistency
+Recommendation: Increase consistency. Focus on weak topics and follow a structured study plan.
+--------------------------------------------------

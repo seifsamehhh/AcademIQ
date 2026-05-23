@@ -1,0 +1,4 @@
+risk_cluster,risk_level,student_count,avg_total_time_spent,avg_access_frequency,avg_active_days,avg_quiz_score,avg_assignment_score,avg_failed_courses,avg_late_submission_ratio,behavioral_profile,recommended_action
+0,Low Risk,85,162451.54,3.09,112.91,6.49,6.92,0.66,0.22,Consistent engagement with strong performance,Maintain current study habits. Explore advanced materials and optional challenges.
+1,High Risk,25,45657.07,1.25,48.0,3.41,3.9,2.0,0.7,"Low engagement, poor performance, and high academic risk","Immediate intervention needed. Reduce procrastination, review fundamentals, and seek academic support."
+2,Medium Risk,65,107330.22,2.26,101.43,6.42,7.04,1.14,0.23,Moderate engagement with signs of inconsistency,Increase consistency. Focus on weak topics and follow a structured study plan.

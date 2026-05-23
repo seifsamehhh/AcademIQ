@@ -1,0 +1,31 @@
+{
+    "student_id": "hashed_id",
+    "total_time_spent": 0,
+    "active_days": 0,
+    "access_frequency": 0,
+    "avg_quiz_score": 0.1,
+    "quiz_score_std": 0.1,
+    "avg_assignment_score": 0.3,
+    "late_submission_ratio": 0.7,
+    "risk_cluster": 2,
+    "risk_cluster_encoded": 2,
+    "avg_final_grade": 0,
+    "courses": [
+      {
+        "course_name": "Course Title",
+        "assignments": [
+          {
+            "name": "Assignment Name",
+            "due_date": "YYYY-MM-DD",
+            "grade": "15/20"
+          }
+        ]
+      }
+    ]
+    
+
+    
+    
+  }
+  
+  

@@ -1,0 +1,81 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+
+# ── Virtual environments ─────────────────────────────────
+venv/
+env/
+.venv/
+.env/
+ENV/
+
+# ── Secrets & credentials ────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.secret
+secrets.json
+
+# ── ML artifacts ─────────────────────────────────────────
+*.pkl
+*.joblib
+*.keras
+*.h5
+*.pt
+*.pth
+
+# ── Node / Frontend ──────────────────────────────────────
+node_modules/
+.pnp
+.pnp.js
+dist/
+build/
+.next/
+.nuxt/
+.cache/
+*.tsbuildinfo
+
+# ── Test & coverage ──────────────────────────────────────
+.coverage
+coverage/
+htmlcov/
+.pytest_cache/
+.vitest/
+
+# ── IDEs ─────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS ───────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs ─────────────────────────────────────────────────
+*.log
+logs/
+
+# -- Session / audit docs
+ACADEMIQ_COMPLETE_GUIDE.md
+AUDIT_REPORT.md
+
+# -- Archives
+*.zip
