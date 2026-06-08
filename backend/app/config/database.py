@@ -1,64 +1,104 @@
-import sys
+"""
+MongoDB connection for AcademIQ.
+
+Uses lazy initialization so Vercel serverless builds and cold starts do not
+call sys.exit() when the database is temporarily unreachable or env vars are
+absent at build time.
+"""
+
+from __future__ import annotations
 
 import certifi
 from pymongo import ASCENDING, MongoClient
 from pymongo.server_api import ServerApi
 
-from app.config.settings import MONGODB_URI, MONGODB_DB_NAME
+from app.config.settings import MONGODB_DB_NAME, MONGODB_URI
 
-if not MONGODB_URI:
-    print("[ERROR] MONGODB_URI is not set. Copy backend/.env.example to backend/.env")
-    sys.exit(1)
+client: MongoClient | None = None
+db = None
 
-uri = MONGODB_URI
+collection_name = None
+assignments_collection = None
+sessions_collection = None
+quizzes_collection = None
+courses_collection = None
+raw_moodle_payload_collection = None
+feature_vectors_collection = None
+ml_results_collection = None
+auth_sessions_collection = None
+users_collection = None
+user = None
+course_materials_collection = None
+student_metrics_collection = None
+student_events_collection = None
 
-# Use certifi's CA bundle for the TLS handshake. Atlas connections on Windows/
-# macOS often fail with TLS errors when the OS cert store is stale; certifi
-# avoids that. (Plain-ASCII logs below — emoji crash cp1252 Windows consoles.)
-try:
-    client = MongoClient(uri, server_api=ServerApi("1"), tlsCAFile=certifi.where())
-    # Force a connection to verify
-    client.admin.command("ping")
-    print("[OK] Connected to MongoDB Atlas!")
-except Exception as e:
-    print(f"[ERROR] MongoDB connection failed: {e}")
-    sys.exit(1)   # Stop the app if DB is unreachable
+_initialized = False
 
-db = client[MONGODB_DB_NAME]
 
-# Collections
-collection_name = db["AcademIQ"]
-assignments_collection = db["assignments_collection"]
-sessions_collection = db["sessions_collection"]
-quizzes_collection = db["quizzes_collection"]
-courses_collection = db["courses_collection"]
-raw_moodle_payload_collection = db["raw_moodle_payload_collection"]
-feature_vectors_collection = db["feature_vectors"]
-ml_results_collection = db["ml_results"]
-auth_sessions_collection = db["sessions"]   # for auth session tokens
+def connect_database() -> bool:
+    """Connect to MongoDB and bind collection handles. Safe to call repeatedly."""
+    global client, db, _initialized
+    global collection_name, assignments_collection, sessions_collection
+    global quizzes_collection, courses_collection, raw_moodle_payload_collection
+    global feature_vectors_collection, ml_results_collection, auth_sessions_collection
+    global users_collection, user, course_materials_collection
+    global student_metrics_collection, student_events_collection
 
-# AcademIQ user accounts (admins + students). `users_collection` is the
-# canonical name used throughout the new auth/admin code; `user` is kept as a
-# backwards-compatible alias for any older references.
-users_collection = db["users"]
-user = users_collection
+    if _initialized and client is not None:
+        return True
 
-# Normalized Moodle-data collections (see services/moodle_ingest.py). Materials
-# are stored ONCE here instead of being duplicated inside each student payload.
-course_materials_collection = db["course_materials"]   # canonical materials
-student_metrics_collection = db["student_metrics"]     # per-(user,course) metrics
-student_events_collection = db["student_events"]       # per-user event stream
+    if not MONGODB_URI:
+        print("[WARN] MONGODB_URI is not set — database calls will fail until configured.")
+        return False
+
+    try:
+        client = MongoClient(
+            MONGODB_URI,
+            server_api=ServerApi("1"),
+            tlsCAFile=certifi.where(),
+        )
+        client.admin.command("ping")
+        db = client[MONGODB_DB_NAME]
+
+        collection_name = db["AcademIQ"]
+        assignments_collection = db["assignments_collection"]
+        sessions_collection = db["sessions_collection"]
+        quizzes_collection = db["quizzes_collection"]
+        courses_collection = db["courses_collection"]
+        raw_moodle_payload_collection = db["raw_moodle_payload_collection"]
+        feature_vectors_collection = db["feature_vectors"]
+        ml_results_collection = db["ml_results"]
+        auth_sessions_collection = db["sessions"]
+        users_collection = db["users"]
+        user = users_collection
+        course_materials_collection = db["course_materials"]
+        student_metrics_collection = db["student_metrics"]
+        student_events_collection = db["student_events"]
+
+        _initialized = True
+        print("[OK] Connected to MongoDB Atlas!")
+        return True
+    except Exception as exc:
+        print(f"[ERROR] MongoDB connection failed: {exc}")
+        client = None
+        db = None
+        _initialized = False
+        return False
+
+
+def ensure_database() -> None:
+    """Raise RuntimeError if the database is not connected."""
+    if not connect_database() or users_collection is None:
+        raise RuntimeError(
+            "Database unavailable. Set MONGODB_URI and ensure MongoDB Atlas is reachable."
+        )
+
+
+# Best-effort connect at import for local uvicorn; never exits the process.
+connect_database()
 
 
 def _ensure_unique_partial(field: str, name: str) -> None:
-    """
-    Create a unique index that only applies when `field` is a string.
-
-    A *partial* index (not sparse) is required because we store explicit nulls
-    for unset identifiers, and a sparse unique index still collides on
-    present-but-null values — only a partialFilterExpression excludes them. Drops
-    and recreates if an older (sparse) index with the same name exists.
-    """
     spec = dict(
         unique=True,
         partialFilterExpression={field: {"$type": "string"}},
@@ -67,7 +107,6 @@ def _ensure_unique_partial(field: str, name: str) -> None:
     try:
         users_collection.create_index([(field, ASCENDING)], **spec)
     except Exception:
-        # Conflicting older index definition — drop and recreate.
         try:
             users_collection.drop_index(name)
         except Exception:
@@ -76,38 +115,34 @@ def _ensure_unique_partial(field: str, name: str) -> None:
 
 
 def ensure_indexes() -> None:
-    """
-    Create the indexes the auth/identity-mapping layer relies on. Safe to call
-    repeatedly. Invoked on app startup from main.py.
-    """
-    # Email is the login identifier — must be unique.
+    """Create auth/identity indexes. Idempotent — safe on every cold start."""
+    if not connect_database():
+        raise RuntimeError("Cannot ensure indexes — database not connected")
+
     users_collection.create_index([("email", ASCENDING)], unique=True, name="uniq_email")
-    # Moodle identity linkage keys — unique only among real (string) values, so
-    # any number of accounts may have a null moodle_user_id / student_id.
     _ensure_unique_partial("moodle_user_id", "uniq_moodle_user_id")
     _ensure_unique_partial("student_id", "uniq_student_id")
-    # Session token lookups + TTL-style expiry housekeeping.
-    auth_sessions_collection.create_index([("token_hash", ASCENDING)], unique=True, name="uniq_token_hash")
+    auth_sessions_collection.create_index(
+        [("token_hash", ASCENDING)], unique=True, name="uniq_token_hash"
+    )
     auth_sessions_collection.create_index([("expires_at", ASCENDING)], name="session_expiry")
 
-    # Normalized Moodle data — uniqueness keys that guarantee a material/metric/
-    # event is stored exactly once (the dedup contract for ingestion).
     course_materials_collection.create_index(
         [("course_id", ASCENDING), ("material_id", ASCENDING)],
-        unique=True, name="uniq_course_material",
+        unique=True,
+        name="uniq_course_material",
     )
     student_metrics_collection.create_index(
         [("academiq_user_id", ASCENDING), ("course_id", ASCENDING)],
-        unique=True, name="uniq_user_course_metrics",
+        unique=True,
+        name="uniq_user_course_metrics",
     )
     student_events_collection.create_index(
         [("academiq_user_id", ASCENDING), ("event_id", ASCENDING)],
-        unique=True, name="uniq_user_event",
+        unique=True,
+        name="uniq_user_event",
     )
 
-    # One current snapshot per student — re-syncs update the same document
-    # rather than inserting a new one. Partial filter so legacy docs without the
-    # field don't collide.
     for coll, name in (
         (raw_moodle_payload_collection, "uniq_raw_user"),
         (feature_vectors_collection, "uniq_feature_user"),

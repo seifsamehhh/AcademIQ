@@ -7,10 +7,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import os
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from app.config.database import client, ensure_indexes
+from app.config.database import client, connect_database, ensure_indexes
 from app.config.settings import ALLOWED_ORIGINS
 from app.routes import moodle, auth, admin, student_data
 
@@ -26,10 +27,19 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def ensure_db_connection(request: Request, call_next):
+    """Reconnect on serverless cold starts before auth/data routes run."""
+    if request.url.path not in ("/health", "/"):
+        connect_database()
+    return await call_next(request)
+
+
 @app.on_event("startup")
 def _startup():
     try:
-        ensure_indexes()
+        if connect_database():
+            ensure_indexes()
     except Exception as exc:
         print(f"Could not ensure indexes: {exc}")
 
@@ -57,13 +67,15 @@ def root():
 
 @app.get("/health")
 def health():
-    """Liveness probe for Render — always returns 200 when the process is up."""
+    """Liveness probe — always 200 when the serverless function is running."""
     return {"status": "ok"}
 
 
 @app.get("/health/db")
 def health_db():
-    """Optional readiness probe — verifies MongoDB connectivity."""
+    """Readiness probe — verifies MongoDB connectivity."""
+    if not connect_database() or client is None:
+        raise HTTPException(status_code=503, detail="Database unreachable")
     try:
         client.admin.command("ping")
         return {"status": "ok", "database": "connected"}
@@ -71,7 +83,12 @@ def health_db():
         raise HTTPException(status_code=503, detail=f"Database unreachable: {e}")
 
 
-# Core routers — always available (student JWT auth + dashboard results).
+@app.exception_handler(RuntimeError)
+async def runtime_error_handler(_request: Request, exc: RuntimeError):
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+# Core routers — student JWT auth + dashboard results (no ML required).
 app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(moodle.router)
@@ -81,7 +98,7 @@ from app.routes.student import demo_router as student_demo_router
 
 app.include_router(student_demo_router)
 
-# ML routers are optional — not loaded when ML deps are absent (auth-only deploy).
+# ML routers optional — skipped on Vercel auth-only deploy (no heavy deps/models).
 try:
     from app.routes import student, performance
 

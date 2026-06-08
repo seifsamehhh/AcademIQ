@@ -2,7 +2,7 @@
 Centralised, environment-driven configuration for the AcademIQ backend.
 
 Copy `backend/.env.example` to `backend/.env` for local development.
-In production (Render), set all required variables in the service dashboard.
+In production (Vercel), set all required variables in the Vercel project dashboard.
 
 If `python-dotenv` is installed, a local `.env` is loaded automatically.
 """
@@ -37,7 +37,7 @@ def _get_int(name: str, default: int) -> int:
 
 
 # --- Environment ------------------------------------------------------------
-# "development" enables local-only defaults. Set to "production" on Render.
+# "development" enables local-only defaults. Set to "production" on Vercel.
 ENVIRONMENT: str = _get("ENVIRONMENT", "development").lower()
 
 _DEV_JWT_SECRET = "DEV-ONLY-change-me-in-production-academiq-jwt-secret"

@@ -1,7 +1,5 @@
-# AcademIQ backend — auth + student dashboard deploy (Render / Vercel stack)
-# Install: pip install -r requirements.txt
-#
-# For the full ML + quiz stack locally, use: pip install -r requirements-full.txt
+# AcademIQ backend — auth + student dashboard (Vercel serverless / local uvicorn)
+# Local full ML stack: pip install -r requirements-full.txt
 
 fastapi
 uvicorn[standard]
