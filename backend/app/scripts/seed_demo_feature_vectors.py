@@ -42,6 +42,13 @@ PERFORMANCE_V4_FEATURES = (
 )
 
 # student_id -> course_id (string) -> behavioural features (demo-only, not Moodle sync)
+#
+# Coverage must match every visible demo course in seed_students.DEMO_COURSE_METRICS:
+#   student1: 101 Programming, 102 Database
+#   student2: 101 Programming, 102 Database, 103 Web Dev
+#
+# Tuned for varied, realistic ML outputs (~38–58 predicted grade); student2/101 is
+# intentionally the weakest visible course (At Risk band, not single-digit scores).
 DEMO_COURSE_FEATURE_VECTORS: Dict[str, Dict[str, Dict[str, float | int]]] = {
     "student1": {
         "101": {
@@ -56,42 +63,56 @@ DEMO_COURSE_FEATURE_VECTORS: Dict[str, Dict[str, Dict[str, float | int]]] = {
             "late_submission_count": 0,
         },
         "102": {
-            "all_clicks": 120,
-            "active_days": 18,
-            "access_frequency": 2.8,
-            "material_clicks": 48,
-            "quiz_attempts": 7,
+            "all_clicks": 130,
+            "active_days": 20,
+            "access_frequency": 3.1,
+            "material_clicks": 52,
+            "quiz_attempts": 8,
             "assignment_submissions": 5,
-            "total_time_spent": 36_000,
-            "procrastination_index": 3.5,
+            "total_time_spent": 38_400,
+            "procrastination_index": 2.8,
             "late_submission_count": 1,
         },
     },
     "student2": {
         "101": {
-            "all_clicks": 42,
-            "active_days": 7,
-            "access_frequency": 0.9,
-            "material_clicks": 14,
-            "quiz_attempts": 2,
-            "assignment_submissions": 1,
-            "total_time_spent": 7_200,
-            "procrastination_index": 7.8,
-            "late_submission_count": 3,
+            "all_clicks": 88,
+            "active_days": 13,
+            "access_frequency": 1.7,
+            "material_clicks": 30,
+            "quiz_attempts": 4,
+            "assignment_submissions": 3,
+            "total_time_spent": 15_000,
+            "procrastination_index": 4.8,
+            "late_submission_count": 2,
         },
         "102": {
-            "all_clicks": 95,
-            "active_days": 15,
-            "access_frequency": 2.2,
-            "material_clicks": 38,
+            "all_clicks": 98,
+            "active_days": 16,
+            "access_frequency": 2.4,
+            "material_clicks": 40,
             "quiz_attempts": 6,
             "assignment_submissions": 4,
-            "total_time_spent": 28_800,
-            "procrastination_index": 4.0,
+            "total_time_spent": 30_600,
+            "procrastination_index": 3.8,
             "late_submission_count": 1,
+        },
+        "103": {
+            "all_clicks": 148,
+            "active_days": 24,
+            "access_frequency": 3.8,
+            "material_clicks": 58,
+            "quiz_attempts": 10,
+            "assignment_submissions": 7,
+            "total_time_spent": 46_800,
+            "procrastination_index": 1.8,
+            "late_submission_count": 0,
         },
     },
 }
+
+# Visible demo courses without a seeded vector (intentionally empty — document here if any).
+DEMO_COURSES_WITHOUT_FEATURE_VECTORS: Dict[str, list[str]] = {}
 
 
 def _course_feature_payload(
@@ -123,10 +144,31 @@ def _merge_course_features(
     return merged
 
 
+def _validate_demo_course_coverage() -> None:
+    """Ensure every visible demo course has a seeded feature vector definition."""
+    from app.scripts.seed_students import DEMO_COURSE_METRICS
+
+    missing: list[str] = []
+    for student_id, courses in DEMO_COURSE_METRICS.items():
+        for course in courses:
+            course_id = str(course["course_id"])
+            course_name = course.get("course_name", course_id)
+            if course_id in (DEMO_COURSES_WITHOUT_FEATURE_VECTORS.get(student_id) or []):
+                continue
+            if course_id not in (DEMO_COURSE_FEATURE_VECTORS.get(student_id) or {}):
+                missing.append(f"{student_id} course {course_id} ({course_name})")
+    if missing:
+        raise RuntimeError(
+            "Missing demo feature vector definitions for visible courses: "
+            + ", ".join(missing)
+        )
+
+
 def seed_demo_feature_vectors() -> None:
     if not connect_database():
         raise RuntimeError("Cannot seed feature vectors — database connection failed")
 
+    _validate_demo_course_coverage()
     ensure_indexes()
     now = datetime.now(timezone.utc)
     seeded_count = 0
