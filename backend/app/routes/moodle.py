@@ -135,6 +135,15 @@ async def post_raw_moodle_payload(payload: Dict[str, Any], background_tasks: Bac
         raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
 
 
+# Alias for clients that call /api/raw-moodle-payloads (same handler, no logic change).
+router.add_api_route(
+    "/api/raw-moodle-payloads",
+    post_raw_moodle_payload,
+    methods=["POST"],
+    name="post_raw_moodle_payload_api_alias",
+)
+
+
 # PUT: update raw payload by id (accepts any JSON, no validation)
 @router.put("/raw-moodle-payloads/{id}")
 async def put_raw_moodle_payload(id: str, payload: Dict[str, Any]):

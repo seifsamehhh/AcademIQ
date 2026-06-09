@@ -1,16 +1,33 @@
 const STORAGE_KEY = "moodleData";
-const DEFAULT_BACKEND = "https://academiq-backend.vercel.app/raw-moodle-payloads";
+const PRODUCTION_API_BASE = "https://academiq-backend.vercel.app";
+const SYNC_PATH = "/raw-moodle-payloads";
+const CONTENT_PATH = "/materials/content";
 
-let BACKEND_URL = DEFAULT_BACKEND;
-let CONTENT_URL = BACKEND_URL.replace(/\/raw-moodle-payloads$/, "/materials/content");
+/** Always POST to {base}/raw-moodle-payloads even if storage holds base URL only. */
+const normalizeApiBase = (url) => {
+    const raw = (url || PRODUCTION_API_BASE).trim().replace(/\/$/, "");
+    return raw
+        .replace(/\/raw-moodle-payloads\/?$/, "")
+        .replace(/\/materials\/content\/?$/, "");
+};
+
+const buildBackendUrls = (apiBase) => {
+    const base = normalizeApiBase(apiBase);
+    return {
+        sync: `${base}${SYNC_PATH}`,
+        content: `${base}${CONTENT_PATH}`,
+    };
+};
+
+let BACKEND_URL = buildBackendUrls(PRODUCTION_API_BASE).sync;
+let CONTENT_URL = buildBackendUrls(PRODUCTION_API_BASE).content;
 
 const loadBackendConfig = () =>
     new Promise((resolve) => {
         chrome.storage.local.get(["backendUrl"], (res) => {
-            if (res.backendUrl) {
-                BACKEND_URL = res.backendUrl;
-                CONTENT_URL = BACKEND_URL.replace(/\/raw-moodle-payloads$/, "/materials/content");
-            }
+            const urls = buildBackendUrls(res.backendUrl || PRODUCTION_API_BASE);
+            BACKEND_URL = urls.sync;
+            CONTENT_URL = urls.content;
             resolve();
         });
     });
