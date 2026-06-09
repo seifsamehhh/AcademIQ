@@ -113,6 +113,11 @@ SMTP_FROM: str = _get("SMTP_FROM", "AcademIQ <no-reply@academiq.local>")
 SMTP_USE_TLS: bool = _get_bool("SMTP_USE_TLS", True)
 EMAIL_ENABLED: bool = bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD)
 
+# --- External ML service (Hugging Face Docker Space) ------------------------
+# e.g. https://seif-academiq-academiq-ml-service.hf.space (no trailing slash)
+ML_SERVICE_URL: str = _get("ML_SERVICE_URL", "").rstrip("/")
+ML_SERVICE_TIMEOUT_SECONDS: int = _get_int("ML_SERVICE_TIMEOUT_SECONDS", 5)
+
 # --- Bootstrap scripts (optional, idempotent) -------------------------------
 BOOTSTRAP_STUDENTS: bool = _get_bool("BOOTSTRAP_STUDENTS", False)
 

@@ -17,6 +17,7 @@ from app.config.database import (
     raw_moodle_payload_collection,
 )
 from app.repositories import material_repository, metrics_repository
+from app.services.ml_service_client import ml_service_configured, predict_performance_remote
 from app.services.moodle_ingest import is_real_course
 
 _OVERALL = metrics_repository.OVERALL
@@ -327,33 +328,49 @@ def get_performance(user_id: str, course_id: str) -> Dict[str, Any]:
     has_grade_data = course_avg is not None
 
     feats = _latest_features(user_id)
-    stack_ready = _ml_stack_available()
     has_feature_data = _has_ml_feature_data(feats)
-    perf = None
-    grade = None
-    if stack_ready and has_feature_data:
-        perf = _predict(feats)
-        grade = _predict_grade(feats)
+    stack_ready = _ml_stack_available()
+    service_ready = ml_service_configured()
 
-    used_model = bool(perf or grade)
     predicted: int | None = None
     status: str | None = None
+    probability: float | None = None
+    confidence: float | None = None
+    used_model = False
 
-    if used_model:
-        if grade and grade.get("predicted_grade") is not None:
-            predicted = round(grade["predicted_grade"])
-        elif course_avg is not None:
-            predicted = round(course_avg)
-        elif perf:
-            predicted = round((perf.get("probability", 0) or 0) * 100)
+    if has_feature_data and service_ready:
+        remote = predict_performance_remote(feats)
+        if remote:
+            used_model = True
+            predicted = remote.get("predictedGrade")
+            if predicted is not None:
+                predicted = int(round(float(predicted)))
+            status = remote.get("status")
+            probability = remote.get("probability")
+            confidence = remote.get("confidence")
+    elif has_feature_data and stack_ready:
+        # Local-only fallback when ML_SERVICE_URL is unset (dev with full deps).
+        perf = _predict(feats)
+        grade = _predict_grade(feats)
+        if perf or grade:
+            used_model = True
+            if grade and grade.get("predicted_grade") is not None:
+                predicted = round(grade["predicted_grade"])
+            elif course_avg is not None:
+                predicted = round(course_avg)
+            elif perf:
+                predicted = round((perf.get("probability", 0) or 0) * 100)
+                probability = perf.get("probability")
 
-        if perf:
-            prob = perf.get("probability", 0) or 0
-            status = "Good" if prob >= 0.5 else "Average" if prob >= 0.4 else "At Risk"
-        elif predicted is not None:
-            status = (
-                "Good" if predicted >= 75 else "Average" if predicted >= 60 else "At Risk"
-            )
+            if perf:
+                prob = perf.get("probability", 0) or 0
+                probability = prob
+                confidence = round(prob * 100, 1)
+                status = "Good" if prob >= 0.5 else "Average" if prob >= 0.4 else "At Risk"
+            elif predicted is not None:
+                status = (
+                    "Good" if predicted >= 75 else "Average" if predicted >= 60 else "At Risk"
+                )
 
     total_seconds = metrics.get("total_time_spent_seconds", 0) or 0
     total_hours = round(total_seconds / 3600, 1)
@@ -393,13 +410,15 @@ def get_performance(user_id: str, course_id: str) -> Dict[str, Any]:
         },
         "engine": "ml" if used_model else "fallback",
         "mlAvailable": used_model,
+        "probability": probability,
+        "confidence": confidence,
         "message": (
             None
             if used_model
             else (
-                _ML_UNAVAILABLE_MESSAGE
-                if not stack_ready
-                else _ML_NO_FEATURES_MESSAGE
+                _ML_NO_FEATURES_MESSAGE
+                if not has_feature_data
+                else _ML_UNAVAILABLE_MESSAGE
             )
         ),
         "heuristic": not used_model,
