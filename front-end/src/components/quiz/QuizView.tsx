@@ -40,7 +40,7 @@ export function QuizView({ quiz }: { quiz: GeneratedQuiz }) {
   };
 
   return (
-    <div ref={topRef} className="scroll-mt-6 space-y-4">
+    <div ref={topRef} className="scroll-mt-6 space-y-6">
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between gap-4">
@@ -75,7 +75,7 @@ export function QuizView({ quiz }: { quiz: GeneratedQuiz }) {
         />
       ))}
 
-      <div className="pt-1">
+      <div className="pt-2">
         {submitted ? (
           <Button variant="outline" onClick={handleRetry}>
             Retry quiz

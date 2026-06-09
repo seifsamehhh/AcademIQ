@@ -11,37 +11,30 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-_MIN_DEFINITION_LEN = 12
-_MAX_DEFINITION_LEN = 220
+_MIN_DEFINITION_LEN = 20
+_MAX_DEFINITION_LEN = 160
+_MAX_OPTION_LEN = 110
 _MIN_QUESTIONS = 5
 
 _DEFINITION_PATTERNS = [
     re.compile(
-        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,7})\s+is\s+(?:a|an|the)\s+([^.\n]+?)\.",
+        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,5})\s+is\s+(?:a|an|the)\s+([^.\n]+?)\.",
         re.MULTILINE,
     ),
     re.compile(
-        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,7})\s+is\s+([^.\n]+?)\.",
+        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,5})\s+is\s+([^.\n]+?)\.",
         re.MULTILINE,
     ),
     re.compile(
-        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,7})\s+are\s+([^.\n]+?)\.",
+        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,5})\s+are\s+([^.\n]+?)\.",
         re.MULTILINE,
     ),
     re.compile(
-        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,7})\s+(?:refers to|means)\s+([^.\n]+?)\.",
-        re.IGNORECASE | re.MULTILINE,
-    ),
-    re.compile(
-        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,7})\s+involves\s+([^.\n]+?)\.",
-        re.IGNORECASE | re.MULTILINE,
-    ),
-    re.compile(
-        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,7})\s+consists of\s+([^.\n]+?)\.",
+        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,5})\s+(?:refers to|means)\s+([^.\n]+?)\.",
         re.IGNORECASE | re.MULTILINE,
     ),
 ]
@@ -58,6 +51,17 @@ _INVALID_CONCEPTS = {
     "academiq test content",
 }
 
+_GENERIC_DISTRACTORS = [
+    "A fixed hardware port used only for display output.",
+    "A manual paper form submitted outside the application.",
+    "An optional visual theme with no effect on program logic.",
+    "A deprecated protocol no longer used in modern systems.",
+    "A network cable standard unrelated to software design.",
+    "A spreadsheet macro that only formats cell colors.",
+    "A backup schedule that never interacts with source code.",
+    "A printer setting that controls page margins only.",
+]
+
 
 def _normalize_concept(raw: str) -> str:
     concept = re.sub(r"\s+", " ", raw.strip())
@@ -67,9 +71,45 @@ def _normalize_concept(raw: str) -> str:
 
 def _normalize_definition(raw: str) -> str:
     definition = re.sub(r"\s+", " ", raw.strip())
-    if definition.endswith(","):
-        definition = definition[:-1]
-    return definition.strip()
+    definition = definition.rstrip(",;:")
+    if definition and not definition.endswith("."):
+        definition += "."
+    return definition
+
+
+def _definition_option(concept: str, definition: str) -> str:
+    """Render a definition as a complete, readable MCQ option."""
+    body = definition.strip().rstrip(".")
+    body = re.sub(r"^(a|an|the)\s+", "", body, flags=re.IGNORECASE)
+    if len(concept.split()) == 1:
+        first_word = (body.split() or [""])[0].lower()
+        article = "an" if first_word[:1] in "aeiou" else "a"
+        text = f"{concept} is {article} {body}."
+    elif concept.split()[-1].lower().endswith("s"):
+        text = f"{concept} are {body}."
+    else:
+        text = f"{concept} refers to {body}."
+    return _format_option(text)
+
+
+def _format_option(text: str, *, max_len: int = _MAX_OPTION_LEN) -> str:
+    """Turn a definition fragment into a clean, complete option line."""
+    text = re.sub(r"\s+", " ", text.strip())
+    text = text.rstrip(",;:")
+    if not text:
+        return ""
+    if text[0].islower():
+        text = text[0].upper() + text[1:]
+    if not text.endswith("."):
+        text += "."
+    if len(text) <= max_len:
+        return text
+    cut = text[: max_len - 1].rsplit(" ", 1)[0]
+    return cut.rstrip(".,;") + "."
+
+
+def _option_key(text: str) -> str:
+    return re.sub(r"\s+", " ", text.lower().strip())[:90]
 
 
 def _valid_concept(concept: str) -> bool:
@@ -79,7 +119,7 @@ def _valid_concept(concept: str) -> bool:
     if lower in _INVALID_CONCEPTS:
         return False
     words = concept.split()
-    if len(words) > 6 or len(words) < 1:
+    if len(words) > 5 or len(words) < 1:
         return False
     if any(bad in lower for bad in ("introduction", "summary", "lecture", "seeded", "demo material")):
         return False
@@ -87,19 +127,18 @@ def _valid_concept(concept: str) -> bool:
         return False
     if re.search(r"\sA\s+[A-Z]", concept):
         return False
-    if " and " in lower and len(words) > 4:
+    if " and " in lower and len(words) > 3:
         return False
     if len(words) >= 2 and concept.lower().count(words[0].lower()) > 1:
-        return False
-    if not re.search(r"[A-Za-z]", concept):
         return False
     return True
 
 
 def _valid_definition(defn: str) -> bool:
-    if len(defn) < _MIN_DEFINITION_LEN or len(defn) > _MAX_DEFINITION_LEN:
+    core = defn.rstrip(".")
+    if len(core) < _MIN_DEFINITION_LEN or len(core) > _MAX_DEFINITION_LEN:
         return False
-    if len(defn.split()) < 4:
+    if len(core.split()) < 5:
         return False
     return True
 
@@ -129,12 +168,21 @@ def extract_definitions(text: str) -> List[Tuple[str, str]]:
     return pairs
 
 
-def _stable_shuffle(options: List[str], concept: str) -> Tuple[List[str], int]:
+def _question_prompt(concept: str) -> str:
+    words = concept.split()
+    if words and words[-1].lower().endswith("s") and len(words) <= 3:
+        return f"What are {concept}?"
+    article = "an" if concept[:1].lower() in "aeiou" else "a"
+    if len(words) == 1:
+        return f"What is {article} {concept}?"
+    return f"Which statement best describes {concept}?"
+
+
+def _stable_shuffle(options: List[str], salt: str) -> Tuple[List[str], int]:
     """Shuffle options deterministically; return list and correct index."""
     correct = options[0]
-    rest = options[1:]
-    seed = int(hashlib.md5(concept.encode()).hexdigest(), 16)
-    ordered = [correct] + rest
+    seed = int(hashlib.md5(salt.encode()).hexdigest(), 16)
+    ordered = list(options)
     for i in range(len(ordered) - 1, 0, -1):
         j = seed % (i + 1)
         seed //= (i + 1)
@@ -142,33 +190,33 @@ def _stable_shuffle(options: List[str], concept: str) -> Tuple[List[str], int]:
     return ordered, ordered.index(correct)
 
 
-def _distractors(
+def _pick_distractors(
     concept: str,
     correct: str,
     pool: List[Tuple[str, str]],
+    used_global: Set[str],
     n: int = 3,
 ) -> List[str]:
-    """Build wrong answers from other definitions in the same document."""
+    """Build distinct wrong answers from other concepts' definitions."""
+    correct_key = _option_key(correct)
     candidates: List[str] = []
+
     for other_concept, other_def in pool:
         if other_concept.lower() == concept.lower():
             continue
-        snippet = other_def if len(other_def) <= 120 else other_def[:117] + "..."
-        if snippet.lower() != correct.lower() and snippet not in candidates:
-            candidates.append(snippet)
+        option = _definition_option(other_concept, other_def)
+        key = _option_key(option)
+        if key == correct_key or key in used_global or option in candidates:
+            continue
+        candidates.append(option)
 
-    fillers = [
-        "A unrelated process that does not apply to this topic.",
-        "A deprecated technique no longer used in modern systems.",
-        "An optional cosmetic feature with no effect on program behavior.",
-        "A hardware component unrelated to software design.",
-        "A manual administrative task performed outside the application.",
-    ]
-    for filler in fillers:
+    for filler in _GENERIC_DISTRACTORS:
         if len(candidates) >= n:
             break
-        if filler.lower() != correct.lower():
-            candidates.append(filler)
+        option = _format_option(filler)
+        key = _option_key(option)
+        if key != correct_key and key not in used_global and option not in candidates:
+            candidates.append(option)
 
     return candidates[:n]
 
@@ -178,27 +226,36 @@ def _build_question(
     concept: str,
     definition: str,
     pool: List[Tuple[str, str]],
-    *,
-    reverse: bool = False,
+    used_global: Set[str],
 ) -> Dict[str, Any] | None:
-    distractors = _distractors(concept, definition, pool, n=3)
+    correct = _definition_option(concept, definition)
+    if not correct:
+        return None
+
+    distractors = _pick_distractors(concept, correct, pool, used_global, n=3)
     if len(distractors) < 3:
         return None
 
-    if reverse:
-        question = f"Which term is defined as: \"{definition[:140]}{'...' if len(definition) > 140 else ''}\"?"
-        correct_option = concept
-        wrong = [c for c, _ in pool if c.lower() != concept.lower()][:3]
-        while len(wrong) < 3:
-            wrong.append(f"Concept variant {len(wrong) + 1}")
-        options, correct_idx = _stable_shuffle([correct_option] + wrong[:3], concept + str(idx))
-    else:
-        question = f"Which statement best describes {concept}?"
-        options, correct_idx = _stable_shuffle([definition] + distractors, concept)
+    options_raw = [correct] + distractors
+    # Ensure four unique options inside the question.
+    unique: List[str] = []
+    seen_local: Set[str] = set()
+    for opt in options_raw:
+        key = _option_key(opt)
+        if key in seen_local:
+            continue
+        seen_local.add(key)
+        unique.append(opt)
+    if len(unique) < 4:
+        return None
+
+    options, correct_idx = _stable_shuffle(unique[:4], f"{concept}:{idx}")
+    for opt in options:
+        used_global.add(_option_key(opt))
 
     return {
         "id": f"q{idx}",
-        "question": question,
+        "question": _question_prompt(concept),
         "options": options,
         "correctIndex": correct_idx,
     }
@@ -216,26 +273,20 @@ def generate_lightweight(text: str, num_questions: int = 8) -> List[Dict[str, An
     pairs = extract_definitions(text)
     logger.info("Lightweight quiz gen: extracted %d definition pairs", len(pairs))
 
-    if len(pairs) < 2:
+    if len(pairs) < 4:
         logger.warning("Lightweight quiz gen: insufficient definitions (%d)", len(pairs))
         return []
 
-    target = max(_MIN_QUESTIONS, min(num_questions, len(pairs) * 2))
+    target = max(_MIN_QUESTIONS, min(num_questions, len(pairs)))
     questions: List[Dict[str, Any]] = []
+    used_global: Set[str] = set()
 
-    for i, (concept, definition) in enumerate(pairs):
+    for concept, definition in pairs:
         if len(questions) >= target:
             break
-        q = _build_question(len(questions) + 1, concept, definition, pairs, reverse=False)
-        if q:
-            questions.append(q)
-
-    for i, (concept, definition) in enumerate(pairs):
-        if len(questions) >= target:
-            break
-        q = _build_question(len(questions) + 1, concept, definition, pairs, reverse=True)
+        q = _build_question(len(questions) + 1, concept, definition, pairs, used_global)
         if q:
             questions.append(q)
 
     logger.info("Lightweight quiz gen: produced %d questions", len(questions))
-    return questions[:num_questions] if len(questions) >= _MIN_QUESTIONS else questions
+    return questions if len(questions) >= _MIN_QUESTIONS else []

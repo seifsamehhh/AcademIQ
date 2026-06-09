@@ -2,6 +2,7 @@
 
 import { Check, X } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { QuizQuestion } from "@/lib/types";
 
@@ -24,24 +25,34 @@ export function QuizQuestionCard({
   submitted,
   onSelect,
 }: Props) {
+  const answered = selectedIndex !== undefined;
+  const isCorrectSelection =
+    submitted && answered && selectedIndex === question.correctIndex;
+
   return (
     <Card>
-      <CardContent className="space-y-4 p-5 sm:p-6">
-        <p className="font-medium text-foreground">
-          <span className="mr-2 text-muted-foreground">{number}.</span>
+      <CardContent className="space-y-5 p-5 sm:p-6">
+        <p className="text-base font-medium leading-relaxed text-foreground">
+          <span className="mr-2 font-semibold text-primary">{number}.</span>
           {question.question}
         </p>
 
         <div
           role="radiogroup"
           aria-label={`Question ${number}`}
-          className="grid gap-2"
+          className="grid gap-3"
         >
           {question.options.map((option, oi) => {
             const selected = selectedIndex === oi;
-            const isCorrect = oi === question.correctIndex;
-            const showCorrect = submitted && isCorrect;
-            const showWrong = submitted && selected && !isCorrect;
+            const isCorrectOption = oi === question.correctIndex;
+
+            // Before submit: only show selection — never reveal the correct answer.
+            const showPreSubmitSelected = !submitted && selected;
+
+            // After submit: reveal correct answer and mark the student's choice.
+            const showAsCorrect =
+              submitted && isCorrectOption && (selected || !answered || !isCorrectSelection);
+            const showAsWrong = submitted && selected && !isCorrectOption;
 
             return (
               <button
@@ -52,19 +63,52 @@ export function QuizQuestionCard({
                 onClick={() => onSelect(oi)}
                 disabled={submitted}
                 className={cn(
-                  "flex items-center justify-between rounded-lg border px-4 py-3 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default",
-                  showCorrect && "border-success bg-success/10 text-success",
-                  showWrong && "border-destructive bg-destructive/10 text-destructive",
+                  "flex items-start justify-between gap-3 rounded-lg border px-4 py-3.5 text-left text-sm leading-relaxed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default",
+                  showPreSubmitSelected &&
+                    "border-primary bg-primary/5 ring-1 ring-primary/20",
                   !submitted &&
-                    (selected
-                      ? "border-primary bg-primary/5"
-                      : "border-border hover:bg-accent"),
-                  submitted && !showCorrect && !showWrong && "border-border",
+                    !selected &&
+                    "border-border bg-background hover:border-primary/30 hover:bg-accent/50",
+                  showAsCorrect &&
+                    "border-success bg-success/10 text-success",
+                  showAsWrong &&
+                    "border-destructive bg-destructive/10 text-destructive",
+                  submitted &&
+                    !showAsCorrect &&
+                    !showAsWrong &&
+                    "border-border bg-muted/30 text-muted-foreground",
                 )}
               >
-                <span>{option}</span>
-                {showCorrect && <Check className="h-4 w-4 shrink-0" />}
-                {showWrong && <X className="h-4 w-4 shrink-0" />}
+                <span className="flex-1">{option}</span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {showPreSubmitSelected && !submitted ? (
+                    <Badge variant="outline" className="text-xs">
+                      Selected
+                    </Badge>
+                  ) : null}
+                  {showAsWrong ? (
+                    <>
+                      <Badge variant="destructive" className="text-xs">
+                        Your answer
+                      </Badge>
+                      <X className="h-4 w-4 shrink-0" aria-hidden />
+                    </>
+                  ) : null}
+                  {showAsCorrect ? (
+                    <>
+                      <Badge
+                        variant={selected ? "success" : "outline"}
+                        className={cn(
+                          "text-xs",
+                          !selected && "border-success text-success",
+                        )}
+                      >
+                        {selected ? "Correct" : "Correct answer"}
+                      </Badge>
+                      <Check className="h-4 w-4 shrink-0" aria-hidden />
+                    </>
+                  ) : null}
+                </span>
               </button>
             );
           })}
