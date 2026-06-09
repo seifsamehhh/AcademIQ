@@ -18,7 +18,7 @@ export function AppHeader() {
   const router = useRouter();
   const { user, signOut } = useUser();
 
-  const handleSignOut = () => {
+  const handleLogout = () => {
     signOut();
     router.replace("/signin");
   };
@@ -63,9 +63,9 @@ export function AppHeader() {
               {user.fullName}
             </span>
           )}
-          <Button variant="outline" size="sm" onClick={handleSignOut}>
+          <Button variant="outline" size="sm" onClick={handleLogout}>
             <LogOut className="h-4 w-4" />
-            <span className="hidden sm:inline">Sign Out</span>
+            Logout
           </Button>
         </div>
       </div>

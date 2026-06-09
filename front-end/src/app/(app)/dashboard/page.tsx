@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, LogOut } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import {
   api,
   ApiAuthError,
@@ -13,7 +13,6 @@ import {
 } from "@/lib/api";
 import type { StudentResults } from "@/lib/types";
 import { ApiErrorAlert } from "@/components/common/ApiErrorAlert";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -60,11 +59,6 @@ export default function DashboardPage() {
     };
   }, [router]);
 
-  const handleLogout = () => {
-    void api.logout();
-    router.replace("/signin");
-  };
-
   if (!studentId) {
     return (
       <div className="flex flex-1 items-center justify-center py-32">
@@ -78,19 +72,13 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-foreground">
-            Welcome, {displayName}
-          </h1>
-          <p className="text-muted-foreground">
-            Signed in as <span className="font-medium">{studentId}</span>
-          </p>
-        </div>
-        <Button variant="outline" onClick={handleLogout}>
-          <LogOut className="h-4 w-4" />
-          Logout
-        </Button>
+      <div>
+        <h1 className="text-2xl font-bold text-foreground">
+          Welcome, {displayName}
+        </h1>
+        <p className="text-muted-foreground">
+          Signed in as <span className="font-medium">{studentId}</span>
+        </p>
       </div>
 
       {error ? <ApiErrorAlert message={error} /> : null}
