@@ -10,25 +10,25 @@ const FEATURES = [
     icon: TrendingUp,
     title: "Grade Prediction",
     description:
-      "See a predicted numeric grade per course, anchored against your actual Moodle average so you know where you stand.",
+      "Performance insights and prediction support when the model service is available, alongside your Moodle course data.",
   },
   {
     icon: Brain,
     title: "Performance Insights",
     description:
-      "A clustering model classifies each course as Good, Average, or At Risk, with the ranked factors driving the result.",
+      "Rule-based and model-driven guidance to highlight engagement patterns and areas to improve when analytics are available.",
   },
   {
     icon: AlertTriangle,
     title: "Burnout Detection",
     description:
-      "Your overall study workload is monitored across all courses to flag burnout risk before it affects your grades.",
+      "Study workload signals across courses can flag burnout risk when behavioural data has been synced from Moodle.",
   },
   {
     icon: FileQuestion,
-    title: "AI Quiz Generation",
+    title: "Quiz Generation",
     description:
-      "Generate practice quizzes built straight from your own lecture materials to revise exactly what you were taught.",
+      "Generate practice quizzes from your own lecture materials to revise exactly what you were taught.",
   },
 ];
 
@@ -41,8 +41,9 @@ export function FeaturesSection() {
             Why Choose AcademIQ?
           </h2>
           <p className="mx-auto max-w-2xl text-muted-foreground">
-            AcademIQ turns the data already in your Moodle LMS into clear,
-            actionable insights — so you can study smarter, not just harder.
+            AcademIQ works alongside your university&apos;s Moodle LMS to turn synced
+            activity into clear, actionable guidance — so you can study smarter,
+            not just harder.
           </p>
         </div>
 

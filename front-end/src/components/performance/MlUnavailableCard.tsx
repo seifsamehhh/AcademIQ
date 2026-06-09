@@ -14,7 +14,7 @@ export function MlUnavailableCard({ message }: MlUnavailableCardProps) {
           <CardTitle>ML prediction not available</CardTitle>
         </div>
         <CardDescription>
-          Course activity stats below are still shown from your synced or seeded data.
+          Course activity records below remain available for demo review.
         </CardDescription>
       </CardHeader>
       <CardContent>

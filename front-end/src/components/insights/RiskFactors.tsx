@@ -3,17 +3,24 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { RiskFactorCard } from "./RiskFactorCard";
 import type { RiskFactor } from "@/lib/types";
 
-export function RiskFactors({ factors }: { factors: RiskFactor[] }) {
+export function RiskFactors({
+  factors,
+  ruleBased = true,
+}: {
+  factors: RiskFactor[];
+  ruleBased?: boolean;
+}) {
   return (
     <Card>
       <CardHeader>
         <div className="flex items-center gap-2">
           <TrendingDown className="h-5 w-5 text-destructive" />
-          <CardTitle>Risk Factors</CardTitle>
+          <CardTitle>{ruleBased ? "Guidance Factors" : "Risk Factors"}</CardTitle>
         </div>
         <CardDescription>
-          Factors most negatively affecting your predicted performance, ranked by impact —
-          each with a recommended next step
+          {ruleBased
+            ? "Activity patterns that may affect course performance, ranked by estimated impact — each with a suggested next step"
+            : "Factors most negatively affecting your predicted performance, ranked by impact — each with a recommended next step"}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">

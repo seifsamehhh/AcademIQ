@@ -137,11 +137,15 @@ def normalize_payload(payload: Dict[str, Any], academiq_user_id: str) -> Dict[st
     for course_id, metrics in metrics_by_course.items():
         if not is_real_course(course_id, (metrics or {}).get("course_name")):
             continue  # skip the bogus "My courses" (id 1) etc.
-        metrics_repository.upsert(academiq_user_id, str(course_id), metrics)
+        course_metrics = dict(metrics or {})
+        course_metrics["activity_source"] = "synced"
+        metrics_repository.upsert(academiq_user_id, str(course_id), course_metrics)
 
     behavior = payload.get("behavior")
     if behavior:
-        metrics_repository.upsert(academiq_user_id, metrics_repository.OVERALL, behavior)
+        overall = dict(behavior)
+        overall["activity_source"] = "synced"
+        metrics_repository.upsert(academiq_user_id, metrics_repository.OVERALL, overall)
 
     # --- Events → student_events (deduped) -------------------------------
     events_new = event_repository.upsert_many(academiq_user_id, payload.get("events", []))

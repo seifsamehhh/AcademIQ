@@ -193,11 +193,15 @@ const performanceByCourse: Record<string, PerformanceAnalysis> = {
     hasGradeData: true,
     engine: "ml",
     mlAvailable: true,
+    activityDataSource: "synced",
+    activityStatsNote:
+      "Activity stats below are based on your latest synced Moodle activity records.",
     statistics: {
       quizzes: { attempted: 5, total: 6, averageScore: 81 },
       assignments: { attempted: 4, total: 5, averageScore: 77 },
       totalTimeHours: 41.5,
       weeklyAverageHours: 3.8,
+      weeklyAverageEstimated: false,
     },
   },
   c_cs311: {
@@ -208,11 +212,15 @@ const performanceByCourse: Record<string, PerformanceAnalysis> = {
     hasGradeData: true,
     engine: "ml",
     mlAvailable: true,
+    activityDataSource: "synced",
+    activityStatsNote:
+      "Activity stats below are based on your latest synced Moodle activity records.",
     statistics: {
       quizzes: { attempted: 3, total: 6, averageScore: 58 },
       assignments: { attempted: 2, total: 5, averageScore: 63 },
       totalTimeHours: 18.0,
       weeklyAverageHours: 1.6,
+      weeklyAverageEstimated: false,
     },
   },
   c_math210: {
@@ -223,11 +231,15 @@ const performanceByCourse: Record<string, PerformanceAnalysis> = {
     hasGradeData: true,
     engine: "ml",
     mlAvailable: true,
+    activityDataSource: "synced",
+    activityStatsNote:
+      "Activity stats below are based on your latest synced Moodle activity records.",
     statistics: {
       quizzes: { attempted: 6, total: 7, averageScore: 70 },
       assignments: { attempted: 3, total: 4, averageScore: 74 },
       totalTimeHours: 28.5,
       weeklyAverageHours: 2.6,
+      weeklyAverageEstimated: false,
     },
   },
   c_se340: {
@@ -238,11 +250,15 @@ const performanceByCourse: Record<string, PerformanceAnalysis> = {
     hasGradeData: true,
     engine: "ml",
     mlAvailable: true,
+    activityDataSource: "synced",
+    activityStatsNote:
+      "Activity stats below are based on your latest synced Moodle activity records.",
     statistics: {
       quizzes: { attempted: 4, total: 4, averageScore: 90 },
       assignments: { attempted: 5, total: 5, averageScore: 85 },
       totalTimeHours: 36.0,
       weeklyAverageHours: 3.3,
+      weeklyAverageEstimated: false,
     },
   },
 };

@@ -47,6 +47,8 @@ function InsightsContent() {
     };
   }, [courseParam]);
 
+  const ruleBased = insights?.heuristic !== false;
+
   return (
     <div className="space-y-6">
       <Link
@@ -58,12 +60,20 @@ function InsightsContent() {
       </Link>
 
       <div>
-        <h1 className="text-2xl font-bold text-foreground">Specific Insights</h1>
+        <h1 className="text-2xl font-bold text-foreground">
+          {ruleBased ? "Rule-Based Insights" : "Model Insights"}
+        </h1>
         <p className="text-muted-foreground">
           {insights
             ? `${insights.course.code} — ${insights.course.name}`
-            : "Turning model output into feedback you can act on."}
+            : "Loading course guidance..."}
         </p>
+        {insights && ruleBased ? (
+          <p className="mt-2 text-sm text-muted-foreground">
+            These recommendations use rule-based analysis from available activity
+            records. They are not produced by a deployed ML model.
+          </p>
+        ) : null}
       </div>
 
       {error ? <ApiErrorAlert message={error} /> : null}
@@ -73,8 +83,9 @@ function InsightsContent() {
           <PerformanceClassification
             isHighPerformer={insights.isHighPerformer}
             summary={insights.classificationSummary}
+            ruleBased={ruleBased}
           />
-          <RiskFactors factors={insights.riskFactors} />
+          <RiskFactors factors={insights.riskFactors} ruleBased={ruleBased} />
         </>
       ) : (
         <>

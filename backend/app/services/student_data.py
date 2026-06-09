@@ -78,6 +78,70 @@ def _latest_features(user_id: str) -> Dict[str, Any]:
     return (doc or {}).get("features", {}) or {}
 
 
+def _resolve_activity_source(user_id: str, metrics: Dict[str, Any]) -> str:
+    """Classify whether course activity stats are seeded demo data or Moodle sync."""
+    explicit = (metrics or {}).get("activity_source")
+    if explicit in ("seeded", "synced"):
+        return explicit
+
+    doc = raw_moodle_payload_collection.find_one({"academiq_user_id": user_id})
+    if doc and (
+        doc.get("metricsByCourse")
+        or doc.get("behavior")
+        or doc.get("courses")
+    ):
+        return "synced"
+
+    if metrics and any(
+        (metrics.get(k) or 0) > 0
+        for k in (
+            "quiz_attempts",
+            "assignment_submissions",
+            "total_time_spent_seconds",
+            "number_of_quizzes_viewed",
+            "number_of_assignments_viewed",
+        )
+    ):
+        return "seeded"
+
+    return "none"
+
+
+def _activity_stats_note(source: str) -> str:
+    if source == "synced":
+        return _ACTIVITY_NOTE_SYNCED
+    if source == "seeded":
+        return _ACTIVITY_NOTE_SEEDED
+    return _ACTIVITY_NOTE_NONE
+
+
+def _weekly_average_hours(
+    user_id: str,
+    total_course_hours: float,
+    activity_source: str,
+) -> tuple[float | None, bool]:
+    """
+    Return (weekly_hours, is_estimated).
+
+    Uses rolling ISO-week history only for Moodle-synced overall metrics.
+    Seeded or unknown sources get an approximate value from total course time.
+    """
+    if activity_source == "synced":
+        overall_metrics = (
+            (metrics_repository.get(user_id, _OVERALL) or {}).get("metrics", {}) or {}
+        )
+        weekly_history = overall_metrics.get("weekly_hours") or []
+        if weekly_history:
+            values = [float(entry.get("hours") or 0) for entry in weekly_history]
+            if values:
+                return round(sum(values) / len(values), 1), False
+
+    if total_course_hours > 0:
+        return round(total_course_hours / 3, 1), True
+
+    return None, False
+
+
 def _has_ml_feature_data(features: Dict[str, Any]) -> bool:
     """True when synced feature vectors contain enough signal for a real inference."""
     if not features:
@@ -124,6 +188,19 @@ _ML_UNAVAILABLE_MESSAGE = (
 _ML_NO_FEATURES_MESSAGE = (
     "ML prediction is not available yet because synced behavioral data is missing. "
     "Use the Chrome extension to sync Moodle activity."
+)
+
+_ACTIVITY_NOTE_SEEDED = (
+    "Activity stats below come from seeded demo records for presentation. "
+    "They are not live Moodle analytics. Sync the Chrome extension to replace "
+    "them with real activity data."
+)
+_ACTIVITY_NOTE_SYNCED = (
+    "Activity stats below are based on your latest synced Moodle activity records."
+)
+_ACTIVITY_NOTE_NONE = (
+    "Activity stats are based on available synced records. Live Moodle analytics "
+    "will appear after the extension syncs real activity data."
 )
 
 _ml_stack_available_cache: bool | None = None
@@ -280,6 +357,10 @@ def get_performance(user_id: str, course_id: str) -> Dict[str, Any]:
 
     total_seconds = metrics.get("total_time_spent_seconds", 0) or 0
     total_hours = round(total_seconds / 3600, 1)
+    activity_source = _resolve_activity_source(user_id, metrics)
+    weekly_avg, weekly_estimated = _weekly_average_hours(
+        user_id, total_hours, activity_source
+    )
 
     return {
         "course": _course_obj(user_id, course_id),
@@ -287,6 +368,8 @@ def get_performance(user_id: str, course_id: str) -> Dict[str, Any]:
         "status": status,
         "courseAverage": course_avg,
         "hasGradeData": has_grade_data,
+        "activityDataSource": activity_source,
+        "activityStatsNote": _activity_stats_note(activity_source),
         "statistics": {
             "quizzes": {
                 "attempted": metrics.get("quiz_attempts", 0) or 0,
@@ -305,7 +388,8 @@ def get_performance(user_id: str, course_id: str) -> Dict[str, Any]:
                 "averageScore": assign_avg,
             },
             "totalTimeHours": total_hours,
-            "weeklyAverageHours": round(total_hours / 3, 1),
+            "weeklyAverageHours": weekly_avg,
+            "weeklyAverageEstimated": weekly_estimated,
         },
         "engine": "ml" if used_model else "fallback",
         "mlAvailable": used_model,

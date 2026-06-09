@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "AcademIQ — Smarter academic insights",
   description:
-    "AcademIQ works alongside your university's Moodle LMS to monitor performance, anticipate risk, and target study effort with AI-driven insights.",
+    "AcademIQ works alongside your university's Moodle LMS to review activity, generate quizzes, and provide performance insights when the model service is available.",
 };
 
 export default function RootLayout({

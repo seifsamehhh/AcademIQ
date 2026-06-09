@@ -58,6 +58,7 @@ def _seed_course_metrics() -> None:
                 course["course_id"],
                 {
                     "course_name": course["course_name"],
+                    "activity_source": "seeded",
                     "quiz_attempts": 2,
                     "assignment_submissions": 1,
                     "number_of_quizzes_viewed": 3,
@@ -70,6 +71,7 @@ def _seed_course_metrics() -> None:
                 user_id,
                 metrics_repository.OVERALL,
                 {
+                    "activity_source": "seeded",
                     "all_clicks": 40,
                     "active_days": 10,
                     "total_time_spent": 7200,

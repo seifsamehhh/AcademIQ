@@ -9,7 +9,7 @@ as a Docker Space, and optionally the **models** on the HF Hub); the Next.js
 ```
                          ┌─────────────────────────┐
    Browser ───────────►  │  Frontend (Next.js)      │   Vercel
-                         │  academiq.vercel.app     │
+                         │  academiq-frontend.vercel.app │
                          └───────────┬─────────────┘
                                      │  HTTPS + Bearer token
                                      ▼

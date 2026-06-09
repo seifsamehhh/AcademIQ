@@ -68,7 +68,7 @@ Optional: `BOOTSTRAP_ADMIN`, `SESSION_COOKIE_SECURE`, `APP_LOGIN_URL`, SMTP vars
    - `NEXT_PUBLIC_API_BASE_URL` = backend URL from Step 2
    - `NEXT_PUBLIC_USE_MOCK` = `false`
 5. Deploy.
-6. Copy frontend URL, e.g. `https://academiq.vercel.app`.
+6. Copy frontend URL, e.g. `https://academiq-frontend.vercel.app`.
 
 ---
 
@@ -77,7 +77,7 @@ Optional: `BOOTSTRAP_ADMIN`, `SESSION_COOKIE_SECURE`, `APP_LOGIN_URL`, SMTP vars
 1. Backend project → Settings → Environment Variables.
 2. Set `ALLOWED_ORIGINS` to your **frontend** URL:
    ```
-   https://academiq.vercel.app
+   https://academiq-frontend.vercel.app
    ```
 3. Redeploy backend.
 

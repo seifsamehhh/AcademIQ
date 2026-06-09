@@ -2,6 +2,7 @@ import { FileText } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import type { LearningMaterial } from "@/lib/types";
 
 interface MaterialSelectProps {
@@ -20,7 +21,7 @@ export function MaterialSelect({
       <CardHeader>
         <CardTitle>Select Learning Materials</CardTitle>
         <CardDescription>
-          The quiz is generated strictly from the materials you tick below.
+          Only materials with available content can be used for quiz generation.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
@@ -30,24 +31,33 @@ export function MaterialSelect({
           </p>
         ) : (
           materials.map((material) => {
+            const selectable = material.hasContent;
             const checked = selectedIds.includes(material.id);
             return (
               <label
                 key={material.id}
-                className="flex cursor-pointer items-center gap-3 rounded-lg border border-border bg-background p-3 transition-colors hover:bg-accent has-[:checked]:border-primary/50"
+                className={cn(
+                  "flex items-center gap-3 rounded-lg border border-border bg-background p-3 transition-colors",
+                  selectable
+                    ? "cursor-pointer hover:bg-accent has-[:checked]:border-primary/50"
+                    : "cursor-not-allowed opacity-70",
+                )}
               >
                 <Checkbox
                   checked={checked}
-                  onChange={() => onToggle(material.id)}
+                  disabled={!selectable}
+                  onChange={() => {
+                    if (selectable) onToggle(material.id);
+                  }}
                 />
                 <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
                 <span className="flex-1 text-sm font-medium text-foreground">
                   {material.title}
                 </span>
-                {material.hasContent ? (
+                {selectable ? (
                   <Badge variant="default">Ready for quiz</Badge>
                 ) : (
-                  <Badge variant="muted">Upload PDF in extension</Badge>
+                  <Badge variant="muted">Content not available</Badge>
                 )}
                 <Badge variant="muted">{material.kind}</Badge>
               </label>

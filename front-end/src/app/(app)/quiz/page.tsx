@@ -46,7 +46,12 @@ export default function QuizPage() {
     api
       .getMaterials(selectedCourse)
       .then((list) => {
-        if (active) setMaterials(list);
+        if (!active) return;
+        setMaterials(list);
+        const readyIds = new Set(
+          list.filter((m) => m.hasContent).map((m) => m.id),
+        );
+        setSelectedMaterials((prev) => prev.filter((id) => readyIds.has(id)));
       })
       .catch(() => {
         if (active) setMaterials([]);
@@ -65,7 +70,10 @@ export default function QuizPage() {
   };
 
   const toggleMaterial = (id: string) => {
+    const material = materials?.find((m) => m.id === id);
+    if (!material?.hasContent) return;
     setQuiz(null);
+    setError("");
     setSelectedMaterials((prev) =>
       prev.includes(id) ? prev.filter((m) => m !== id) : [...prev, id],
     );
@@ -73,9 +81,15 @@ export default function QuizPage() {
 
   const handleGenerate = async () => {
     setIsGenerating(true);
+    setError("");
     try {
       const generated = await api.generateQuiz(selectedCourse, selectedMaterials);
       setQuiz(generated);
+    } catch {
+      setQuiz(null);
+      setError(
+        "Quiz generation failed. Please try another material or try again later.",
+      );
     } finally {
       setIsGenerating(false);
     }

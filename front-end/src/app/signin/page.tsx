@@ -176,9 +176,18 @@ function SignInForm() {
             </Button>
           </form>
 
-          <p className="mt-6 text-center text-xs text-muted-foreground">
-            Demo: student1 / password123 or student2 / pass456
-          </p>
+          <div className="mt-6 rounded-lg border border-border/60 bg-muted/30 p-3 text-center">
+            <p className="text-xs font-medium text-foreground">
+              Demo accounts (testing only)
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              student1 / password123 · student2 / pass456
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Seeded demo logins for presentation — not real university student
+              accounts.
+            </p>
+          </div>
         </div>
       </div>
     </div>

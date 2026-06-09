@@ -5,9 +5,9 @@ import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 const PILLS = [
-  { icon: BarChart3, label: "Grade Prediction" },
-  { icon: BookOpen, label: "AI Quiz Generation" },
-  { icon: Shield, label: "Burnout & Risk Detection" },
+  { icon: BarChart3, label: "Performance Insights" },
+  { icon: BookOpen, label: "Quiz Generation" },
+  { icon: Shield, label: "Risk Guidance" },
 ];
 
 export function HeroSection() {
@@ -31,8 +31,8 @@ export function HeroSection() {
         </h1>
         <p className="mb-8 max-w-2xl text-lg text-white/90 md:text-xl">
           A supplementary learning platform that works alongside your Moodle LMS.
-          Monitor your performance, anticipate risk early, and target your study
-          effort where it counts.
+          Review activity, generate practice quizzes, and access prediction support
+          when the model service is available.
         </p>
 
         <div className="mb-10 flex flex-wrap justify-center gap-4">

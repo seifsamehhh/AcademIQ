@@ -11,6 +11,7 @@ import { PredictedGradeCard } from "@/components/performance/PredictedGradeCard"
 import { PerformanceStatusCard } from "@/components/performance/PerformanceStatusCard";
 import { MlUnavailableCard } from "@/components/performance/MlUnavailableCard";
 import { CourseAverageCard } from "@/components/performance/CourseAverageCard";
+import { ActivityStatsNotice } from "@/components/performance/ActivityStatsNotice";
 import { CourseStatistics } from "@/components/performance/CourseStatistics";
 import { buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -69,7 +70,7 @@ export default function PerformancePage() {
       <div>
         <h1 className="text-2xl font-bold text-foreground">Performance Analysis</h1>
         <p className="text-muted-foreground">
-          Pick a course to see its predicted grade, status, and statistics.
+          View course activity, stats, and prediction availability.
         </p>
       </div>
 
@@ -117,6 +118,10 @@ export default function PerformancePage() {
             courseAverage={ready.courseAverage}
             hasGradeData={ready.hasGradeData ?? ready.courseAverage !== null}
             predictedGrade={ready.predictedGrade}
+          />
+          <ActivityStatsNotice
+            source={ready.activityDataSource ?? "none"}
+            note="Activity stats are based on available synced or seeded records. Live Moodle analytics will appear after the extension syncs real activity data."
           />
           <CourseStatistics stats={ready.statistics} />
         </div>

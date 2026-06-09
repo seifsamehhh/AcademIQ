@@ -139,9 +139,13 @@ export interface CourseStatistics {
   assignments: TaskBreakdown;
   /** Total time spent on the course, in hours. */
   totalTimeHours: number;
-  /** Weekly-average study time on the course, in hours. */
-  weeklyAverageHours: number;
+  /** Weekly-average study time; null when no time data exists. */
+  weeklyAverageHours: number | null;
+  /** True when weekly average is approximated, not from Moodle weekly logs. */
+  weeklyAverageEstimated?: boolean;
 }
+
+export type ActivityDataSource = "seeded" | "synced" | "none";
 
 /** Course-scoped output combining grade prediction + clustering + actuals. */
 export interface PerformanceAnalysis {
@@ -159,6 +163,10 @@ export interface PerformanceAnalysis {
   mlAvailable?: boolean;
   message?: string | null;
   heuristic?: boolean;
+  /** Whether activity stats are seeded demo data, Moodle sync, or unavailable. */
+  activityDataSource?: ActivityDataSource;
+  /** Human-readable note about the activity stats data source. */
+  activityStatsNote?: string;
 }
 
 /**
@@ -191,6 +199,8 @@ export interface CourseInsights {
   classificationSummary: string;
   /** Risk factors, expected pre-sorted by impact (highest first). */
   riskFactors: RiskFactor[];
+  /** True when output is rule-based rather than from a deployed ML model. */
+  heuristic?: boolean;
 }
 
 /** A learning material title scraped from Moodle, selectable for quiz gen. */
