@@ -1,5 +1,5 @@
 const STORAGE_KEY = "moodleData";
-const DEFAULT_BACKEND = "http://localhost:8000/raw-moodle-payloads";
+const DEFAULT_BACKEND = "https://academiq-backend.vercel.app/raw-moodle-payloads";
 
 let BACKEND_URL = DEFAULT_BACKEND;
 let CONTENT_URL = BACKEND_URL.replace(/\/raw-moodle-payloads$/, "/materials/content");
@@ -281,10 +281,14 @@ const addSyncButton = () => {
                 const email = result.login_email || "your AcademIQ email";
                 syncBtn.textContent = "Synced!";
                 alert(
-                    `${result.message || "Sync complete."}\n\n` +
-                    `Sign in at http://localhost:3000/signin\n` +
-                    `Email: ${email}\n\n` +
-                    `Then click "Upload PDFs for quiz" to enable quiz generation.`
+                    `${result.message || "Moodle data synced successfully."}\n\n` +
+                    `Synced to deployed backend:\nhttps://academiq-backend.vercel.app\n\n` +
+                    `Sign in at https://academiq-frontend.vercel.app/signin\n` +
+                    `Email: ${email}\n` +
+                    (result.account_created
+                        ? `A new AcademIQ account was provisioned — use the email above (check backend logs or your inbox for the temporary password).\n\n`
+                        : `Use your existing AcademIQ password for this account.\n\n`) +
+                    `Optional: click "Upload PDFs for quiz" in this popup to send course PDFs to the backend for quiz generation.`
                 );
             } else {
                 syncBtn.textContent = "Sync Failed";
