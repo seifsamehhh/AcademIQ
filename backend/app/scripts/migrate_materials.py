@@ -93,7 +93,8 @@ def migrate(apply: bool) -> None:
         if not uid:
             # Legacy doc without a linked account — resolve by Moodle identity
             # (creating one only when applying the migration).
-            user, _, _, _ = resolve_or_create_user(extract_identity(doc), payload=doc)
+            provision = resolve_or_create_user(extract_identity(doc), payload=doc)
+            user = provision["user"]
             uid = str(user["_id"])
 
         normalize_payload(doc, uid)

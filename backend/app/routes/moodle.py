@@ -6,6 +6,7 @@ from typing import Dict, Any
 import base64
 
 from app.config.database import raw_moodle_payload_collection, feature_vectors_collection
+from app.config.settings import APP_LOGIN_URL
 from app.schema.schemas import list_raw_moodle_payload_serial
 from app.services.preprocessing import compute_features
 from app.services.moodle_ingest import normalize_payload, slim_payload
@@ -14,6 +15,9 @@ from app.repositories import material_repository
 from app.services import quiz_gen
 
 router = APIRouter()
+
+# Demo sign-in URL returned to the extension when APP_LOGIN_URL is unset on Vercel.
+DEMO_SIGNIN_URL = APP_LOGIN_URL or "https://academiq-frontend.vercel.app/signin"
 
 
 @router.post("/materials/content")
@@ -67,9 +71,11 @@ async def post_raw_moodle_payload(payload: Dict[str, Any], background_tasks: Bac
         #    BEFORE storing anything, so every record is linked to a real user.
         #    Matching is by Moodle User ID, then Student ID — never by name.
         identity = extract_identity(payload)
-        academiq_user, user_created, user_updated = resolve_or_create_user(
-            identity, payload=payload
-        )
+        provision = resolve_or_create_user(identity, payload=payload)
+        academiq_user = provision["user"]
+        user_created = provision["created"]
+        user_updated = provision["updated"]
+        temporary_password = provision["temporary_password"]
         academiq_user_id = str(academiq_user["_id"])
         # Prefer the account's canonical student id for downstream keying.
         student_id = academiq_user.get("student_id") or identity.get("student_id")
@@ -134,6 +140,8 @@ async def post_raw_moodle_payload(payload: Dict[str, Any], background_tasks: Bac
             "academiq_user_id": academiq_user_id,
             "account_created": user_created,
             "login_email": academiq_user.get("email"),
+            "temporary_password": temporary_password if user_created else None,
+            "signin_url": DEMO_SIGNIN_URL,
             "student_id": student_id or features.get("student_id"),
             "normalized": norm,
             "raw_payload_saved": raw_payload_saved,
@@ -142,10 +150,9 @@ async def post_raw_moodle_payload(payload: Dict[str, Any], background_tasks: Bac
             "metrics_saved": metrics_saved,
             "feature_vector_updated": feature_vector_updated,
             "message": (
-                "New AcademIQ account created. Check the backend console for the "
-                "temporary password (or your email if SMTP is configured)."
+                "New AcademIQ account created. Save the temporary password below to sign in."
                 if user_created else
-                "Data synced to your existing AcademIQ account."
+                "This AcademIQ account already exists. Data synced — use your existing password to sign in."
             ),
         }
 

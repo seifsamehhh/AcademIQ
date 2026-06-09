@@ -138,17 +138,36 @@ def _backfill_identity(
     return user, False
 
 
+def _provisioning_result(
+    user: Dict[str, Any],
+    *,
+    created: bool,
+    updated: bool,
+    temporary_password: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "user": user,
+        "created": created,
+        "updated": updated,
+        "temporary_password": temporary_password,
+    }
+
+
 def resolve_or_create_user(
     identity: Dict[str, Optional[str]],
     payload: Optional[Dict[str, Any]] = None,
-) -> Tuple[Dict[str, Any], bool, bool, Optional[str]]:
+) -> Dict[str, Any]:
     """
-    Return the AcademIQ user for a Moodle identity, creating one if needed.
+    Return provisioning outcome for a Moodle identity, creating an account if needed.
 
-    Returns (user_document, created, updated, temporary_password).
-    `temporary_password` is set only when a new account is provisioned (demo/API
-    visibility). Production should email credentials or force password reset instead
-    of relying on this field long term.
+    Returns a dict:
+        user                 — MongoDB user document
+        created              — True when a new account was provisioned
+        updated              — True when an existing account was backfilled
+        temporary_password   — plaintext password when created (demo/API only)
+
+    Production should email credentials or force password reset instead of relying
+    on temporary_password in API responses long term.
     """
     moodle_user_id = identity.get("moodle_user_id")
     student_id = identity.get("student_id")
@@ -158,14 +177,14 @@ def resolve_or_create_user(
     existing = find_matching_user(moodle_user_id, student_id, email)
     if existing:
         user, updated = _backfill_identity(existing, identity)
-        return user, False, updated, None
+        return _provisioning_result(user, created=False, updated=updated)
 
     if not email:
         email = synthesize_provisioning_email(identity, payload)
         existing = find_matching_user(None, None, email)
         if existing:
             user, updated = _backfill_identity(existing, identity)
-            return user, False, updated, None
+            return _provisioning_result(user, created=False, updated=updated)
 
     password = generate_password()
     document = build_user_document(
@@ -184,7 +203,7 @@ def resolve_or_create_user(
         if not existing:
             raise
         user, updated = _backfill_identity(existing, identity)
-        return user, False, updated, None
+        return _provisioning_result(user, created=False, updated=updated)
 
     try:
         send_account_created_email(email, full_name, password)
@@ -193,4 +212,9 @@ def resolve_or_create_user(
 
     # Demo: return plaintext password once for extension visibility. Production
     # should send credentials by email or force password reset instead.
-    return created_user, True, False, password
+    return _provisioning_result(
+        created_user,
+        created=True,
+        updated=False,
+        temporary_password=password,
+    )
