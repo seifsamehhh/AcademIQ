@@ -38,6 +38,7 @@ DEMO_COURSE_METRICS = {
     ],
     "student2": [
         {"course_id": "101", "course_name": "Programming"},
+        {"course_id": "102", "course_name": "Database"},
         {"course_id": "103", "course_name": "Web Dev"},
     ],
 }
@@ -105,8 +106,10 @@ def seed_students() -> None:
     _seed_course_metrics()
 
     from app.scripts.seed_demo_materials import seed_demo_materials
+    from app.scripts.seed_demo_feature_vectors import seed_demo_feature_vectors
 
     seed_demo_materials()
+    seed_demo_feature_vectors()
 
 
 if __name__ == "__main__":
