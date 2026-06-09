@@ -12,9 +12,12 @@ installed.
 """
 
 import io
+import logging
 import os
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
+
+logger = logging.getLogger(__name__)
 
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 _QUIZ_DIR = os.path.join(_REPO, "ai", "quiz_generator-main")
@@ -102,3 +105,41 @@ def generate_from_text(text: str, num_questions: int = 8) -> List[Dict[str, Any]
             "correctIndex": options.index(correct),
         })
     return out
+
+
+def generate_questions(text: str, num_questions: int = 8) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Generate MCQs from stored content_text.
+
+    Tries the heavy ai/quiz_generator-main path when available (local dev), then
+    falls back to the Vercel-safe lightweight generator. Returns (questions, engine).
+    """
+    if not text or not text.strip():
+        logger.warning("Quiz generation skipped: no content_text")
+        return [], "no_text"
+
+    if available():
+        try:
+            heavy = generate_from_text(text, num_questions=num_questions)
+            if len(heavy) >= 5:
+                logger.info("Quiz generated via heavy engine (%d questions)", len(heavy))
+                return heavy, "heavy"
+            logger.warning(
+                "Heavy quiz engine returned only %d questions; trying lightweight",
+                len(heavy),
+            )
+        except Exception as exc:
+            logger.warning("Heavy quiz engine failed: %s", exc, exc_info=True)
+
+    try:
+        from app.services.quiz_gen_light import generate_lightweight
+
+        light = generate_lightweight(text, num_questions=num_questions)
+        if light:
+            logger.info("Quiz generated via lightweight engine (%d questions)", len(light))
+            return light, "light"
+        logger.warning("Lightweight quiz engine returned no questions")
+    except Exception as exc:
+        logger.error("Lightweight quiz engine failed: %s", exc, exc_info=True)
+
+    return [], "failed"

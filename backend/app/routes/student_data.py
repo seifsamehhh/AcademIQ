@@ -9,13 +9,16 @@ Paths intentionally have NO /api prefix to match the frontend's api.ts calls
 (/courses, /dashboard, /courses/{id}/performance, ...).
 """
 
+import logging
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth import get_current_user
 from app.repositories import material_repository
 from app.services import quiz_gen, student_data
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Student data"])
 
@@ -53,34 +56,39 @@ def generate_quiz(
     _user: Dict[str, Any] = Depends(get_current_user),
 ):
     """
-    Generate a quiz from the selected materials' stored text (uploaded by the
-    extension via POST /materials/content). Falls back to a clear placeholder
-    question when no content/generator is available, so the UI never breaks.
+    Generate a quiz from selected materials' stored content_text (no PDF required).
+    Uses the heavy local generator when available, otherwise a lightweight
+    Vercel-safe rule-based generator.
     """
     material_ids: List[str] = body.get("materialIds", []) or []
-    text = material_repository.get_content(course_id, material_ids)
+    if not material_ids:
+        raise HTTPException(status_code=400, detail="materialIds required")
 
-    questions: List[Dict[str, Any]] = []
-    if text and quiz_gen.available():
-        try:
-            questions = quiz_gen.generate_from_text(text, num_questions=8)
-        except Exception:
-            questions = []
+    text = material_repository.get_content(course_id, material_ids)
+    logger.info(
+        "Quiz request course=%s materials=%s content_chars=%d",
+        course_id,
+        material_ids,
+        len(text or ""),
+    )
+
+    questions, engine = quiz_gen.generate_questions(text, num_questions=8)
 
     if not questions:
-        reason = (
-            "No question could be generated — the selected materials have no "
-            "uploaded text yet. In the extension, run the materials upload so "
-            "the PDFs' text reaches the backend, then try again."
-            if not text else
-            "The selected materials' text didn't yield enough structured "
-            "concepts for question generation. Try different/〈more〉 materials."
+        detail = (
+            "Selected materials have no uploaded text. Upload PDFs via the extension "
+            "or seed demo content before generating a quiz."
+            if not (text or "").strip()
+            else
+            f"Quiz generation failed for course {course_id} (engine={engine}). "
+            "Content may lack definition-style sentences."
         )
-        questions = [{
-            "id": "placeholder",
-            "question": reason,
-            "options": ["Understood", "OK", "Got it", "Retry later"],
-            "correctIndex": 0,
-        }]
+        logger.error(detail)
+        raise HTTPException(status_code=422, detail=detail)
 
-    return {"courseId": course_id, "materialIds": material_ids, "questions": questions}
+    return {
+        "courseId": course_id,
+        "materialIds": material_ids,
+        "questions": questions,
+        "engine": engine,
+    }
