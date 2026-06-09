@@ -9,6 +9,7 @@ import { CourseSelect } from "@/components/common/CourseSelect";
 import { ApiErrorAlert } from "@/components/common/ApiErrorAlert";
 import { PredictedGradeCard } from "@/components/performance/PredictedGradeCard";
 import { PerformanceStatusCard } from "@/components/performance/PerformanceStatusCard";
+import { MlUnavailableCard } from "@/components/performance/MlUnavailableCard";
 import { CourseAverageCard } from "@/components/performance/CourseAverageCard";
 import { CourseStatistics } from "@/components/performance/CourseStatistics";
 import { buttonVariants } from "@/components/ui/button";
@@ -88,21 +89,33 @@ export default function PerformancePage() {
 
       {ready ? (
         <div className="space-y-6">
-          <div className="grid gap-6 md:grid-cols-2">
-            <PredictedGradeCard grade={ready.predictedGrade} />
-            <PerformanceStatusCard status={ready.status} />
-          </div>
+          {ready.mlAvailable ? (
+            <div className="grid gap-6 md:grid-cols-2">
+              <PredictedGradeCard grade={ready.predictedGrade} />
+              <PerformanceStatusCard status={ready.status} />
+            </div>
+          ) : (
+            <MlUnavailableCard
+              message={
+                ready.message ??
+                "ML prediction is not available yet because model dependencies are not deployed."
+              }
+            />
+          )}
 
-          <Link
-            href={`/insights?course=${ready.course.id}`}
-            className={buttonVariants({ variant: "default" })}
-          >
-            View Insights
-            <ArrowRight className="h-4 w-4" />
-          </Link>
+          {ready.mlAvailable ? (
+            <Link
+              href={`/insights?course=${ready.course.id}`}
+              className={buttonVariants({ variant: "default" })}
+            >
+              View Insights
+              <ArrowRight className="h-4 w-4" />
+            </Link>
+          ) : null}
 
           <CourseAverageCard
             courseAverage={ready.courseAverage}
+            hasGradeData={ready.hasGradeData ?? ready.courseAverage !== null}
             predictedGrade={ready.predictedGrade}
           />
           <CourseStatistics stats={ready.statistics} />

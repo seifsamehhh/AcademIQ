@@ -129,8 +129,8 @@ export interface DashboardData {
 export interface TaskBreakdown {
   attempted: number;
   total: number;
-  /** Average score on attempted tasks (0-100). */
-  averageScore: number;
+  /** Average score on attempted tasks (0-100); null when no graded items yet. */
+  averageScore: number | null;
 }
 
 /** Per-course statistics shown on the Performance Analysis page. */
@@ -146,13 +146,19 @@ export interface CourseStatistics {
 /** Course-scoped output combining grade prediction + clustering + actuals. */
 export interface PerformanceAnalysis {
   course: Course;
-  /** Numeric grade from the grade-prediction model (0-100). */
-  predictedGrade: number;
-  /** Categorical status from the clustering model. */
-  status: PerformanceStatus;
-  /** Student's actual current average across graded Moodle tasks (0-100). */
-  courseAverage: number;
+  /** Numeric grade from ML when available; null when ML is not deployed. */
+  predictedGrade: number | null;
+  /** Categorical status from ML when available; null otherwise. */
+  status: PerformanceStatus | null;
+  /** Actual Moodle average (0-100); null when no grade data exists. */
+  courseAverage: number | null;
+  hasGradeData?: boolean;
   statistics: CourseStatistics;
+  /** "ml" when a model produced the prediction; otherwise "fallback". */
+  engine?: "ml" | "fallback";
+  mlAvailable?: boolean;
+  message?: string | null;
+  heuristic?: boolean;
 }
 
 /**

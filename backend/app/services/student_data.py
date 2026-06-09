@@ -78,6 +78,21 @@ def _latest_features(user_id: str) -> Dict[str, Any]:
     return (doc or {}).get("features", {}) or {}
 
 
+def _has_ml_feature_data(features: Dict[str, Any]) -> bool:
+    """True when synced feature vectors contain enough signal for a real inference."""
+    if not features:
+        return False
+    activity_keys = (
+        "all_clicks",
+        "active_days",
+        "quiz_attempts",
+        "assignment_submissions",
+        "total_time_spent",
+        "material_clicks",
+    )
+    return any((features.get(k) or 0) > 0 for k in activity_keys)
+
+
 def _grades(user_id: str) -> List[Dict[str, Any]]:
     doc = raw_moodle_payload_collection.find_one({"academiq_user_id": user_id})
     return (doc or {}).get("grades", []) or []
@@ -102,6 +117,31 @@ _PERF_FEATURES = [
     "quiz_attempts", "assignment_submissions", "total_time_spent",
     "procrastination_index", "late_submission_count",
 ]
+
+_ML_UNAVAILABLE_MESSAGE = (
+    "ML prediction is not available yet because model dependencies are not deployed."
+)
+_ML_NO_FEATURES_MESSAGE = (
+    "ML prediction is not available yet because synced behavioral data is missing. "
+    "Use the Chrome extension to sync Moodle activity."
+)
+
+_ml_stack_available_cache: bool | None = None
+
+
+def _ml_stack_available() -> bool:
+    """True when performance model artifacts can be loaded (not true on Vercel slim deploy)."""
+    global _ml_stack_available_cache
+    if _ml_stack_available_cache is not None:
+        return _ml_stack_available_cache
+    try:
+        from app.services.performance_predict import load_artifacts
+
+        load_artifacts()
+        _ml_stack_available_cache = True
+    except Exception:
+        _ml_stack_available_cache = False
+    return _ml_stack_available_cache
 
 
 def _predict(features: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -204,31 +244,39 @@ def get_performance(user_id: str, course_id: str) -> Dict[str, Any]:
     metrics = (metrics_repository.get(user_id, course_id) or {}).get("metrics", {}) or {}
     grades = _grades(user_id)
 
-    course_avg = _avg_percentage(grades, course_id) or 0.0
-    quiz_avg = _avg_percentage(grades, course_id, "quiz") or 0.0
-    assign_avg = _avg_percentage(grades, course_id, "assignment") or 0.0
+    course_avg = _avg_percentage(grades, course_id)
+    quiz_avg = _avg_percentage(grades, course_id, "quiz")
+    assign_avg = _avg_percentage(grades, course_id, "assignment")
+    has_grade_data = course_avg is not None
 
     feats = _latest_features(user_id)
-    perf = _predict(feats)          # performance model → status
-    grade = _predict_grade(feats)   # grade/risk model → predicted grade (real)
+    stack_ready = _ml_stack_available()
+    has_feature_data = _has_ml_feature_data(feats)
+    perf = None
+    grade = None
+    if stack_ready and has_feature_data:
+        perf = _predict(feats)
+        grade = _predict_grade(feats)
+
     used_model = bool(perf or grade)
+    predicted: int | None = None
+    status: str | None = None
 
-    # Predicted grade: prefer the real grade model, then the course average.
-    if grade and grade.get("predicted_grade") is not None:
-        predicted = round(grade["predicted_grade"])
-    elif course_avg:
-        predicted = round(course_avg)
-    else:
-        predicted = round((perf or {}).get("probability", 0) * 100)
+    if used_model:
+        if grade and grade.get("predicted_grade") is not None:
+            predicted = round(grade["predicted_grade"])
+        elif course_avg is not None:
+            predicted = round(course_avg)
+        elif perf:
+            predicted = round((perf.get("probability", 0) or 0) * 100)
 
-    # Status: prefer the performance model. It classifies "High Performer" at
-    # prob >= 0.5, so mirror that boundary (its probabilities are compressed
-    # near 0.5, so a 0.7 "Good" cutoff would never trigger).
-    if perf:
-        prob = perf.get("probability", 0) or 0
-        status = "Good" if prob >= 0.5 else "Average" if prob >= 0.4 else "At Risk"
-    else:
-        status = "Good" if predicted >= 75 else "Average" if predicted >= 60 else "At Risk"
+        if perf:
+            prob = perf.get("probability", 0) or 0
+            status = "Good" if prob >= 0.5 else "Average" if prob >= 0.4 else "At Risk"
+        elif predicted is not None:
+            status = (
+                "Good" if predicted >= 75 else "Average" if predicted >= 60 else "At Risk"
+            )
 
     total_seconds = metrics.get("total_time_spent_seconds", 0) or 0
     total_hours = round(total_seconds / 3600, 1)
@@ -238,22 +286,38 @@ def get_performance(user_id: str, course_id: str) -> Dict[str, Any]:
         "predictedGrade": predicted,
         "status": status,
         "courseAverage": course_avg,
+        "hasGradeData": has_grade_data,
         "statistics": {
             "quizzes": {
                 "attempted": metrics.get("quiz_attempts", 0) or 0,
-                "total": max(metrics.get("number_of_quizzes_viewed", 0) or 0, metrics.get("quiz_attempts", 0) or 0),
+                "total": max(
+                    metrics.get("number_of_quizzes_viewed", 0) or 0,
+                    metrics.get("quiz_attempts", 0) or 0,
+                ),
                 "averageScore": quiz_avg,
             },
             "assignments": {
                 "attempted": metrics.get("assignment_submissions", 0) or 0,
-                "total": max(metrics.get("number_of_assignments_viewed", 0) or 0, metrics.get("assignment_submissions", 0) or 0),
+                "total": max(
+                    metrics.get("number_of_assignments_viewed", 0) or 0,
+                    metrics.get("assignment_submissions", 0) or 0,
+                ),
                 "averageScore": assign_avg,
             },
             "totalTimeHours": total_hours,
             "weeklyAverageHours": round(total_hours / 3, 1),
         },
-        # status is model-backed when used_model; predictedGrade is the real
-        # course average either way.
+        "engine": "ml" if used_model else "fallback",
+        "mlAvailable": used_model,
+        "message": (
+            None
+            if used_model
+            else (
+                _ML_UNAVAILABLE_MESSAGE
+                if not stack_ready
+                else _ML_NO_FEATURES_MESSAGE
+            )
+        ),
         "heuristic": not used_model,
     }
 

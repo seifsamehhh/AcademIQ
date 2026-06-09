@@ -190,6 +190,9 @@ const performanceByCourse: Record<string, PerformanceAnalysis> = {
     predictedGrade: 82,
     status: "Good",
     courseAverage: 79.5,
+    hasGradeData: true,
+    engine: "ml",
+    mlAvailable: true,
     statistics: {
       quizzes: { attempted: 5, total: 6, averageScore: 81 },
       assignments: { attempted: 4, total: 5, averageScore: 77 },
@@ -202,6 +205,9 @@ const performanceByCourse: Record<string, PerformanceAnalysis> = {
     predictedGrade: 64,
     status: "At Risk",
     courseAverage: 61.2,
+    hasGradeData: true,
+    engine: "ml",
+    mlAvailable: true,
     statistics: {
       quizzes: { attempted: 3, total: 6, averageScore: 58 },
       assignments: { attempted: 2, total: 5, averageScore: 63 },
@@ -214,6 +220,9 @@ const performanceByCourse: Record<string, PerformanceAnalysis> = {
     predictedGrade: 73,
     status: "Average",
     courseAverage: 71.0,
+    hasGradeData: true,
+    engine: "ml",
+    mlAvailable: true,
     statistics: {
       quizzes: { attempted: 6, total: 7, averageScore: 70 },
       assignments: { attempted: 3, total: 4, averageScore: 74 },
@@ -226,6 +235,9 @@ const performanceByCourse: Record<string, PerformanceAnalysis> = {
     predictedGrade: 88,
     status: "Good",
     courseAverage: 86.3,
+    hasGradeData: true,
+    engine: "ml",
+    mlAvailable: true,
     statistics: {
       quizzes: { attempted: 4, total: 4, averageScore: 90 },
       assignments: { attempted: 5, total: 5, averageScore: 85 },

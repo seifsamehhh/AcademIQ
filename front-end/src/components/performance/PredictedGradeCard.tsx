@@ -2,7 +2,8 @@ import { Target } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 
-export function PredictedGradeCard({ grade }: { grade: number }) {
+export function PredictedGradeCard({ grade }: { grade: number | null }) {
+  if (grade === null) return null;
   return (
     <Card>
       <CardHeader>

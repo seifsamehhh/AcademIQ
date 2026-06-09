@@ -26,7 +26,9 @@ function TaskRow({
       </div>
       <div className="text-right">
         <p className="text-lg font-semibold text-foreground">
-          {breakdown.averageScore}%
+          {breakdown.averageScore !== null && breakdown.averageScore !== undefined
+            ? `${breakdown.averageScore}%`
+            : "—"}
         </p>
         <p className="text-xs text-muted-foreground">avg score</p>
       </div>

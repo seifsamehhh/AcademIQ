@@ -11,7 +11,12 @@ const COPY: Record<PerformanceStatus, string> = {
   "At Risk": "This course needs attention. Review the insights for what to fix first.",
 };
 
-export function PerformanceStatusCard({ status }: { status: PerformanceStatus }) {
+export function PerformanceStatusCard({
+  status,
+}: {
+  status: PerformanceStatus | null;
+}) {
+  if (!status) return null;
   const style = performanceStyle(status);
   return (
     <Card>
