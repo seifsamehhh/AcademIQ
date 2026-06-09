@@ -8,12 +8,20 @@ account and never create duplicates. Matching uses stable identifiers only
     1. Moodle User ID  (moodle_user_id)
     2. Student ID      (student_id)
     3. Email           (last-resort tie-breaker)
+    4. Synthesized email from stable Moodle/payload fingerprint (never shared "unknown")
 
 If no account matches, a new `student` account is created automatically with a
 secure random password, and a credentials email is sent.
 """
 
+from __future__ import annotations
+
+import hashlib
+import json
+import re
 from typing import Any, Dict, Optional, Tuple
+
+from pymongo.errors import DuplicateKeyError
 
 from app.models.user import ROLE_STUDENT, build_user_document
 from app.repositories import user_repository
@@ -27,6 +35,48 @@ def _first_non_empty(*values: Optional[str]) -> Optional[str]:
         if value not in (None, ""):
             return str(value).strip()
     return None
+
+
+def _sanitize_email_part(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9._+-]", "_", str(value).strip().lower())
+    return (cleaned[:80] or "sync").strip("_") or "sync"
+
+
+def _payload_identity_hash(payload: Dict[str, Any]) -> str:
+    """Stable fingerprint when Moodle exposes no user identifiers."""
+    student = payload.get("student") or {}
+    fingerprint = {
+        "anon_id": student.get("anon_id"),
+        "courses": sorted(
+            str(c.get("course_id"))
+            for c in (payload.get("courses") or [])
+            if c.get("course_id")
+        ),
+        "metrics_keys": sorted(
+            str(k) for k in (payload.get("metricsByCourse") or {}).keys()
+        ),
+        "behavior": payload.get("behavior") or {},
+    }
+    raw = json.dumps(fingerprint, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def synthesize_provisioning_email(
+    identity: Dict[str, Optional[str]],
+    payload: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Build a unique placeholder email — never a shared fixed address for all users.
+    Priority: moodle_user_id → student_id → payload fingerprint hash.
+    """
+    moodle_user_id = identity.get("moodle_user_id")
+    student_id = identity.get("student_id")
+    if moodle_user_id:
+        return f"moodle+uid_{_sanitize_email_part(moodle_user_id)}@academiq.local"
+    if student_id:
+        return f"moodle+sid_{_sanitize_email_part(student_id)}@academiq.local"
+    digest = _payload_identity_hash(payload or {})
+    return f"moodle+sync_{digest}@academiq.local"
 
 
 def extract_identity(payload: Dict[str, Any]) -> Dict[str, Optional[str]]:
@@ -70,7 +120,9 @@ def find_matching_user(
     return None
 
 
-def _backfill_identity(user: Dict[str, Any], identity: Dict[str, Optional[str]]) -> Dict[str, Any]:
+def _backfill_identity(
+    user: Dict[str, Any], identity: Dict[str, Optional[str]]
+) -> Tuple[Dict[str, Any], bool]:
     """Fill in identity fields that are missing on an existing account."""
     updates: Dict[str, Any] = {}
     for field in ("moodle_user_id", "student_id"):
@@ -82,19 +134,19 @@ def _backfill_identity(user: Dict[str, Any], identity: Dict[str, Optional[str]])
     if updates:
         refreshed = user_repository.update(str(user["_id"]), updates)
         if refreshed:
-            return refreshed
-    return user
+            return refreshed, True
+    return user, False
 
 
 def resolve_or_create_user(
     identity: Dict[str, Optional[str]],
-) -> Tuple[Dict[str, Any], bool]:
+    payload: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Any], bool, bool]:
     """
     Return the AcademIQ user for a Moodle identity, creating one if needed.
 
-    Returns (user_document, created) where `created` is True when a new account
-    was provisioned. A synthetic email is used only as a last resort when Moodle
-    exposes no email, so the account can still be linked and managed by an admin.
+    Returns (user_document, created, updated).
+    Idempotent: repeat syncs for the same Moodle identity update — never duplicate.
     """
     moodle_user_id = identity.get("moodle_user_id")
     student_id = identity.get("student_id")
@@ -103,14 +155,15 @@ def resolve_or_create_user(
 
     existing = find_matching_user(moodle_user_id, student_id, email)
     if existing:
-        return _backfill_identity(existing, identity), False
+        user, updated = _backfill_identity(existing, identity)
+        return user, False, updated
 
-    # No match — provision a new student account.
     if not email:
-        # Synthesise a stable, unique placeholder email from the best identifier
-        # so the account is still uniquely keyed and an admin can fix it later.
-        anchor = moodle_user_id or student_id or "unknown"
-        email = f"moodle+{anchor}@academiq.local"
+        email = synthesize_provisioning_email(identity, payload)
+        existing = find_matching_user(None, None, email)
+        if existing:
+            user, updated = _backfill_identity(existing, identity)
+            return user, False, updated
 
     password = generate_password()
     document = build_user_document(
@@ -121,9 +174,19 @@ def resolve_or_create_user(
         moodle_user_id=moodle_user_id,
         student_id=student_id,
     )
-    created_user = user_repository.create(document)
 
-    # Best-effort credentials email (logged in dev when SMTP is disabled).
-    send_account_created_email(email, full_name, password)
+    try:
+        created_user = user_repository.create(document)
+    except DuplicateKeyError:
+        existing = user_repository.find_by_email(email)
+        if not existing:
+            raise
+        user, updated = _backfill_identity(existing, identity)
+        return user, False, updated
 
-    return created_user, True
+    try:
+        send_account_created_email(email, full_name, password)
+    except Exception as exc:
+        print(f"[WARN] Could not send account-created email to {email}: {exc}")
+
+    return created_user, True, False

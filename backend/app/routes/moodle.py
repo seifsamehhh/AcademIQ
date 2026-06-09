@@ -67,7 +67,9 @@ async def post_raw_moodle_payload(payload: Dict[str, Any], background_tasks: Bac
         #    BEFORE storing anything, so every record is linked to a real user.
         #    Matching is by Moodle User ID, then Student ID — never by name.
         identity = extract_identity(payload)
-        academiq_user, was_created = resolve_or_create_user(identity)
+        academiq_user, user_created, user_updated = resolve_or_create_user(
+            identity, payload=payload
+        )
         academiq_user_id = str(academiq_user["_id"])
         # Prefer the account's canonical student id for downstream keying.
         student_id = academiq_user.get("student_id") or identity.get("student_id")
@@ -80,13 +82,19 @@ async def post_raw_moodle_payload(payload: Dict[str, Any], background_tasks: Bac
         #    course_id+material_id); metrics and events go to their own
         #    collections. Materials are never duplicated across structures.
         norm = normalize_payload(payload, academiq_user_id)
+        metrics_saved = bool(
+            norm.get("metrics_courses", 0) > 0
+            or payload.get("behavior")
+            or payload.get("metricsByCourse")
+            or payload.get("courses")
+        )
 
         now = datetime.utcnow()
 
         # 4. Upsert ONE slim audit record per student — a re-sync UPDATES the
         #    same document instead of inserting a new one each time.
         slim = slim_payload(payload)
-        raw_moodle_payload_collection.update_one(
+        raw_result = raw_moodle_payload_collection.update_one(
             {"academiq_user_id": academiq_user_id},
             {
                 "$set": {**slim, "academiq_user_id": academiq_user_id, "updated_at": now},
@@ -95,38 +103,48 @@ async def post_raw_moodle_payload(payload: Dict[str, Any], background_tasks: Bac
             },
             upsert=True,
         )
+        raw_payload_saved = bool(raw_result.acknowledged)
         raw_doc = raw_moodle_payload_collection.find_one(
             {"academiq_user_id": academiq_user_id}, {"_id": 1}
         )
         raw_id = str(raw_doc["_id"])
 
         # 5. Upsert ONE feature vector per student (the current snapshot).
-        feature_vectors_collection.update_one(
+        fv_result = feature_vectors_collection.update_one(
             {"academiq_user_id": academiq_user_id},
             {
                 "$set": {
                     "raw_payload_id": raw_id,
                     "student_id": student_id or features.get("student_id"),
                     "features": features,
+                    "feature_source": "synced",
                     "updated_at": now,
                 },
                 "$setOnInsert": {"created_at": now},
             },
             upsert=True,
         )
+        feature_vector_updated = bool(
+            fv_result.modified_count > 0 or fv_result.upserted_id is not None
+        )
 
         return {
             "inserted_id": raw_id,
             "status": "features_computed",
             "academiq_user_id": academiq_user_id,
-            "account_created": was_created,
+            "account_created": user_created,
             "login_email": academiq_user.get("email"),
             "student_id": student_id or features.get("student_id"),
             "normalized": norm,
+            "raw_payload_saved": raw_payload_saved,
+            "user_created": user_created,
+            "user_updated": user_updated,
+            "metrics_saved": metrics_saved,
+            "feature_vector_updated": feature_vector_updated,
             "message": (
                 "New AcademIQ account created. Check the backend console for the "
                 "temporary password (or your email if SMTP is configured)."
-                if was_created else
+                if user_created else
                 "Data synced to your existing AcademIQ account."
             ),
         }
