@@ -74,9 +74,16 @@ def _course_code(name: str, course_id: str) -> str:
     return initials or f"C{course_id}"
 
 
-def _latest_features(user_id: str) -> Dict[str, Any]:
+def _latest_features(user_id: str, course_id: str | None = None) -> Dict[str, Any]:
     doc = feature_vectors_collection.find_one({"academiq_user_id": user_id})
-    return (doc or {}).get("features", {}) or {}
+    if not doc:
+        return {}
+    if course_id is not None:
+        by_course = doc.get("course_features") or {}
+        course_feats = by_course.get(str(course_id))
+        if course_feats:
+            return course_feats
+    return doc.get("features", {}) or {}
 
 
 def _resolve_activity_source(user_id: str, metrics: Dict[str, Any]) -> str:
@@ -327,7 +334,7 @@ def get_performance(user_id: str, course_id: str) -> Dict[str, Any]:
     assign_avg = _avg_percentage(grades, course_id, "assignment")
     has_grade_data = course_avg is not None
 
-    feats = _latest_features(user_id)
+    feats = _latest_features(user_id, course_id)
     has_feature_data = _has_ml_feature_data(feats)
     stack_ready = _ml_stack_available()
     service_ready = ml_service_configured()
@@ -426,7 +433,7 @@ def get_performance(user_id: str, course_id: str) -> Dict[str, Any]:
 
 
 def get_insights(user_id: str, course_id: str) -> Dict[str, Any]:
-    feats = _latest_features(user_id)
+    feats = _latest_features(user_id, course_id)
 
     # --- Real model path: SHAP-driven risk factors + recommendations --------
     result = _predict(feats)
