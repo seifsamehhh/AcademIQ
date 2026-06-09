@@ -2,9 +2,10 @@
 Seed demo behavioral feature vectors for Performance Model v4 (ML service).
 
 One MongoDB document per student (unique on academiq_user_id). Course-specific
-vectors live under course_features.{course_id} — same 9 fields the ML service expects.
+vectors live under course_features["101"] etc. — string keys, same 9 ML fields.
 
 Idempotent: skips course entries already marked feature_source=synced; refreshes seeded demo rows.
+Heals academiq_user_id drift when demo accounts were recreated in production.
 
 Run from backend/:
 
@@ -15,11 +16,17 @@ Uses MONGODB_URI from backend/.env (same Atlas DB as production when URI matches
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from app.config.database import ensure_indexes, feature_vectors_collection
+from app.config.database import connect_database, ensure_indexes, feature_vectors_collection
+from app.config.settings import DATABASE_NAME
 from app.repositories import user_repository
+
+logger = logging.getLogger(__name__)
+
+FEATURE_VECTORS_COLLECTION = "feature_vectors"
 
 # Performance Model v4 — must match ml-service/app/performance_model.py REQUIRED_FEATURES
 PERFORMANCE_V4_FEATURES = (
@@ -34,7 +41,7 @@ PERFORMANCE_V4_FEATURES = (
     "late_submission_count",
 )
 
-# student_id -> course_id -> behavioural features (demo-only, not Moodle sync)
+# student_id -> course_id (string) -> behavioural features (demo-only, not Moodle sync)
 DEMO_COURSE_FEATURE_VECTORS: Dict[str, Dict[str, Dict[str, float | int]]] = {
     "student1": {
         "101": {
@@ -105,57 +112,92 @@ def _should_seed_course(existing: Dict[str, Any] | None) -> bool:
     return True
 
 
+def _merge_course_features(
+    existing: Dict[str, Any], course_id: str, payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Ensure all course_features keys are strings."""
+    merged: Dict[str, Any] = {}
+    for key, value in (existing or {}).items():
+        merged[str(key)] = value
+    merged[str(course_id)] = payload
+    return merged
+
+
 def seed_demo_feature_vectors() -> None:
+    if not connect_database():
+        raise RuntimeError("Cannot seed feature vectors — database connection failed")
+
     ensure_indexes()
     now = datetime.now(timezone.utc)
     seeded_count = 0
     skipped_count = 0
 
+    logger.info(
+        "Seeding demo feature vectors into collection=%s database=%s",
+        FEATURE_VECTORS_COLLECTION,
+        DATABASE_NAME,
+    )
+    print(
+        f"Seeding demo feature vectors into collection={FEATURE_VECTORS_COLLECTION} "
+        f"database={DATABASE_NAME}"
+    )
+
     for student_id, courses in DEMO_COURSE_FEATURE_VECTORS.items():
         user = user_repository.find_by_student_id(student_id)
         if not user:
-            print(f"[skip] Student not found: {student_id}")
+            msg = f"[skip] Student not found: {student_id}"
+            print(msg)
+            logger.warning(msg)
             continue
 
         user_id = str(user["_id"])
-        doc = feature_vectors_collection.find_one({"academiq_user_id": user_id}) or {}
+        doc = feature_vectors_collection.find_one(
+            {"$or": [{"academiq_user_id": user_id}, {"student_id": student_id}]}
+        ) or {}
         course_features = doc.get("course_features") or {}
 
         for course_id, raw_features in courses.items():
-            existing = course_features.get(str(course_id))
+            course_key = str(course_id)
+            existing = course_features.get(course_key)
             if not _should_seed_course(existing):
-                print(
-                    f"[skip] {student_id} course {course_id}: synced features present"
-                )
+                msg = f"[skip] {student_id} course {course_key}: synced features present"
+                print(msg)
+                logger.info(msg)
                 skipped_count += 1
                 continue
 
+            payload = _course_feature_payload(course_key, raw_features)
+            course_features = _merge_course_features(course_features, course_key, payload)
+
             feature_vectors_collection.update_one(
-                {"academiq_user_id": user_id},
+                {"_id": doc["_id"]} if doc.get("_id") else {"academiq_user_id": user_id},
                 {
                     "$set": {
-                        f"course_features.{course_id}": _course_feature_payload(
-                            course_id, raw_features
-                        ),
+                        "academiq_user_id": user_id,
                         "student_id": student_id,
+                        "course_features": course_features,
                         "feature_source": "seeded",
                         "seeded_demo": True,
                         "updated_at": now,
                     },
                     "$setOnInsert": {
-                        "academiq_user_id": user_id,
                         "created_at": now,
                     },
                 },
                 upsert=True,
             )
-            print(f"[ok] Seeded feature vector: {student_id} course {course_id}")
+            msg = f"Seeded feature vector for {student_id} course {course_key} (academiq_user_id={user_id})"
+            print(msg)
+            logger.info(msg)
             seeded_count += 1
+            doc = feature_vectors_collection.find_one({"academiq_user_id": user_id}) or doc
 
-    print(
+    summary = (
         f"Demo feature vectors: {seeded_count} course row(s) seeded, "
         f"{skipped_count} skipped (synced)."
     )
+    print(summary)
+    logger.info(summary)
 
 
 if __name__ == "__main__":

@@ -10,15 +10,21 @@ flagged with `heuristic: True`. Once the ML routes are mounted (Python 3.11/3.12
 venv), these can be swapped for real model output / `ml_results`.
 """
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from app.config.database import (
-    feature_vectors_collection,
     raw_moodle_payload_collection,
 )
 from app.repositories import material_repository, metrics_repository
+from app.services.feature_vector_lookup import (
+    log_missing_feature_vector,
+    resolve_course_features,
+)
 from app.services.ml_service_client import ml_service_configured, predict_performance_remote
 from app.services.moodle_ingest import is_real_course
+
+logger = logging.getLogger(__name__)
 
 _OVERALL = metrics_repository.OVERALL
 
@@ -74,16 +80,25 @@ def _course_code(name: str, course_id: str) -> str:
     return initials or f"C{course_id}"
 
 
-def _latest_features(user_id: str, course_id: str | None = None) -> Dict[str, Any]:
-    doc = feature_vectors_collection.find_one({"academiq_user_id": user_id})
-    if not doc:
-        return {}
-    if course_id is not None:
-        by_course = doc.get("course_features") or {}
-        course_feats = by_course.get(str(course_id))
-        if course_feats:
-            return course_feats
-    return doc.get("features", {}) or {}
+def _latest_features(
+    user_id: str,
+    course_id: str | None = None,
+    student_id: str | None = None,
+) -> Dict[str, Any]:
+    feats, _debug = resolve_course_features(user_id, course_id, student_id)
+    return feats
+
+
+def debug_feature_vector(
+    user_id: str, student_id: str, course_id: str
+) -> Dict[str, Any]:
+    """Return diagnostic info for feature vector lookup (demo/debug)."""
+    feats, debug = resolve_course_features(user_id, course_id, student_id)
+    return {
+        **debug,
+        "has_ml_feature_data": _has_ml_feature_data(feats),
+        "stored_fields": feats or None,
+    }
 
 
 def _resolve_activity_source(user_id: str, metrics: Dict[str, Any]) -> str:
@@ -325,7 +340,9 @@ def get_materials(course_id: str) -> List[Dict[str, Any]]:
     return out
 
 
-def get_performance(user_id: str, course_id: str) -> Dict[str, Any]:
+def get_performance(
+    user_id: str, course_id: str, student_id: str | None = None
+) -> Dict[str, Any]:
     metrics = (metrics_repository.get(user_id, course_id) or {}).get("metrics", {}) or {}
     grades = _grades(user_id)
 
@@ -334,8 +351,14 @@ def get_performance(user_id: str, course_id: str) -> Dict[str, Any]:
     assign_avg = _avg_percentage(grades, course_id, "assignment")
     has_grade_data = course_avg is not None
 
-    feats = _latest_features(user_id, course_id)
+    feats, feat_debug = resolve_course_features(user_id, course_id, student_id)
     has_feature_data = _has_ml_feature_data(feats)
+    if not has_feature_data:
+        log_missing_feature_vector(
+            student_id=student_id,
+            course_id=course_id,
+            debug=feat_debug,
+        )
     stack_ready = _ml_stack_available()
     service_ready = ml_service_configured()
 
@@ -432,8 +455,10 @@ def get_performance(user_id: str, course_id: str) -> Dict[str, Any]:
     }
 
 
-def get_insights(user_id: str, course_id: str) -> Dict[str, Any]:
-    feats = _latest_features(user_id, course_id)
+def get_insights(
+    user_id: str, course_id: str, student_id: str | None = None
+) -> Dict[str, Any]:
+    feats = _latest_features(user_id, course_id, student_id)
 
     # --- Real model path: SHAP-driven risk factors + recommendations --------
     result = _predict(feats)

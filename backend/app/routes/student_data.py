@@ -15,12 +15,18 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth import get_current_user
+from app.models.user import ROLE_ADMIN
 from app.repositories import material_repository
 from app.services import quiz_gen, student_data
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Student data"])
+
+
+def _student_id_from_user(user: Dict[str, Any]) -> str | None:
+    sid = user.get("student_id")
+    return str(sid).strip() if sid else None
 
 
 @router.get("/courses")
@@ -35,12 +41,48 @@ def dashboard(user: Dict[str, Any] = Depends(get_current_user)):
 
 @router.get("/courses/{course_id}/performance")
 def performance(course_id: str, user: Dict[str, Any] = Depends(get_current_user)):
-    return student_data.get_performance(str(user["_id"]), course_id)
+    return student_data.get_performance(
+        str(user["_id"]),
+        course_id,
+        _student_id_from_user(user),
+    )
 
 
 @router.get("/courses/{course_id}/insights")
 def insights(course_id: str, user: Dict[str, Any] = Depends(get_current_user)):
-    return student_data.get_insights(str(user["_id"]), course_id)
+    return student_data.get_insights(
+        str(user["_id"]),
+        course_id,
+        _student_id_from_user(user),
+    )
+
+
+@router.get("/debug/feature-vectors/{student_id}/{course_id}")
+def debug_feature_vectors(
+    student_id: str,
+    course_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Demo-safe debug: inspect whether a feature vector exists for student/course.
+    Students may only query their own student_id; admins may query any demo student.
+    """
+    caller_student_id = _student_id_from_user(user)
+    is_admin = user.get("role") == ROLE_ADMIN
+    if not is_admin and caller_student_id != student_id:
+        raise HTTPException(status_code=403, detail="Cannot inspect another student's features")
+
+    from app.repositories import user_repository
+
+    target_user = user_repository.find_by_student_id(student_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail=f"Student not found: {student_id}")
+
+    return student_data.debug_feature_vector(
+        str(target_user["_id"]),
+        student_id,
+        course_id,
+    )
 
 
 @router.get("/courses/{course_id}/materials")

@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from app.config.database import client, connect_database, ensure_indexes
 from app.config.settings import ALLOWED_ORIGINS
+from app.bootstrap import maybe_run_student_bootstrap
 from app.routes import moodle, auth, admin, student_data
 
 app = FastAPI(title="AcademIQ Backend", version="1.0")
@@ -31,7 +32,8 @@ app.add_middleware(
 async def ensure_db_connection(request: Request, call_next):
     """Reconnect on serverless cold starts before auth/data routes run."""
     if request.url.path not in ("/health", "/"):
-        connect_database()
+        if connect_database():
+            maybe_run_student_bootstrap()
     return await call_next(request)
 
 
@@ -53,9 +55,8 @@ def _startup():
 
     if os.environ.get("BOOTSTRAP_STUDENTS", "").lower() == "true":
         try:
-            from app.scripts.seed_students import seed_students
-
-            seed_students()
+            print("BOOTSTRAP_STUDENTS=true — running student bootstrap at startup")
+            maybe_run_student_bootstrap()
         except Exception as exc:
             print(f"Student bootstrap skipped: {exc}")
 
