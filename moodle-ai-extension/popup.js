@@ -296,15 +296,17 @@ const addSyncButton = () => {
             const result = await syncToBackend(data);
             if (result) {
                 const email = result.login_email || "your AcademIQ email";
+                const signinUrl = result.signin_url || "https://academiq-frontend.vercel.app/signin";
                 syncBtn.textContent = "Synced!";
+                const passwordLine = result.account_created && result.temporary_password
+                    ? `Temporary password: ${result.temporary_password}\n\n`
+                    : "";
                 alert(
-                    `${result.message || "Moodle data synced successfully."}\n\n` +
                     `Synced to deployed backend:\nhttps://academiq-backend.vercel.app\n\n` +
-                    `Sign in at https://academiq-frontend.vercel.app/signin\n` +
-                    `Email: ${email}\n` +
-                    (result.account_created
-                        ? `A new AcademIQ account was provisioned — use the email above (check backend logs or your inbox for the temporary password).\n\n`
-                        : `Use your existing AcademIQ password for this account.\n\n`) +
+                    `${result.message || "Moodle data synced successfully."}\n\n` +
+                    `Login email: ${email}\n` +
+                    passwordLine +
+                    `Sign in: ${signinUrl}\n\n` +
                     `Optional: click "Upload PDFs for quiz" in this popup to send course PDFs to the backend for quiz generation.`
                 );
             } else {

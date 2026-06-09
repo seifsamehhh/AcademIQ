@@ -141,12 +141,14 @@ def _backfill_identity(
 def resolve_or_create_user(
     identity: Dict[str, Optional[str]],
     payload: Optional[Dict[str, Any]] = None,
-) -> Tuple[Dict[str, Any], bool, bool]:
+) -> Tuple[Dict[str, Any], bool, bool, Optional[str]]:
     """
     Return the AcademIQ user for a Moodle identity, creating one if needed.
 
-    Returns (user_document, created, updated).
-    Idempotent: repeat syncs for the same Moodle identity update — never duplicate.
+    Returns (user_document, created, updated, temporary_password).
+    `temporary_password` is set only when a new account is provisioned (demo/API
+    visibility). Production should email credentials or force password reset instead
+    of relying on this field long term.
     """
     moodle_user_id = identity.get("moodle_user_id")
     student_id = identity.get("student_id")
@@ -156,14 +158,14 @@ def resolve_or_create_user(
     existing = find_matching_user(moodle_user_id, student_id, email)
     if existing:
         user, updated = _backfill_identity(existing, identity)
-        return user, False, updated
+        return user, False, updated, None
 
     if not email:
         email = synthesize_provisioning_email(identity, payload)
         existing = find_matching_user(None, None, email)
         if existing:
             user, updated = _backfill_identity(existing, identity)
-            return user, False, updated
+            return user, False, updated, None
 
     password = generate_password()
     document = build_user_document(
@@ -182,11 +184,13 @@ def resolve_or_create_user(
         if not existing:
             raise
         user, updated = _backfill_identity(existing, identity)
-        return user, False, updated
+        return user, False, updated, None
 
     try:
         send_account_created_email(email, full_name, password)
     except Exception as exc:
         print(f"[WARN] Could not send account-created email to {email}: {exc}")
 
-    return created_user, True, False
+    # Demo: return plaintext password once for extension visibility. Production
+    # should send credentials by email or force password reset instead.
+    return created_user, True, False, password
