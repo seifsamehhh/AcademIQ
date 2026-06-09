@@ -22,25 +22,61 @@ from app.repositories import session_repository, user_repository
 from app.services.security import hash_token
 
 
-def _extract_token(request: Request) -> Optional[str]:
-    """Pull the session token from the cookie or a Bearer header."""
-    cookie_token = request.cookies.get(SESSION_COOKIE_NAME)
-    if cookie_token:
-        return cookie_token
-
+def _extract_bearer_token(request: Request) -> Optional[str]:
+    """Pull a Bearer token from the Authorization header, if present."""
     auth_header = request.headers.get("Authorization", "")
     if auth_header.lower().startswith("bearer "):
         return auth_header[7:].strip()
     return None
 
 
+def _extract_token(request: Request) -> Optional[str]:
+    """Pull the session token from the cookie or a Bearer header."""
+    cookie_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if cookie_token:
+        return cookie_token
+    return _extract_bearer_token(request)
+
+
+def _user_from_jwt(token: str) -> Optional[Dict[str, Any]]:
+    """If the bearer value is a valid JWT, return the MongoDB user document."""
+    try:
+        from jose import JWTError, jwt
+
+        from app.config.settings import JWT_ALGORITHM, JWT_SECRET_KEY
+
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+    except JWTError:
+        return None
+
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+    return user_repository.find_by_id(str(user_id))
+
+
 def get_current_user(request: Request) -> Dict[str, Any]:
     """Resolve the authenticated user or raise 401. Returns the raw user doc."""
-    token = _extract_token(request)
-    if not token:
+    bearer = _extract_bearer_token(request)
+    if bearer:
+        user = _user_from_jwt(bearer)
+        if user:
+            return user
+
+        session = session_repository.find_valid_session(hash_token(bearer))
+        if session:
+            user = user_repository.find_by_id(session["user_id"])
+            if user:
+                return user
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User no longer exists")
+
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired session")
+
+    cookie_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not cookie_token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not authenticated")
 
-    session = session_repository.find_valid_session(hash_token(token))
+    session = session_repository.find_valid_session(hash_token(cookie_token))
     if not session:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired session")
 

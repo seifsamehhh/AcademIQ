@@ -1,8 +1,9 @@
 # backend/app/routes/student_data.py
 """
 Student-facing data endpoints consumed by the Next.js frontend
-(front-end/src/lib/api.ts). All are scoped to the authenticated student via the
-session cookie (get_current_user), and read the real normalized collections.
+(front-end/src/lib/api.ts). All are scoped to the authenticated student via
+JWT Bearer tokens or legacy session cookies (get_current_user), and read the
+real normalized MongoDB collections.
 
 Paths intentionally have NO /api prefix to match the frontend's api.ts calls
 (/courses, /dashboard, /courses/{id}/performance, ...).

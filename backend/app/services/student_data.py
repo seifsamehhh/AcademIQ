@@ -321,7 +321,7 @@ def get_insights(user_id: str, course_id: str) -> Dict[str, Any]:
 
 
 def get_dashboard(user: Dict[str, Any]) -> Dict[str, Any]:
-    user_id = str(user["_id"])
+    user_id = str(user.get("_id") or user.get("id"))
     feats = _latest_features(user_id)
     grades = _grades(user_id)
     courses = get_courses(user_id)
@@ -393,8 +393,8 @@ def get_dashboard(user: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "student": {
             "id": user_id,
-            "username": user.get("email", ""),
-            "fullName": user.get("full_name", "") or "Student",
+            "username": user.get("email") or user.get("student_id") or "",
+            "fullName": user.get("full_name") or user.get("name") or "Student",
         },
         "stats": {
             "averageScore": overall_avg,
