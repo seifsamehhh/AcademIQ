@@ -86,9 +86,9 @@ def debug_feature_vectors(
 
 
 @router.get("/courses/{course_id}/materials")
-def materials(course_id: str, _user: Dict[str, Any] = Depends(get_current_user)):
-    # Materials are course-scoped (shared), but still gated behind auth.
-    return student_data.get_materials(course_id)
+def materials(course_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    # Materials are course-scoped (shared), filtered by enrolled course name when needed.
+    return student_data.get_materials(course_id, str(user["_id"]))
 
 
 @router.post("/courses/{course_id}/quiz")

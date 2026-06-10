@@ -327,15 +327,31 @@ def _course_obj(user_id: str, course_id: str) -> Dict[str, Any]:
     return {"id": course_id, "name": name, "code": _course_code(name, course_id)}
 
 
-def get_materials(course_id: str) -> List[Dict[str, Any]]:
-    """Real learning materials for a course (LearningMaterial shape)."""
+def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, Any]]:
+    """Real learning materials for a course (LearningMaterial shape).
+
+    When the same course_id maps to different course names for different demo
+    students (e.g. 103 = Computer Vision vs Web Development), filter materials
+    by the enrolled course_name stored in student_metrics.
+    """
+    enrolled_name: str | None = None
+    if user_id:
+        metrics_doc = metrics_repository.get(user_id, str(course_id)) or {}
+        enrolled_name = _clean_course_name(
+            (metrics_doc.get("metrics") or {}).get("course_name")
+        )
+
     out = []
-    for doc in material_repository.list_by_course(course_id):
+    for doc in material_repository.list_by_course(str(course_id)):
+        doc_name = _clean_course_name(doc.get("course_name"))
+        if enrolled_name and doc_name and doc_name != enrolled_name:
+            continue
+        content = (doc.get("content_text") or "").strip()
         out.append({
             "id": doc.get("material_id"),
             "title": doc.get("title", "Untitled"),
             "kind": (doc.get("file_type") or doc.get("category") or "file").upper(),
-            "hasContent": bool((doc.get("content_text") or "").strip()),
+            "hasContent": bool(content),
         })
     return out
 

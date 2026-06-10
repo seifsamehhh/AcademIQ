@@ -131,8 +131,10 @@ def seed_students() -> None:
 
     from app.scripts.seed_demo_materials import seed_demo_materials
     from app.scripts.seed_demo_feature_vectors import seed_demo_feature_vectors
+    from app.scripts.seed_demo_grades import seed_demo_grades
 
     seed_demo_materials()
+    seed_demo_grades()
     print("Running seed_demo_feature_vectors from seed_students...")
     seed_demo_feature_vectors()
 

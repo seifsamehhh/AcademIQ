@@ -19,6 +19,9 @@ DEMO_RESULTS: Dict[str, Dict[str, Any]] = {
         "courses": [
             {"name": "Programming", "grade": 85},
             {"name": "Database", "grade": 78},
+            {"name": "Computer Vision", "grade": 82},
+            {"name": "Artificial Intelligence", "grade": 88},
+            {"name": "Software Engineering", "grade": 80},
         ],
     },
     "student2": {
@@ -26,8 +29,11 @@ DEMO_RESULTS: Dict[str, Dict[str, Any]] = {
         "gpa": 2.8,
         "risk": "Medium",
         "courses": [
-            {"name": "Programming", "grade": 65},
-            {"name": "Web Dev", "grade": 72},
+            {"name": "Programming", "grade": 74},
+            {"name": "Database", "grade": 69},
+            {"name": "Web Development", "grade": 84},
+            {"name": "Data Structures", "grade": 76},
+            {"name": "Machine Learning", "grade": 72},
         ],
     },
 }

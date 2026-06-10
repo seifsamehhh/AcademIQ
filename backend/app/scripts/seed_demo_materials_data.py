@@ -9,15 +9,75 @@ lectures during a presentation.
 
 from __future__ import annotations
 
+import re
+
+
+def _quiz_review_line(term: str, definition: str) -> str:
+    """Format a short definition sentence the lightweight quiz engine can parse."""
+    definition = definition.strip().rstrip(".")
+    if re.match(r"^(a|an|the)\s", definition, re.IGNORECASE):
+        return f"{term} is {definition}."
+    article = "an" if definition[:1].lower() in "aeiou" else "a"
+    return f"{term} is {article} {definition}."
+
 
 def _lecture(title: str, course_name: str, sections: list[tuple[str, list[str]]]) -> str:
     lines = [f"{title} — {course_name} (Seeded Demo Lecture)", ""]
+    quiz_review: list[str] = []
+
     for heading, paragraphs in sections:
         lines.append(heading)
         lines.append("")
         for paragraph in paragraphs:
             lines.append(paragraph)
             lines.append("")
+            if heading == "Definitions":
+                stripped = paragraph.strip().rstrip(".")
+                if " is " in stripped.lower():
+                    quiz_review.append(stripped + ".")
+                else:
+                    match = re.match(
+                        r"^(?:A|An|The)\s+(.+?)\s+(checks|verifies|executes|captures|evaluates|stores|removes|adds|modifies|retrieves|translates|writes|groups|partitions|traces|speeds|requires|links|means|combines|halts|updates|trains|predicts|measures)\s+(.+)$",
+                        stripped,
+                        re.IGNORECASE,
+                    )
+                    if match:
+                        term = match.group(1)
+                        verb = match.group(2).lower()
+                        rest = match.group(3)
+                        quiz_review.append(
+                            _quiz_review_line(
+                                term,
+                                f"process that {verb} {rest}",
+                            )
+                        )
+            elif heading == "Key Concepts":
+                stripped = paragraph.strip().rstrip(".")
+                match = re.match(
+                    r"^([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,4})\s+"
+                    r"(groups|stores|allows|uses|converts|speeds|requires|links|partitions|traces|"
+                    r"halts|updates|combines|controls|defines|creates|adds|removes|modifies|"
+                    r"retrieves|executes|verifies|evaluates|captures|trains|predicts|measures|"
+                    r"records|maps|assigns|detects|prevents|enforces|extends|shrinks|expands|"
+                    r"fills|closes|isolates|processes|applies|builds|selects|compares|pairs|"
+                    r"orders|sorts|filters|joins|reduces|eliminates|separates|inserts|queries|"
+                    r"arranges|connects|traverses|visits|explores|estimates|restricts|penalizes|"
+                    r"normalizes|partitions|schedules|validates|persists|serves|loads|renders|"
+                    r"targets|resolves|determines|describes|models|organizes|partitions)\s+(.+)$",
+                    stripped,
+                )
+                if match:
+                    term = match.group(1)
+                    verb = match.group(2).lower()
+                    rest = match.group(3)
+                    quiz_review.append(
+                        _quiz_review_line(term, f"concept that {verb} {rest}")
+                    )
+
+    if quiz_review:
+        lines.extend(["Quiz Review", ""])
+        lines.extend(quiz_review)
+
     return "\n".join(lines).strip()
 
 
@@ -1091,10 +1151,11 @@ def _software_engineering_materials() -> list[dict]:
                         "Definitions",
                         [
                             "The Software Development Life Cycle is the structured process of planning, building, deploying, and maintaining software.",
-                            "Requirements Engineering captures what stakeholders need the system to do.",
-                            "Design translates requirements into architectures, modules, and interfaces.",
-                            "Implementation writes and integrates source code according to the design.",
-                            "Maintenance fixes defects and adapts software to changing environments.",
+                            "Requirements Engineering is the discipline that captures what stakeholders need the system to do.",
+                            "Design is the phase that translates requirements into architectures, modules, and interfaces.",
+                            "Implementation is the stage that writes and integrates source code according to the design.",
+                            "Maintenance is the ongoing work that fixes defects and adapts software to changing environments.",
+                            "DevOps is a practice that integrates development and operations through automated pipelines.",
                         ],
                     ),
                     (

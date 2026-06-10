@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 _MIN_DEFINITION_LEN = 20
 _MAX_DEFINITION_LEN = 160
 _MAX_OPTION_LEN = 110
-_MIN_QUESTIONS = 5
+_MIN_QUESTIONS = 3
 
 _DEFINITION_PATTERNS = [
     re.compile(
@@ -38,6 +38,25 @@ _DEFINITION_PATTERNS = [
         re.IGNORECASE | re.MULTILINE,
     ),
 ]
+
+_SECTION_HEADERS = (
+    "Definitions",
+    "Key Concepts",
+    "Examples",
+    "Comparisons",
+    "Summary",
+    "Quiz Review",
+    "Glossary for Review",
+    "Seeded Demo Lecture",
+)
+
+
+def _strip_section_headers(text: str) -> str:
+    cleaned = text
+    for header in _SECTION_HEADERS:
+        cleaned = cleaned.replace(header, " ")
+    return cleaned
+
 
 _INVALID_CONCEPTS = {
     "for example",
@@ -147,14 +166,21 @@ def extract_definitions(text: str) -> List[Tuple[str, str]]:
     """Pull concept/definition pairs from lecture-style prose."""
     seen: set[str] = set()
     pairs: List[Tuple[str, str]] = []
-    normalized = re.sub(r"\s+", " ", text.replace("\n", " "))
+    normalized = re.sub(r"\s+", " ", _strip_section_headers(text).replace("\n", " "))
     sentences = re.split(r"(?<=[.!?])\s+", normalized)
 
     for sentence in sentences:
-        if len(sentence.split()) < 8:
+        if len(sentence.split()) < 6:
+            continue
+        lower_sentence = sentence.lower()
+        if " while " in lower_sentence or " whereas " in lower_sentence:
             continue
         for pattern in _DEFINITION_PATTERNS:
-            for concept_raw, defn_raw in pattern.findall(sentence):
+            for match in pattern.findall(sentence):
+                if len(match) == 2:
+                    concept_raw, defn_raw = match
+                else:
+                    continue
                 concept = _normalize_concept(concept_raw)
                 definition = _normalize_definition(defn_raw)
                 key = concept.lower()
@@ -215,7 +241,8 @@ def _pick_distractors(
             break
         option = _format_option(filler)
         key = _option_key(option)
-        if key != correct_key and key not in used_global and option not in candidates:
+        # Generic fillers may repeat across questions; only avoid the correct answer.
+        if key != correct_key and option not in candidates:
             candidates.append(option)
 
     return candidates[:n]
@@ -250,8 +277,8 @@ def _build_question(
         return None
 
     options, correct_idx = _stable_shuffle(unique[:4], f"{concept}:{idx}")
-    for opt in options:
-        used_global.add(_option_key(opt))
+    # Track correct answers globally so the same concept is not quizzed twice.
+    used_global.add(_option_key(correct))
 
     return {
         "id": f"q{idx}",
@@ -273,7 +300,7 @@ def generate_lightweight(text: str, num_questions: int = 8) -> List[Dict[str, An
     pairs = extract_definitions(text)
     logger.info("Lightweight quiz gen: extracted %d definition pairs", len(pairs))
 
-    if len(pairs) < 4:
+    if len(pairs) < 3:
         logger.warning("Lightweight quiz gen: insufficient definitions (%d)", len(pairs))
         return []
 
