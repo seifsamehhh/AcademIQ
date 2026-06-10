@@ -1,3 +1,4 @@
+const PRODUCTION_SIGNIN_URL = "https://academiq-frontend.vercel.app/signin";
 const STORAGE_KEY = "moodleData";
 const PRODUCTION_API_BASE = "https://academiq-backend.vercel.app";
 const SYNC_PATH = "/raw-moodle-payloads";
@@ -296,7 +297,7 @@ const addSyncButton = () => {
             const result = await syncToBackend(data);
             if (result) {
                 const email = result.login_email || "your AcademIQ email";
-                const signinUrl = result.signin_url || "https://academiq-frontend.vercel.app/signin";
+                const signinUrl = PRODUCTION_SIGNIN_URL;
                 syncBtn.textContent = "Synced!";
                 const passwordLine = result.account_created && result.temporary_password
                     ? `Temporary password: ${result.temporary_password}\n\n`

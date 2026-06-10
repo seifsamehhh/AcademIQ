@@ -6,7 +6,6 @@ from typing import Dict, Any
 import base64
 
 from app.config.database import raw_moodle_payload_collection, feature_vectors_collection
-from app.config.settings import APP_LOGIN_URL
 from app.schema.schemas import list_raw_moodle_payload_serial
 from app.services.preprocessing import compute_features
 from app.services.moodle_ingest import normalize_payload, slim_payload
@@ -16,8 +15,8 @@ from app.services import quiz_gen
 
 router = APIRouter()
 
-# Demo sign-in URL returned to the extension when APP_LOGIN_URL is unset on Vercel.
-DEMO_SIGNIN_URL = APP_LOGIN_URL or "https://academiq-frontend.vercel.app/signin"
+# Sign-in URL returned to the Chrome extension sync alert (deployed frontend).
+EXTENSION_SIGNIN_URL = "https://academiq-frontend.vercel.app/signin"
 
 
 @router.post("/materials/content")
@@ -141,7 +140,7 @@ async def post_raw_moodle_payload(payload: Dict[str, Any], background_tasks: Bac
             "account_created": user_created,
             "login_email": academiq_user.get("email"),
             "temporary_password": temporary_password if user_created else None,
-            "signin_url": DEMO_SIGNIN_URL,
+            "signin_url": EXTENSION_SIGNIN_URL,
             "student_id": student_id or features.get("student_id"),
             "normalized": norm,
             "raw_payload_saved": raw_payload_saved,
