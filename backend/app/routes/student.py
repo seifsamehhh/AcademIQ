@@ -13,7 +13,7 @@ demo_router = APIRouter(prefix="/student", tags=["Student Demo"])
 
 DEMO_RESULTS: Dict[str, Dict[str, Any]] = {
     "student1": {
-        "name": "Ahmed Ali",
+        "name": "Seif Sameh",
         "gpa": 3.5,
         "risk": "Low",
         "courses": [
@@ -22,7 +22,7 @@ DEMO_RESULTS: Dict[str, Dict[str, Any]] = {
         ],
     },
     "student2": {
-        "name": "Fatima Mohamed",
+        "name": "Aly Ehab",
         "gpa": 2.8,
         "risk": "Medium",
         "courses": [

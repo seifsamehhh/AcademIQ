@@ -18,13 +18,13 @@ from app.services.auth_service import hash_password
 STUDENTS = [
     {
         "student_id": "student1",
-        "name": "Ahmed Ali",
+        "name": "Seif Sameh",
         "password": "password123",
         "role": ROLE_STUDENT,
     },
     {
         "student_id": "student2",
-        "name": "Fatima Mohamed",
+        "name": "Aly Ehab",
         "password": "pass456",
         "role": ROLE_STUDENT,
     },
@@ -86,22 +86,34 @@ def seed_students() -> None:
     now = datetime.now(timezone.utc)
 
     for spec in STUDENTS:
+        display_name = spec["name"]
         existing = user_repository.find_by_student_id(spec["student_id"])
         if existing:
-            print(f"Student already exists: {spec['student_id']} (no changes made).")
+            updates: dict = {}
+            if existing.get("full_name") != display_name:
+                updates["full_name"] = display_name
+            if existing.get("name") != display_name:
+                updates["name"] = display_name
+            if updates:
+                user_repository.update(str(existing["_id"]), updates)
+                print(
+                    f"Updated demo student name: {spec['student_id']} -> {display_name}"
+                )
+            else:
+                print(f"Student already exists: {spec['student_id']} (name up to date).")
             continue
 
-        # Synthetic email satisfies the unique email index without exposing login via email.
         document = {
             "student_id": spec["student_id"],
-            "name": spec["name"],
+            "full_name": display_name,
+            "name": display_name,
             "email": f"{spec['student_id']}@students.academiq.local",
             "password_hash": hash_password(spec["password"]),
             "role": spec["role"],
             "created_at": now,
         }
         user_repository.create(document)
-        print(f"Created student: {spec['student_id']} ({spec['name']})")
+        print(f"Created student: {spec['student_id']} ({display_name})")
 
     _seed_course_metrics()
 
