@@ -44,8 +44,8 @@ PERFORMANCE_V4_FEATURES = (
 # student_id -> course_id (string) -> behavioural features (demo-only, not Moodle sync)
 #
 # Coverage must match every visible demo course in seed_students.DEMO_COURSE_METRICS:
-#   student1: 101 Programming, 102 Database
-#   student2: 101 Programming, 102 Database, 103 Web Dev
+#   student1: 101–105 (Programming through Software Engineering)
+#   student2: 101–105 (Programming through Machine Learning)
 #
 # Tuned for varied, realistic ML outputs (~38–58 predicted grade); student2/101 is
 # intentionally the weakest visible course (At Risk band, not single-digit scores).
@@ -71,6 +71,39 @@ DEMO_COURSE_FEATURE_VECTORS: Dict[str, Dict[str, Dict[str, float | int]]] = {
             "assignment_submissions": 5,
             "total_time_spent": 38_400,
             "procrastination_index": 2.8,
+            "late_submission_count": 1,
+        },
+        "103": {
+            "all_clicks": 162,
+            "active_days": 22,
+            "access_frequency": 3.6,
+            "material_clicks": 64,
+            "quiz_attempts": 9,
+            "assignment_submissions": 6,
+            "total_time_spent": 43_200,
+            "procrastination_index": 2.1,
+            "late_submission_count": 0,
+        },
+        "104": {
+            "all_clicks": 198,
+            "active_days": 26,
+            "access_frequency": 4.2,
+            "material_clicks": 78,
+            "quiz_attempts": 11,
+            "assignment_submissions": 7,
+            "total_time_spent": 50_400,
+            "procrastination_index": 1.5,
+            "late_submission_count": 0,
+        },
+        "105": {
+            "all_clicks": 142,
+            "active_days": 19,
+            "access_frequency": 3.0,
+            "material_clicks": 55,
+            "quiz_attempts": 7,
+            "assignment_submissions": 5,
+            "total_time_spent": 36_000,
+            "procrastination_index": 2.5,
             "late_submission_count": 1,
         },
     },
@@ -106,6 +139,28 @@ DEMO_COURSE_FEATURE_VECTORS: Dict[str, Dict[str, Dict[str, float | int]]] = {
             "assignment_submissions": 7,
             "total_time_spent": 46_800,
             "procrastination_index": 1.8,
+            "late_submission_count": 0,
+        },
+        "104": {
+            "all_clicks": 118,
+            "active_days": 18,
+            "access_frequency": 2.9,
+            "material_clicks": 46,
+            "quiz_attempts": 7,
+            "assignment_submissions": 5,
+            "total_time_spent": 34_200,
+            "procrastination_index": 3.2,
+            "late_submission_count": 1,
+        },
+        "105": {
+            "all_clicks": 172,
+            "active_days": 25,
+            "access_frequency": 4.0,
+            "material_clicks": 68,
+            "quiz_attempts": 11,
+            "assignment_submissions": 8,
+            "total_time_spent": 52_200,
+            "procrastination_index": 1.4,
             "late_submission_count": 0,
         },
     },
