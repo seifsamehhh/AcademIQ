@@ -105,6 +105,39 @@ def _is_bare_course_id(name: Optional[str], course_id: str) -> bool:
     return False
 
 
+_SECTION_GROUP_RE = re.compile(
+    r":\s*(General|Section|Topic|Group|Week\s*\d+)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_section_group_name(name: Optional[str]) -> bool:
+    """Moodle subsection / group labels such as 'Course Name: General'."""
+    text = (name or "").strip()
+    if not text:
+        return False
+    return bool(_SECTION_GROUP_RE.search(text))
+
+
+def _dashboard_hide_reason(
+    display_name: str,
+    course_id: str,
+    title_source: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Return a hide reason for non-top-level Dashboard courses, or None if visible.
+    """
+    if _is_section_group_name(display_name):
+        return "section_general_group"
+    if title_source == "fallback_id" or _is_bare_course_id(display_name, course_id):
+        return "numeric_orphan"
+    return None
+
+
+def _is_top_level_course_name(name: str, course_id: str) -> bool:
+    return _dashboard_hide_reason(name, course_id) is None
+
+
 def _course_name_map_from_raw(raw: Dict[str, Any], user_id: str = "") -> Dict[str, str]:
     """Best non-bare Moodle title per course_id from the latest payload + metrics."""
     resolved: Dict[str, str] = {}
@@ -225,18 +258,28 @@ def extract_synced_courses(
     collect_filter_reasons: bool = False,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Build the full Moodle course list from the latest raw payload for this user.
+    Build the Moodle course list from the latest raw payload for this user.
 
-  Returns (normalized_courses, filtered_courses_with_reasons).
+    Returns (visible_top_level_courses, hidden_courses_with_reasons).
     """
     raw = raw_moodle_payload_collection.find_one({"academiq_user_id": user_id}) or {}
     candidates_map = _course_name_candidates_from_raw(raw, user_id)
     payload_synced_at = _iso_timestamp(raw.get("updated_at") or raw.get("created_at"))
 
     by_id: Dict[str, Dict[str, Any]] = {}
-    filtered: List[Dict[str, Any]] = []
+    hidden: List[Dict[str, Any]] = []
+    hidden_keys: set[str] = set()
 
-    def _add_course(
+    def _record_hidden(entry: Dict[str, Any]) -> None:
+        if not collect_filter_reasons:
+            return
+        key = f"{entry.get('courseId')}:{entry.get('hiddenReason')}"
+        if key in hidden_keys:
+            return
+        hidden_keys.add(key)
+        hidden.append(entry)
+
+    def _register_course(
         course_id: str,
         raw_name: Optional[str],
         last_access: Any = None,
@@ -244,41 +287,62 @@ def extract_synced_courses(
     ) -> None:
         cid = str(course_id).strip()
         if not cid:
-            if collect_filter_reasons:
-                filtered.append({"courseId": None, "reason": "missing_course_id", "origin": origin})
+            _record_hidden(
+                {
+                    "courseId": None,
+                    "courseName": None,
+                    "hiddenReason": "missing_course_id",
+                    "origin": origin,
+                }
+            )
             return
         if cid in by_id:
             return
         if not is_real_course(cid, raw_name):
-            if collect_filter_reasons:
-                filtered.append(
-                    {
-                        "courseId": cid,
-                        "reason": "excluded_nav_or_site_home",
-                        "rawName": raw_name,
-                        "origin": origin,
-                    }
-                )
+            _record_hidden(
+                {
+                    "courseId": cid,
+                    "courseName": raw_name,
+                    "hiddenReason": "excluded_nav_or_site_home",
+                    "origin": origin,
+                }
+            )
             return
+
         display, title_source = resolve_synced_course_display_name_with_source(
             cid, raw_name, candidates_map
         )
+        hide_reason = _dashboard_hide_reason(display, cid, title_source)
+        if hide_reason:
+            _record_hidden(
+                {
+                    "courseId": cid,
+                    "courseName": display,
+                    "hiddenReason": hide_reason,
+                    "titleSource": title_source,
+                    "origin": origin,
+                }
+            )
+            return
+
         last_synced = _iso_timestamp(last_access) or payload_synced_at
         by_id[cid] = _course_entry(cid, display, last_synced, title_source)
 
+    # Primary: My Courses / extension course cards (raw payload courses array).
     for course in raw.get("courses") or []:
         cid = course.get("course_id")
-        _add_course(
+        _register_course(
             str(cid) if cid is not None else "",
             course.get("course_name"),
             course.get("last_access_time"),
             origin="raw_courses",
         )
 
+    # Supplement only when a real top-level title exists outside the card list.
     for cid, metrics in (raw.get("metricsByCourse") or {}).items():
         if not metrics:
             continue
-        _add_course(
+        _register_course(
             str(cid),
             metrics.get("course_name"),
             metrics.get("last_access_time"),
@@ -290,7 +354,7 @@ def extract_synced_courses(
         if cid == metrics_repository.OVERALL:
             continue
         metrics = row.get("metrics") or {}
-        _add_course(
+        _register_course(
             str(cid),
             metrics.get("course_name"),
             metrics.get("last_access_time"),
@@ -298,12 +362,12 @@ def extract_synced_courses(
         )
 
     courses = sorted(by_id.values(), key=lambda c: c["name"].lower())
-    return courses, filtered
+    return courses, hidden
 
 
 def get_synced_courses_for_user(user_id: str) -> List[Dict[str, Any]]:
-    """All Moodle-synced courses for Dashboard, Quiz, and Performance."""
-    courses, _ = extract_synced_courses(user_id)
+    """Top-level Moodle courses for Dashboard, Quiz, and Performance."""
+    courses, _hidden = extract_synced_courses(user_id)
     return courses
 
 
@@ -320,10 +384,10 @@ def debug_synced_courses_for_email(email: str) -> Dict[str, Any]:
             "academiqUserId": None,
             "rawPayloadCount": 0,
             "extractedCourseCount": 0,
-            "normalizedCourseList": [],
-            "displayedCourseCount": 0,
-            "filteredCourses": [],
-            "filteredCount": 0,
+            "visibleCourses": [],
+            "hiddenCourses": [],
+            "visibleCourseCount": 0,
+            "hiddenCourseCount": 0,
         }
 
     user_id = str(user["_id"])
@@ -333,15 +397,7 @@ def debug_synced_courses_for_email(email: str) -> Dict[str, Any]:
     raw = raw_moodle_payload_collection.find_one({"academiq_user_id": user_id}) or {}
     extracted_count = len(raw.get("courses") or [])
 
-    courses, filtered = extract_synced_courses(user_id, collect_filter_reasons=True)
-    title_sources = [
-        {
-            "courseId": course["id"],
-            "courseName": course["name"],
-            "titleSource": course.get("titleSource", "unknown"),
-        }
-        for course in courses
-    ]
+    visible, hidden = extract_synced_courses(user_id, collect_filter_reasons=True)
 
     return {
         "email": user.get("email"),
@@ -349,9 +405,13 @@ def debug_synced_courses_for_email(email: str) -> Dict[str, Any]:
         "academiqUserId": user_id,
         "rawPayloadCount": raw_payload_count,
         "extractedCourseCount": extracted_count,
-        "normalizedCourseList": courses,
-        "displayedCourseCount": len(courses),
-        "courseTitleSources": title_sources,
-        "filteredCourses": filtered,
-        "filteredCount": len(filtered),
+        "visibleCourses": visible,
+        "visibleCourseCount": len(visible),
+        "hiddenCourses": hidden,
+        "hiddenCourseCount": len(hidden),
+        # Back-compat aliases for earlier debug clients
+        "normalizedCourseList": visible,
+        "displayedCourseCount": len(visible),
+        "filteredCourses": hidden,
+        "filteredCount": len(hidden),
     }

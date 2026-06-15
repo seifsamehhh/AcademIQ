@@ -207,6 +207,14 @@
         return false;
     };
 
+    const SECTION_GROUP_RE = /:\s*(General|Section|Topic|Group|Week\s*\d+)\s*$/i;
+    const isSectionGroupName = (name) => SECTION_GROUP_RE.test((name || "").trim());
+
+    const isTopLevelCourse = (name, courseId) => {
+        if (!name || isSectionGroupName(name) || isBareCourseName(name, courseId)) return false;
+        return true;
+    };
+
     const pickBetterCourseName = (current, candidate, courseId) => {
         if (!candidate) return current;
         if (isBareCourseName(candidate, courseId)) return current;
@@ -673,6 +681,7 @@
 
             const resolved = bestCourseTitleFromSources(extractCourseTitleFromAnchor(anchor), id);
             if (resolved.name && GENERIC_COURSE_NAMES.test(resolved.name)) return;
+            if (resolved.name && isSectionGroupName(resolved.name)) return;
 
             const existing = map.get(id);
             const courseName = pickBetterCourseName(
@@ -680,6 +689,7 @@
                 resolved.name || `Course ${id}`,
                 id
             );
+            if (!isTopLevelCourse(courseName, id)) return;
             map.set(id, {
                 course_id: id,
                 course_name: courseName,
@@ -777,7 +787,7 @@
             }
         }
 
-        sendMessage("courses", courses);
+        sendMessage("courses", courses.filter((course) => isTopLevelCourse(course.course_name, course.course_id)));
         sendMessage("course_title_debug", titleDebug);
         sendMessage("identity", getStudentIdentity());
         return { courses: courses.length, scraped };
