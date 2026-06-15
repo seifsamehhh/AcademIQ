@@ -9,7 +9,11 @@ from app.config.database import raw_moodle_payload_collection, feature_vectors_c
 from app.schema.schemas import list_raw_moodle_payload_serial
 from app.services.preprocessing import compute_features
 from app.services.moodle_ingest import normalize_payload, slim_payload
-from app.services.user_provisioning import extract_identity, resolve_or_create_user
+from app.services.user_provisioning import (
+    extract_identity,
+    issue_demo_sync_temporary_password,
+    resolve_or_create_user,
+)
 from app.repositories import material_repository
 from app.services import quiz_gen
 from app.services.synced_features import build_synced_course_features
@@ -75,8 +79,19 @@ async def post_raw_moodle_payload(payload: Dict[str, Any], background_tasks: Bac
         academiq_user = provision["user"]
         user_created = provision["created"]
         user_updated = provision["updated"]
-        temporary_password = provision["temporary_password"]
         academiq_user_id = str(academiq_user["_id"])
+
+        # Demo only: always return a fresh AcademIQ temporary password in the sync
+        # response (new account or re-sync). Never use the university Moodle password.
+        # Production should email a password-reset link instead.
+        password_reset_for_demo = False
+        if user_created:
+            temporary_password = provision["temporary_password"]
+        else:
+            temporary_password = issue_demo_sync_temporary_password(academiq_user_id)
+            password_reset_for_demo = True
+            user_updated = True
+
         # Prefer the account's canonical student id for downstream keying.
         student_id = academiq_user.get("student_id") or identity.get("student_id")
 
@@ -148,8 +163,9 @@ async def post_raw_moodle_payload(payload: Dict[str, Any], background_tasks: Bac
             "status": "features_computed",
             "academiq_user_id": academiq_user_id,
             "account_created": user_created,
+            "password_reset_for_demo": password_reset_for_demo,
             "login_email": academiq_user.get("email"),
-            "temporary_password": temporary_password if user_created else None,
+            "temporary_password": temporary_password,
             "signin_url": EXTENSION_SIGNIN_URL,
             "student_id": student_id or features.get("student_id"),
             "normalized": norm,
@@ -160,8 +176,8 @@ async def post_raw_moodle_payload(payload: Dict[str, Any], background_tasks: Bac
             "feature_vector_updated": feature_vector_updated,
             "message": (
                 "New AcademIQ account created. Save the temporary password below to sign in."
-                if user_created else
-                "This AcademIQ account already exists. Data synced — use your existing password to sign in."
+                if user_created
+                else "AcademIQ account already exists. A new temporary password was generated for demo sign-in."
             ),
         }
 

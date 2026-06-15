@@ -297,14 +297,19 @@ const addSyncButton = () => {
             const result = await syncToBackend(data);
             if (result) {
                 const email = result.login_email || "your AcademIQ email";
-                const signinUrl = PRODUCTION_SIGNIN_URL;
+                const signinUrl = result.signin_url || PRODUCTION_SIGNIN_URL;
                 syncBtn.textContent = "Synced!";
-                const passwordLine = result.account_created && result.temporary_password
+                const passwordLine = result.temporary_password
                     ? `Temporary password: ${result.temporary_password}\n\n`
                     : "";
+                const accountLine = result.account_created
+                    ? "A new AcademIQ account was created.\n\n"
+                    : result.password_reset_for_demo
+                        ? "Your AcademIQ account already existed. A new temporary password was generated for demo sign-in.\n\n"
+                        : "";
                 alert(
                     `Synced to deployed backend:\nhttps://academiq-backend.vercel.app\n\n` +
-                    `${result.message || "Moodle data synced successfully."}\n\n` +
+                    accountLine +
                     `Login email: ${email}\n` +
                     passwordLine +
                     `Sign in: ${signinUrl}\n\n` +

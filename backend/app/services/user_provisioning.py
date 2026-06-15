@@ -153,6 +153,19 @@ def _provisioning_result(
     }
 
 
+def issue_demo_sync_temporary_password(user_id: str) -> str:
+    """
+    Demo only: regenerate an AcademIQ login password when Moodle re-syncs to an
+    existing account so the Chrome extension can display usable credentials.
+
+    This never reads, stores, or returns the university Moodle password.
+    Production should send a password-reset email instead of returning plaintext.
+    """
+    password = generate_password()
+    user_repository.update(user_id, {"password_hash": hash_password(password)})
+    return password
+
+
 def resolve_or_create_user(
     identity: Dict[str, Optional[str]],
     payload: Optional[Dict[str, Any]] = None,
