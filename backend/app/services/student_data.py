@@ -24,7 +24,10 @@ from app.services.feature_vector_lookup import (
 from app.services.ml_service_client import ml_service_configured, predict_performance_remote
 from app.services.moodle_ingest import is_real_course
 from app.services.moodle_sync_status import has_synced_moodle_data
-from app.services.moodle_course_display import get_synced_courses_for_user
+from app.services.moodle_course_display import (
+    get_visible_synced_courses_for_user,
+    should_use_visible_moodle_courses,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -308,10 +311,10 @@ def _store_prediction(user_id: str, result: Dict[str, Any]) -> None:
         pass
 
 
-def get_courses(user_id: str) -> List[Dict[str, Any]]:
-    """The student's courses (derived from their per-course metrics)."""
-    if has_synced_moodle_data(user_id):
-        return get_synced_courses_for_user(user_id)
+def get_courses(user_id: str, student_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """The student's courses — filtered Moodle My Courses when synced."""
+    if should_use_visible_moodle_courses(user_id, student_id) or has_synced_moodle_data(user_id):
+        return get_visible_synced_courses_for_user(user_id)
 
     courses = []
     for m in metrics_repository.list_for_user(user_id):
@@ -327,9 +330,9 @@ def get_courses(user_id: str) -> List[Dict[str, Any]]:
     return courses
 
 
-def _course_obj(user_id: str, course_id: str) -> Dict[str, Any]:
-    if has_synced_moodle_data(user_id):
-        for course in get_synced_courses_for_user(user_id):
+def _course_obj(user_id: str, course_id: str, student_id: Optional[str] = None) -> Dict[str, Any]:
+    if should_use_visible_moodle_courses(user_id, student_id) or has_synced_moodle_data(user_id):
+        for course in get_visible_synced_courses_for_user(user_id):
             if str(course["id"]) == str(course_id):
                 return {
                     "id": course["id"],
@@ -381,7 +384,9 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
         enrolled_name = _clean_course_name(
             (metrics_doc.get("metrics") or {}).get("course_name")
         )
-        apply_demo_name_filter = not has_synced_moodle_data(user_id)
+        apply_demo_name_filter = not should_use_visible_moodle_courses(
+            user_id, None
+        ) and not has_synced_moodle_data(user_id)
 
     out = []
     for doc in material_repository.list_by_course(str(course_id)):
@@ -471,7 +476,7 @@ def get_performance(
     )
 
     return {
-        "course": _course_obj(user_id, course_id),
+        "course": _course_obj(user_id, course_id, student_id),
         "predictedGrade": predicted,
         "status": status,
         "courseAverage": course_avg,
@@ -547,7 +552,7 @@ def get_insights(
         if note:
             summary += f" {note}"
         return {
-            "course": _course_obj(user_id, course_id),
+            "course": _course_obj(user_id, course_id, student_id),
             "isHighPerformer": prob >= 0.5,
             "classificationSummary": summary.strip(),
             "riskFactors": model_factors,
@@ -575,7 +580,7 @@ def get_insights(
         "Your engagement/score signals suggest room to improve in this course. The factors below have the most impact."
     )
     return {
-        "course": _course_obj(user_id, course_id),
+        "course": _course_obj(user_id, course_id, student_id),
         "isHighPerformer": is_high,
         "classificationSummary": summary,
         "riskFactors": factors,
@@ -587,7 +592,7 @@ def get_dashboard(user: Dict[str, Any]) -> Dict[str, Any]:
     user_id = str(user.get("_id") or user.get("id"))
     feats = _latest_features(user_id)
     grades = _grades(user_id)
-    courses = get_courses(user_id)
+    courses = get_courses(user_id, user.get("student_id"))
 
     overall_avg = _avg_percentage(grades)
     if overall_avg is None:

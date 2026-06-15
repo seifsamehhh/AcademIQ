@@ -22,9 +22,10 @@ from app.demo_data import DEMO_RESULTS, DEMO_STUDENT_IDS
 from app.services.feature_vector_lookup import find_feature_vector_doc
 from app.services.ml_service_client import ml_service_configured, predict_performance_remote
 from app.services.moodle_course_display import (
-    get_synced_courses_for_user,
+    get_visible_synced_courses_for_user,
     resolve_display_name,
     resolve_login_email,
+    should_use_visible_moodle_courses,
 )
 from app.services.moodle_sync_status import has_synced_moodle_data
 from app.services.moodle_ingest import is_real_course
@@ -140,7 +141,7 @@ def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
     grade_rows = _grades(user_id)
     courses_out: List[Dict[str, Any]] = []
 
-    for course in get_synced_courses_for_user(user_id):
+    for course in get_visible_synced_courses_for_user(user_id):
         cid = str(course["id"])
         course_avg = _avg_percentage(grade_rows, cid)
         courses_out.append(
@@ -187,7 +188,7 @@ def build_student_results(user: Dict[str, Any]) -> Dict[str, Any]:
     user_id = str(user["_id"])
     student_id = user.get("student_id")
 
-    if has_synced_moodle_data(user_id):
+    if should_use_visible_moodle_courses(user_id, student_id) or has_synced_moodle_data(user_id):
         return build_synced_results(user)
 
     if student_id in DEMO_STUDENT_IDS:

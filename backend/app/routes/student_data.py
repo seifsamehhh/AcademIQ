@@ -31,7 +31,7 @@ def _student_id_from_user(user: Dict[str, Any]) -> str | None:
 
 @router.get("/courses")
 def list_courses(user: Dict[str, Any] = Depends(get_current_user)):
-    return student_data.get_courses(str(user["_id"]))
+    return student_data.get_courses(str(user["_id"]), user.get("student_id"))
 
 
 @router.get("/dashboard")

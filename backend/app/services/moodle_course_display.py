@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.config.database import raw_moodle_payload_collection
+from app.demo_data import DEMO_STUDENT_IDS
 from app.repositories import material_repository, metrics_repository
 from app.services.moodle_ingest import is_real_course
 
@@ -365,10 +366,44 @@ def extract_synced_courses(
     return courses, hidden
 
 
-def get_synced_courses_for_user(user_id: str) -> List[Dict[str, Any]]:
-    """Top-level Moodle courses for Dashboard, Quiz, and Performance."""
+def should_use_visible_moodle_courses(
+    user_id: str,
+    student_id: Optional[str] = None,
+) -> bool:
+    """
+    True when this account should use the filtered Moodle My Courses list.
+
+    Demo seeded accounts keep their hardcoded course lists even if a raw
+    payload exists with grades_source=seeded.
+    """
+    if student_id in DEMO_STUDENT_IDS:
+        return False
+    raw = raw_moodle_payload_collection.find_one({"academiq_user_id": user_id})
+    if not raw:
+        return False
+    if raw.get("grades_source") == "seeded":
+        return False
+    return bool(
+        raw.get("courses")
+        or raw.get("metricsByCourse")
+        or raw.get("sync_count")
+        or raw.get("behavior")
+    )
+
+
+def get_visible_synced_courses_for_user(user_id: str) -> List[Dict[str, Any]]:
+    """
+    Canonical filtered top-level Moodle course list for all student-facing APIs.
+
+    Same logic as GET /debug/synced-courses visibleCourses.
+    """
     courses, _hidden = extract_synced_courses(user_id)
     return courses
+
+
+def get_synced_courses_for_user(user_id: str) -> List[Dict[str, Any]]:
+    """Alias for backwards compatibility — always returns visible courses only."""
+    return get_visible_synced_courses_for_user(user_id)
 
 
 def debug_synced_courses_for_email(email: str) -> Dict[str, Any]:
@@ -409,9 +444,12 @@ def debug_synced_courses_for_email(email: str) -> Dict[str, Any]:
         "visibleCourseCount": len(visible),
         "hiddenCourses": hidden,
         "hiddenCourseCount": len(hidden),
-        # Back-compat aliases for earlier debug clients
+        # Back-compat aliases — filtered visible list only (never unfiltered).
         "normalizedCourseList": visible,
         "displayedCourseCount": len(visible),
         "filteredCourses": hidden,
         "filteredCount": len(hidden),
+        "usesVisibleCourseList": should_use_visible_moodle_courses(
+            user_id, user.get("student_id")
+        ),
     }
