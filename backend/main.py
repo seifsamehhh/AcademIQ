@@ -84,6 +84,47 @@ def health_db():
         raise HTTPException(status_code=503, detail=f"Database unreachable: {e}")
 
 
+# Known collections — keys are stable API labels; values are MongoDB collection names.
+_DEBUG_COLLECTIONS: dict[str, str] = {
+    "users": "users",
+    "raw_moodle_payloads": "raw_moodle_payload_collection",
+    "course_materials": "course_materials",
+    "student_metrics": "student_metrics",
+    "feature_vectors": "feature_vectors",
+}
+
+
+@app.get("/debug/db-info")
+def debug_db_info():
+    """
+    Temporary safe diagnostics: database name, collection list, and document counts.
+    Does not return connection strings, credentials, or document contents.
+    """
+    from app.config.database import db
+    from app.config.settings import DATABASE_NAME
+
+    if not connect_database() or db is None:
+        raise HTTPException(status_code=503, detail="Database unreachable")
+
+    document_counts: dict[str, int | None] = {}
+    for label, coll_name in _DEBUG_COLLECTIONS.items():
+        try:
+            document_counts[label] = db[coll_name].count_documents({})
+        except Exception:
+            document_counts[label] = None
+
+    try:
+        collection_names = sorted(db.list_collection_names())
+    except Exception:
+        collection_names = []
+
+    return {
+        "database_name": DATABASE_NAME,
+        "collection_names": collection_names,
+        "document_counts": document_counts,
+    }
+
+
 @app.exception_handler(RuntimeError)
 async def runtime_error_handler(_request: Request, exc: RuntimeError):
     return JSONResponse(status_code=503, content={"detail": str(exc)})
