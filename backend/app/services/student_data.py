@@ -24,6 +24,7 @@ from app.services.feature_vector_lookup import (
 from app.services.ml_service_client import ml_service_configured, predict_performance_remote
 from app.services.moodle_ingest import is_real_course
 from app.services.moodle_sync_status import has_synced_moodle_data
+from app.services.moodle_course_display import get_synced_courses_for_user
 
 logger = logging.getLogger(__name__)
 
@@ -309,6 +310,9 @@ def _store_prediction(user_id: str, result: Dict[str, Any]) -> None:
 
 def get_courses(user_id: str) -> List[Dict[str, Any]]:
     """The student's courses (derived from their per-course metrics)."""
+    if has_synced_moodle_data(user_id):
+        return get_synced_courses_for_user(user_id)
+
     courses = []
     for m in metrics_repository.list_for_user(user_id):
         cid = m.get("course_id")

@@ -19,6 +19,13 @@ from app.config.database import (
 )
 from app.repositories import metrics_repository, user_repository
 from app.demo_data import DEMO_RESULTS, DEMO_STUDENT_IDS
+from app.services.feature_vector_lookup import find_feature_vector_doc
+from app.services.ml_service_client import ml_service_configured, predict_performance_remote
+from app.services.moodle_course_display import (
+    get_synced_courses_for_user,
+    resolve_display_name,
+    resolve_login_email,
+)
 from app.services.moodle_sync_status import has_synced_moodle_data
 from app.services.moodle_ingest import is_real_course
 from app.services.student_data import (
@@ -26,7 +33,6 @@ from app.services.student_data import (
     _clean_course_name,
     _course_code,
     _grades,
-    get_courses,
 )
 
 
@@ -68,14 +74,55 @@ def _course_activity_summary(user_id: str, course_id: str) -> Dict[str, Any]:
     }
 
 
-def _derive_risk(avg_grade: Optional[float]) -> str:
+def _derive_demo_risk(avg_grade: Optional[float]) -> str:
     if avg_grade is None:
-        return "Unknown"
+        return "Pending"
     if avg_grade >= 80:
         return "Low"
     if avg_grade >= 65:
         return "Medium"
     return "High"
+
+
+def _derive_synced_risk(
+    user_id: str,
+    student_id: Optional[str],
+    overall_avg: Optional[float],
+) -> str:
+    """Activity / ML based risk label for synced Moodle users."""
+    doc, _matched = find_feature_vector_doc(user_id, student_id)
+    feats = (doc or {}).get("features") or {}
+
+    if doc and doc.get("feature_source") == "synced" and feats and ml_service_configured():
+        remote = predict_performance_remote(feats)
+        if remote:
+            status = (remote.get("status") or "").strip()
+            if status == "Good":
+                return "Low risk"
+            if status == "Average":
+                return "Medium risk"
+            if status == "At Risk":
+                return "At risk"
+
+    if feats and doc and doc.get("feature_source") == "synced":
+        late = int(feats.get("late_submission_count") or 0)
+        proc = float(feats.get("procrastination_index") or 0)
+        active = int(feats.get("active_days") or 0)
+        if late >= 2 or proc >= 5:
+            return "At risk"
+        if late >= 1 or proc >= 3 or active < 8:
+            return "Medium risk"
+        if active >= 8:
+            return "Low risk"
+
+    if overall_avg is not None:
+        if overall_avg >= 80:
+            return "Low risk"
+        if overall_avg >= 65:
+            return "Medium risk"
+        return "At risk"
+
+    return "Pending"
 
 
 def _gpa_from_percentages(grades: List[float]) -> Optional[float]:
@@ -88,11 +135,12 @@ def _gpa_from_percentages(grades: List[float]) -> Optional[float]:
 def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
     """Build dashboard results from synced MongoDB collections."""
     user_id = str(user["_id"])
-    display_name = user.get("full_name") or user.get("name") or "Student"
+    student_id = user.get("student_id")
+    display_name = resolve_display_name(user)
     grade_rows = _grades(user_id)
     courses_out: List[Dict[str, Any]] = []
 
-    for course in get_courses(user_id):
+    for course in get_synced_courses_for_user(user_id):
         cid = str(course["id"])
         course_avg = _avg_percentage(grade_rows, cid)
         courses_out.append(
@@ -107,11 +155,19 @@ def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
 
     graded = [c["grade"] for c in courses_out if c["grade"] is not None]
     overall_avg = round(sum(graded) / len(graded), 1) if graded else None
+    gpa_available = bool(graded)
 
     return {
         "name": display_name,
-        "gpa": _gpa_from_percentages(graded),
-        "risk": _derive_risk(overall_avg),
+        "loginEmail": resolve_login_email(user),
+        "gpa": _gpa_from_percentages(graded) if gpa_available else None,
+        "gpaAvailable": gpa_available,
+        "gpaNote": (
+            None
+            if gpa_available
+            else "GPA is not included in the synced Moodle course data yet."
+        ),
+        "risk": _derive_synced_risk(user_id, student_id, overall_avg),
         "courses": courses_out,
         "dataSource": "synced",
         "lastSync": _last_sync_iso(user_id),
@@ -134,9 +190,16 @@ def build_student_results(user: Dict[str, Any]) -> Dict[str, Any]:
     if student_id in DEMO_STUDENT_IDS:
         demo = DEMO_RESULTS.get(student_id, {})
         if demo:
-            return {**demo, "dataSource": "demo", "lastSync": None}
+            return {
+                **demo,
+                "dataSource": "demo",
+                "lastSync": None,
+                "loginEmail": resolve_login_email(user),
+                "gpaAvailable": demo.get("gpa") is not None,
+                "gpaNote": None,
+            }
 
-    display_name = user.get("full_name") or user.get("name") or "Student"
+    display_name = resolve_display_name(user)
     courses_out: List[Dict[str, Any]] = []
     grade_rows = _grades(user_id)
 
@@ -166,8 +229,11 @@ def build_student_results(user: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "name": display_name,
+        "loginEmail": resolve_login_email(user),
         "gpa": _gpa_from_percentages(graded),
-        "risk": _derive_risk(overall_avg),
+        "gpaAvailable": bool(graded),
+        "gpaNote": None if graded else "GPA is not included in the synced Moodle course data yet.",
+        "risk": _derive_demo_risk(overall_avg),
         "courses": courses_out,
         "dataSource": "metrics_only" if courses_out else "none",
         "lastSync": _last_sync_iso(user_id),

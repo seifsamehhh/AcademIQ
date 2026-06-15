@@ -68,7 +68,10 @@ export interface DemoCourseResult {
 /** Academic results from GET /student/{student_id}/results. */
 export interface StudentResults {
   name?: string;
+  loginEmail?: string;
   gpa?: number | null;
+  gpaAvailable?: boolean;
+  gpaNote?: string | null;
   risk?: string;
   courses?: DemoCourseResult[];
   dataSource?: "synced" | "demo" | "metrics_only" | "none";

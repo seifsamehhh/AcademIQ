@@ -68,7 +68,10 @@ export default function DashboardPage() {
   }
 
   const displayName = results?.name ?? studentName ?? "Student";
+  const signedInAs = results?.loginEmail || studentId;
   const hasResults = Boolean(results?.name);
+  const gpaUnavailable =
+    results?.gpaAvailable === false || (results?.dataSource === "synced" && results?.gpa == null);
 
   return (
     <div className="space-y-8">
@@ -77,7 +80,7 @@ export default function DashboardPage() {
           Welcome, {displayName}
         </h1>
         <p className="text-muted-foreground">
-          Signed in as <span className="font-medium">{studentId}</span>
+          Signed in as <span className="font-medium">{signedInAs}</span>
           {results?.dataSource === "synced" && results.lastSync ? (
             <>
               {" "}
@@ -106,8 +109,13 @@ export default function DashboardPage() {
               </CardHeader>
               <CardContent>
                 <p className="text-3xl font-bold text-foreground">
-                  {results!.gpa ?? "—"}
+                  {gpaUnavailable ? "Not available" : results!.gpa}
                 </p>
+                {gpaUnavailable && results?.gpaNote ? (
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    {results.gpaNote}
+                  </p>
+                ) : null}
               </CardContent>
             </Card>
             <Card>
