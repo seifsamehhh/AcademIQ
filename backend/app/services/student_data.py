@@ -328,6 +328,16 @@ def get_courses(user_id: str) -> List[Dict[str, Any]]:
 
 
 def _course_obj(user_id: str, course_id: str) -> Dict[str, Any]:
+    if has_synced_moodle_data(user_id):
+        for course in get_synced_courses_for_user(user_id):
+            if str(course["id"]) == str(course_id):
+                return {
+                    "id": course["id"],
+                    "name": course["name"],
+                    "code": course.get("code") or _course_code(course["name"], course_id),
+                    "source": course.get("source", "moodle_sync"),
+                    "lastSyncedAt": course.get("lastSyncedAt"),
+                }
     m = metrics_repository.get(user_id, course_id) or {}
     name = _clean_course_name((m.get("metrics") or {}).get("course_name"))
     return {"id": course_id, "name": name, "code": _course_code(name, course_id)}

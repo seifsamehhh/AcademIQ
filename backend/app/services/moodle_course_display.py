@@ -5,7 +5,8 @@ Display helpers for Moodle-synced courses and student identity on the Dashboard.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.config.database import raw_moodle_payload_collection
 from app.repositories import material_repository, metrics_repository
@@ -23,6 +24,15 @@ def _course_code(name: str, course_id: str) -> str:
     words = [w for w in name.replace("-", " ").split() if w[:1].isalpha()]
     initials = "".join(w[0].upper() for w in words[:3])
     return initials or f"C{course_id}"
+
+
+def _iso_timestamp(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    text = str(value).strip()
+    return text or None
 
 
 def _normalize_person_name(name: Optional[str]) -> str:
@@ -95,111 +105,253 @@ def _is_bare_course_id(name: Optional[str], course_id: str) -> bool:
     return False
 
 
-def _normalize_title_key(name: str) -> str:
-    """Normalize course title for deduplication (strip suffix noise)."""
-    key = _clean_course_name(name).lower()
-    for suffix in (": general", " - general", " general"):
-        if key.endswith(suffix):
-            key = key[: -len(suffix)].strip()
-    return re.sub(r"[^a-z0-9]+", "", key)
+def _course_name_map_from_raw(raw: Dict[str, Any], user_id: str = "") -> Dict[str, str]:
+    """Best non-bare Moodle title per course_id from the latest payload + metrics."""
+    resolved: Dict[str, str] = {}
+    for cid, candidates in _course_name_candidates_from_raw(raw, user_id).items():
+        name, _source = _pick_best_course_name(cid, candidates)
+        if name:
+            resolved[cid] = name
+    return resolved
 
 
-def _course_names_from_raw(user_id: str) -> Dict[str, str]:
-    raw = raw_moodle_payload_collection.find_one({"academiq_user_id": user_id}) or {}
-    names: Dict[str, str] = {}
+def _course_name_candidates_from_raw(
+    raw: Dict[str, Any],
+    user_id: str,
+) -> Dict[str, List[Tuple[str, str]]]:
+    """course_id -> [(name, source), ...] from every payload location."""
+    out: Dict[str, List[Tuple[str, str]]] = {}
+
+    def add(cid: Any, name: Any, source: str) -> None:
+        cid_str = str(cid or "").strip()
+        if not cid_str or not name:
+            return
+        cleaned = _clean_course_name(str(name))
+        if not cleaned or cleaned == "Untitled Course":
+            return
+        bucket = out.setdefault(cid_str, [])
+        if not any(existing == cleaned for existing, _ in bucket):
+            bucket.append((cleaned, source))
+
     for course in raw.get("courses") or []:
-        cid = str(course.get("course_id") or "").strip()
-        if cid and course.get("course_name"):
-            names[cid] = _clean_course_name(course["course_name"])
+        cid = course.get("course_id")
+        add(cid, course.get("course_name"), course.get("course_name_source") or "raw_courses")
+
     for cid, metrics in (raw.get("metricsByCourse") or {}).items():
-        if metrics and metrics.get("course_name"):
-            names[str(cid)] = _clean_course_name(metrics["course_name"])
-    return names
+        if metrics:
+            add(
+                cid,
+                metrics.get("course_name"),
+                metrics.get("course_name_source") or "metrics_by_course",
+            )
+
+    if user_id:
+        for row in metrics_repository.list_for_user(user_id):
+            cid = row.get("course_id")
+            if cid == metrics_repository.OVERALL:
+                continue
+            metrics = row.get("metrics") or {}
+            add(
+                cid,
+                metrics.get("course_name"),
+                metrics.get("course_name_source") or "student_metrics",
+            )
+
+        for cid in {str(c.get("course_id")) for c in (raw.get("courses") or []) if c.get("course_id")}:
+            for doc in material_repository.list_by_course(cid):
+                add(cid, doc.get("course_name") or doc.get("title"), "course_materials")
+
+    return out
 
 
-def _course_has_substance(metrics: Dict[str, Any], course_id: str) -> bool:
-    if material_repository.list_by_course(str(course_id)):
-        return True
-    return any(
-        (metrics.get(key) or 0) > 0
-        for key in (
-            "quiz_attempts",
-            "assignment_submissions",
-            "number_of_quizzes_viewed",
-            "number_of_assignments_viewed",
-            "number_of_resources_clicked",
-        )
-    )
-
-
-def resolve_synced_course_name(
+def _pick_best_course_name(
     course_id: str,
-    metrics_name: Optional[str],
-    raw_names: Dict[str, str],
-) -> str:
+    candidates: List[Tuple[str, str]],
+) -> Tuple[str, str]:
+    """Return the best display name and the source that supplied it."""
     cid = str(course_id)
-    for candidate in (_clean_course_name(metrics_name), raw_names.get(cid)):
-        if candidate and candidate != "Untitled Course" and not _is_bare_course_id(candidate, cid):
-            return candidate
-    for doc in material_repository.list_by_course(cid):
-        title = _clean_course_name(doc.get("course_name") or doc.get("title"))
-        if title and not _is_bare_course_id(title, cid):
-            return title
-    return f"Course {cid}"
+    for name, source in candidates:
+        if name and not _is_bare_course_id(name, cid):
+            return name, source
+    return f"Course {cid}", "fallback_id"
 
 
-def get_synced_courses_for_user(user_id: str) -> List[Dict[str, Any]]:
-    """Courses for synced Moodle users — filtered, deduped, with readable titles."""
-    raw_names = _course_names_from_raw(user_id)
+def resolve_synced_course_display_name(
+    course_id: str,
+    raw_name: Optional[str],
+    name_map: Dict[str, str],
+) -> str:
+    """Prefer Moodle title; fall back to Course <id> when only a numeric id exists."""
+    cid = str(course_id)
+    inline = [(_clean_course_name(raw_name), "inline_raw_name")] if raw_name else []
+    mapped = [(name_map[cid], "name_map")] if name_map.get(cid) else []
+    name, _source = _pick_best_course_name(cid, inline + mapped)
+    return name
+
+
+def resolve_synced_course_display_name_with_source(
+    course_id: str,
+    raw_name: Optional[str],
+    candidates_map: Dict[str, List[Tuple[str, str]]],
+) -> Tuple[str, str]:
+    cid = str(course_id)
+    candidates: List[Tuple[str, str]] = list(candidates_map.get(cid, []))
+    if raw_name:
+        candidates.insert(0, (_clean_course_name(raw_name), "inline_raw_name"))
+    return _pick_best_course_name(cid, candidates)
+
+
+def _course_entry(
+    course_id: str,
+    display_name: str,
+    last_synced_at: Optional[str],
+    title_source: Optional[str] = None,
+) -> Dict[str, Any]:
+    entry = {
+        "id": course_id,
+        "name": display_name,
+        "code": _course_code(display_name, course_id),
+        "source": "moodle_sync",
+        "lastSyncedAt": last_synced_at,
+    }
+    if title_source:
+        entry["titleSource"] = title_source
+    return entry
+
+
+def extract_synced_courses(
+    user_id: str,
+    *,
+    collect_filter_reasons: bool = False,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Build the full Moodle course list from the latest raw payload for this user.
+
+  Returns (normalized_courses, filtered_courses_with_reasons).
+    """
+    raw = raw_moodle_payload_collection.find_one({"academiq_user_id": user_id}) or {}
+    candidates_map = _course_name_candidates_from_raw(raw, user_id)
+    payload_synced_at = _iso_timestamp(raw.get("updated_at") or raw.get("created_at"))
+
     by_id: Dict[str, Dict[str, Any]] = {}
-    by_title: Dict[str, str] = {}
+    filtered: List[Dict[str, Any]] = []
 
-    def _prefer_name(current: str, candidate: str, course_id: str) -> str:
-        if ": General" in current and ": General" not in candidate:
-            return candidate
-        if current.lower().startswith("course ") and not candidate.lower().startswith("course "):
-            return candidate
-        if _is_bare_course_id(current, course_id) and not _is_bare_course_id(candidate, course_id):
-            return candidate
-        return candidate if len(candidate) < len(current) else current
+    def _add_course(
+        course_id: str,
+        raw_name: Optional[str],
+        last_access: Any = None,
+        origin: str = "raw_courses",
+    ) -> None:
+        cid = str(course_id).strip()
+        if not cid:
+            if collect_filter_reasons:
+                filtered.append({"courseId": None, "reason": "missing_course_id", "origin": origin})
+            return
+        if cid in by_id:
+            return
+        if not is_real_course(cid, raw_name):
+            if collect_filter_reasons:
+                filtered.append(
+                    {
+                        "courseId": cid,
+                        "reason": "excluded_nav_or_site_home",
+                        "rawName": raw_name,
+                        "origin": origin,
+                    }
+                )
+            return
+        display, title_source = resolve_synced_course_display_name_with_source(
+            cid, raw_name, candidates_map
+        )
+        last_synced = _iso_timestamp(last_access) or payload_synced_at
+        by_id[cid] = _course_entry(cid, display, last_synced, title_source)
+
+    for course in raw.get("courses") or []:
+        cid = course.get("course_id")
+        _add_course(
+            str(cid) if cid is not None else "",
+            course.get("course_name"),
+            course.get("last_access_time"),
+            origin="raw_courses",
+        )
+
+    for cid, metrics in (raw.get("metricsByCourse") or {}).items():
+        if not metrics:
+            continue
+        _add_course(
+            str(cid),
+            metrics.get("course_name"),
+            metrics.get("last_access_time"),
+            origin="metrics_by_course",
+        )
 
     for row in metrics_repository.list_for_user(user_id):
         cid = row.get("course_id")
         if cid == metrics_repository.OVERALL:
             continue
-        cid_str = str(cid)
         metrics = row.get("metrics") or {}
-        raw_name = metrics.get("course_name")
-        if not is_real_course(cid, raw_name):
-            continue
+        _add_course(
+            str(cid),
+            metrics.get("course_name"),
+            metrics.get("last_access_time"),
+            origin="student_metrics",
+        )
 
-        display_name = resolve_synced_course_name(cid_str, raw_name, raw_names)
-        if _is_bare_course_id(display_name, cid_str) and not _course_has_substance(metrics, cid_str):
-            continue
-        if _is_bare_course_id(display_name, cid_str):
-            display_name = f"Course {cid_str}"
+    courses = sorted(by_id.values(), key=lambda c: c["name"].lower())
+    return courses, filtered
 
-        title_key = _normalize_title_key(display_name)
-        if title_key in by_title:
-            existing_id = by_title[title_key]
-            existing = by_id[existing_id]
-            existing["name"] = _prefer_name(existing["name"], display_name, existing_id)
-            existing["code"] = _course_code(existing["name"], existing_id)
-            continue
 
-        existing = by_id.get(cid_str)
-        if existing:
-            existing["name"] = _prefer_name(existing["name"], display_name, cid_str)
-            existing["code"] = _course_code(existing["name"], cid_str)
-            continue
-
-        by_id[cid_str] = {
-            "id": cid_str,
-            "name": display_name,
-            "code": _course_code(display_name, cid_str),
-        }
-        by_title[title_key] = cid_str
-
-    courses = list(by_id.values())
-    courses.sort(key=lambda c: c["name"].lower())
+def get_synced_courses_for_user(user_id: str) -> List[Dict[str, Any]]:
+    """All Moodle-synced courses for Dashboard, Quiz, and Performance."""
+    courses, _ = extract_synced_courses(user_id)
     return courses
+
+
+def debug_synced_courses_for_email(email: str) -> Dict[str, Any]:
+    """Safe diagnostics for GET /debug/synced-courses/{email}."""
+    from app.repositories import user_repository
+
+    normalized = email.strip().lower()
+    user = user_repository.find_by_email(normalized)
+    if not user:
+        return {
+            "email": normalized,
+            "userExists": False,
+            "academiqUserId": None,
+            "rawPayloadCount": 0,
+            "extractedCourseCount": 0,
+            "normalizedCourseList": [],
+            "displayedCourseCount": 0,
+            "filteredCourses": [],
+            "filteredCount": 0,
+        }
+
+    user_id = str(user["_id"])
+    raw_payload_count = raw_moodle_payload_collection.count_documents(
+        {"academiq_user_id": user_id}
+    )
+    raw = raw_moodle_payload_collection.find_one({"academiq_user_id": user_id}) or {}
+    extracted_count = len(raw.get("courses") or [])
+
+    courses, filtered = extract_synced_courses(user_id, collect_filter_reasons=True)
+    title_sources = [
+        {
+            "courseId": course["id"],
+            "courseName": course["name"],
+            "titleSource": course.get("titleSource", "unknown"),
+        }
+        for course in courses
+    ]
+
+    return {
+        "email": user.get("email"),
+        "userExists": True,
+        "academiqUserId": user_id,
+        "rawPayloadCount": raw_payload_count,
+        "extractedCourseCount": extracted_count,
+        "normalizedCourseList": courses,
+        "displayedCourseCount": len(courses),
+        "courseTitleSources": title_sources,
+        "filteredCourses": filtered,
+        "filteredCount": len(filtered),
+    }

@@ -137,6 +137,19 @@ def debug_user_data(email: str):
     return summarize_user_by_email(email)
 
 
+@app.get("/debug/synced-courses/{email}")
+def debug_synced_courses(email: str):
+    """
+    Safe Moodle course extraction diagnostics for a synced user.
+    No passwords, tokens, connection strings, or raw document bodies.
+    """
+    from app.services.moodle_course_display import debug_synced_courses_for_email
+
+    if not connect_database():
+        raise HTTPException(status_code=503, detail="Database unreachable")
+    return debug_synced_courses_for_email(email)
+
+
 @app.exception_handler(RuntimeError)
 async def runtime_error_handler(_request: Request, exc: RuntimeError):
     return JSONResponse(status_code=503, content={"detail": str(exc)})

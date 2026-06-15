@@ -48,16 +48,44 @@ def is_real_course(course_id: Any, name: str = None) -> bool:
     return True
 
 
-def _course_name_map(payload: Dict[str, Any]) -> Dict[str, str]:
-    """Build course_id -> course_name from whatever the payload provides."""
+def _is_bare_course_name(name: Optional[str], course_id: Any) -> bool:
+    cid = str(course_id or "").strip()
+    n = (name or "").strip()
+    if not n:
+        return True
+    if n == cid or n == f"Course {cid}":
+        return True
+    cleaned = n
+    if cleaned.lower().startswith("course "):
+        cleaned = cleaned[7:].strip()
+    return cleaned == cid or cleaned.isdigit()
+
+
+def _course_name_map(payload: Dict[str, Any], academiq_user_id: str = "") -> Dict[str, str]:
+    """Build course_id -> course_name, preferring real titles over numeric fallbacks."""
+    del academiq_user_id  # reserved for future metrics lookup during ingest
     names: Dict[str, str] = {}
+
+    def consider(cid: Any, name: Any) -> None:
+        cid_str = str(cid or "").strip()
+        if not cid_str or not name:
+            return
+        cleaned = str(name).strip()
+        if cleaned.lower().startswith("course "):
+            cleaned = cleaned[7:].strip()
+        existing = names.get(cid_str)
+        if not existing:
+            names[cid_str] = cleaned
+            return
+        if _is_bare_course_name(existing, cid_str) and not _is_bare_course_name(cleaned, cid_str):
+            names[cid_str] = cleaned
+        elif not _is_bare_course_name(cleaned, cid_str) and len(cleaned) > len(existing):
+            names[cid_str] = cleaned
+
     for course in payload.get("courses", []) or []:
-        cid = course.get("course_id")
-        if cid:
-            names[str(cid)] = course.get("course_name") or names.get(str(cid))
+        consider(course.get("course_id"), course.get("course_name"))
     for cid, metrics in (payload.get("metricsByCourse") or {}).items():
-        if metrics.get("course_name"):
-            names[str(cid)] = metrics["course_name"]
+        consider(cid, metrics.get("course_name"))
     return names
 
 
@@ -100,7 +128,7 @@ def normalize_payload(payload: Dict[str, Any], academiq_user_id: str) -> Dict[st
     Write a payload's materials / metrics / events into the normalized
     collections. Returns a summary with dedup counts.
     """
-    names = _course_name_map(payload)
+    names = _course_name_map(payload, academiq_user_id)
 
     # --- Materials → course_materials (upsert, deduped) -------------------
     materials = materials_from_payload(payload)

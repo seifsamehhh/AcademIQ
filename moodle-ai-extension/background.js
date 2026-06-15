@@ -45,6 +45,7 @@ const defaultData = () => ({
 const createDefaultCourseMetrics = (course) => ({ // mapping el data ely gebtaha mn el content.js ashan adeha lel ml model later
     course_id: course.course_id,
     course_name: course.course_name || "Unknown Course",
+    course_name_source: course.course_name_source || null,
     total_visits: 0,
     last_access_time: null,
     total_time_spent_seconds: 0,
@@ -90,21 +91,57 @@ const toCourseMap = (courses) => {
     return map;
 };
 
+const isBareCourseName = (name, courseId) => {
+    const id = String(courseId || "").trim();
+    const value = (name || "").trim();
+    if (!value) return true;
+    if (value === id || value === `Course ${id}`) return true;
+    const cleaned = value.replace(/^course\s+/i, "").trim();
+    if (cleaned === id || /^\d+$/.test(cleaned)) return true;
+    return false;
+};
+
+const preferCourseName = (existingName, incomingName, courseId) => {
+    if (!incomingName) return existingName;
+    if (isBareCourseName(incomingName, courseId)) return existingName;
+    if (isBareCourseName(existingName, courseId)) return incomingName;
+    return incomingName.length > (existingName || "").length ? incomingName : existingName;
+};
+
 const mergeCourse = (data, coursesMap, course) => {
     if (!course?.course_id) return;
 
     const existing = coursesMap.get(course.course_id);
+    const preferredName = preferCourseName(existing?.course_name, course.course_name, course.course_id);
+    const preferredSource = course.course_name_source || existing?.course_name_source || null;
+
     if (!existing) {
-        coursesMap.set(course.course_id, createDefaultCourseMetrics(course));
-    } else if (course.course_name && existing.course_name !== course.course_name) {
-        existing.course_name = course.course_name;
+        coursesMap.set(course.course_id, {
+            ...createDefaultCourseMetrics(course),
+            course_name: preferredName,
+            course_name_source: preferredSource
+        });
+    } else {
+        existing.course_name = preferredName;
+        if (preferredSource) existing.course_name_source = preferredSource;
         coursesMap.set(course.course_id, existing);
     }
 
     if (!data.metricsByCourse[course.course_id]) {
-        data.metricsByCourse[course.course_id] = createDefaultCourseMetrics(course);
-    } else if (course.course_name) {
-        data.metricsByCourse[course.course_id].course_name = course.course_name;
+        data.metricsByCourse[course.course_id] = {
+            ...createDefaultCourseMetrics(course),
+            course_name: preferredName,
+            course_name_source: preferredSource
+        };
+    } else {
+        data.metricsByCourse[course.course_id].course_name = preferCourseName(
+            data.metricsByCourse[course.course_id].course_name,
+            course.course_name,
+            course.course_id
+        );
+        if (preferredSource) {
+            data.metricsByCourse[course.course_id].course_name_source = preferredSource;
+        }
     }
 };
 
@@ -209,11 +246,20 @@ const mergeGrades = (data, grades) => {
 // (`semantic_tags` / `type`), so a material is stored exactly once.
 const mergeMaterials = (data, materials) => {
     if (!Array.isArray(data.materials)) data.materials = [];
+    const coursesMap = toCourseMap(data.courses);
 
     materials.forEach((material) => {
         const courseId = material.courseId || material.course_id || null;
         const materialId = material.id || material.material_id || material.url || material.title || "unknown";
         const key = `${courseId || "unknown"}-${materialId}`;
+
+        if (courseId && material.course_name) {
+            mergeCourse(data, coursesMap, {
+                course_id: courseId,
+                course_name: material.course_name,
+                course_name_source: material.course_name_source || "material_scrape"
+            });
+        }
 
         const existingIndex = data.materials.findIndex((m) => m._key === key);
         const record = {
@@ -230,6 +276,8 @@ const mergeMaterials = (data, materials) => {
             data.materials[existingIndex] = { ...data.materials[existingIndex], ...record };
         }
     });
+
+    syncMetricsByCourse(data, coursesMap);
 };
 
 const finalizeActiveTab = async (tabId, endTime) => { // time gets tracked by tap msh ay haga etfathet w khalas
@@ -455,6 +503,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         (async () => {
             await queueStorageUpdate(async (data) => {
                 mergeMaterials(data, message.payload || []);
+            });
+            sendResponse({ status: "ok" });
+        })();
+        return true;
+    }
+
+    if (message.type === "courses") {
+        (async () => {
+            await queueStorageUpdate(async (data) => {
+                const coursesMap = toCourseMap(data.courses);
+                (message.payload || []).forEach((course) => mergeCourse(data, coursesMap, course));
+                syncMetricsByCourse(data, coursesMap);
+            });
+            sendResponse({ status: "ok" });
+        })();
+        return true;
+    }
+
+    if (message.type === "course_title_debug") {
+        (async () => {
+            await queueStorageUpdate(async (data) => {
+                data._meta = data._meta || {};
+                data._meta.courseTitleDebug = message.payload || [];
             });
             sendResponse({ status: "ok" });
         })();

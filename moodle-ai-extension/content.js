@@ -197,6 +197,122 @@
     // Moodle's site front page is course id 1 — never a real course.
     const isRealCourseId = (id) => /^\d+$/.test(String(id || "")) && String(id) !== "1";
 
+    const isBareCourseName = (name, courseId) => {
+        const id = String(courseId || "").trim();
+        const n = (name || "").trim();
+        if (!n) return true;
+        if (n === id || n === `Course ${id}`) return true;
+        const cleaned = n.replace(/^course\s+/i, "").trim();
+        if (cleaned === id || /^\d+$/.test(cleaned)) return true;
+        return false;
+    };
+
+    const pickBetterCourseName = (current, candidate, courseId) => {
+        if (!candidate) return current;
+        if (isBareCourseName(candidate, courseId)) return current;
+        if (isBareCourseName(current, courseId)) return candidate;
+        return candidate.length > (current || "").length ? candidate : current;
+    };
+
+    const extractCourseTitleFromAnchor = (anchor) => {
+        const sources = [];
+        const add = (value, source) => {
+            const text = cleanText(value);
+            if (text) sources.push({ text, source });
+        };
+
+        add(anchor.textContent, "anchor_text");
+        add(anchor.getAttribute("aria-label"), "aria_label");
+        add(anchor.getAttribute("title"), "title_attribute");
+        add(anchor.querySelector("img")?.getAttribute("alt"), "image_alt");
+
+        const card = anchor.closest(
+            ".coursebox, .course-card, .myc-item, .card, .dashboard-card, .course-list-item, li, [data-courseid], [data-course-id]"
+        );
+        if (card) {
+            const heading = card.querySelector(
+                ".coursename, .course-title, .multiline, h3, h4, .card-title, .course-name, .coursefullname"
+            );
+            add(heading?.textContent, "course_card_heading");
+            if (!cleanText(anchor.textContent)) {
+                const cardText = cleanText(card.textContent);
+                if (cardText && cardText.length <= 180) {
+                    add(cardText, "course_card_text");
+                }
+            }
+        }
+
+        return sources;
+    };
+
+    const bestCourseTitleFromSources = (sources, courseId) => {
+        for (const entry of sources) {
+            const { text, source } = entry;
+            if (!isBareCourseName(text, courseId) && !GENERIC_COURSE_NAMES.test(text)) {
+                return { name: text, source };
+            }
+        }
+        const fallback = sources.find(
+            (entry) => entry.text && !GENERIC_COURSE_NAMES.test(entry.text)
+        );
+        return fallback
+            ? { name: fallback.text, source: fallback.source }
+            : { name: null, source: null };
+    };
+
+    const lookupCourseLinkById = (doc, courseId) => {
+        const targetId = String(courseId);
+        for (const anchor of doc.querySelectorAll('a[href*="/course/view.php?id="]')) {
+            const href = anchor.getAttribute("href") || "";
+            const id = href.match(/[?&]id=(\d+)/)?.[1];
+            if (id === targetId) return anchor;
+        }
+        return null;
+    };
+
+    const resolveCourseNameFromDocument = (doc, courseId) => {
+        const id = String(courseId);
+
+        const pageHeading = cleanText(
+            doc.querySelector(".page-header-headings h1")?.textContent ||
+                doc.querySelector("#page-header h1")?.textContent ||
+                doc.querySelector(".page-context-header h1")?.textContent ||
+                doc.querySelector("h1")?.textContent
+        );
+        if (
+            pageHeading &&
+            !isBareCourseName(pageHeading, id) &&
+            !GENERIC_COURSE_NAMES.test(pageHeading)
+        ) {
+            return { name: pageHeading, source: "page_heading" };
+        }
+
+        const anchor = lookupCourseLinkById(doc, id);
+        if (anchor) {
+            const resolved = bestCourseTitleFromSources(
+                extractCourseTitleFromAnchor(anchor),
+                id
+            );
+            if (resolved.name) {
+                return { name: resolved.name, source: resolved.source || "course_link_lookup" };
+            }
+        }
+
+        const dataEl = doc.querySelector(
+            `[data-courseid="${id}"], [data-course-id="${id}"], [data-id="${id}"]`
+        );
+        if (dataEl) {
+            const labelled = cleanText(
+                dataEl.getAttribute("aria-label") || dataEl.getAttribute("title") || dataEl.textContent
+            );
+            if (labelled && !isBareCourseName(labelled, id) && !GENERIC_COURSE_NAMES.test(labelled)) {
+                return { name: labelled, source: "data_courseid_element" };
+            }
+        }
+
+        return { name: null, source: null };
+    };
+
     const getCourseContext = () => {
         const courseId = parseCourseId(window.location.href);
         // Only treat actual course/activity pages as a course. The dashboard,
@@ -208,15 +324,15 @@
             isRealCourseId(courseId);
 
         if (!onCoursePage) {
-            return { course_id: null, course_name: null };
+            return { course_id: null, course_name: null, course_name_source: null };
         }
 
-        const courseName =
-            cleanText(document.querySelector(".page-header-headings h1")?.textContent) ||
-            cleanText(document.querySelector("h1")?.textContent);
+        const resolved = resolveCourseNameFromDocument(document, courseId);
+        const courseName = resolved.name || `Course ${courseId}`;
         return {
             course_id: courseId,
-            course_name: courseName || `Course ${courseId}`
+            course_name: courseName,
+            course_name_source: resolved.source || (resolved.name ? "page_heading" : "fallback_id")
         };
     };
 
@@ -553,12 +669,24 @@
         doc.querySelectorAll('a[href*="/course/view.php?id="]').forEach((anchor) => {
             const href = anchor.getAttribute("href") || "";
             const id = href.match(/[?&]id=(\d+)/)?.[1];
-            if (!isRealCourseId(id) || map.has(id)) return;       // skip site home (1) + dups
-            const name = cleanText(anchor.textContent) || "";
-            if (GENERIC_COURSE_NAMES.test(name)) return;           // skip nav labels
+            if (!isRealCourseId(id) || map.has(id)) return; // skip site home (1) + dups
+
+            const resolved = bestCourseTitleFromSources(extractCourseTitleFromAnchor(anchor), id);
+            if (resolved.name && GENERIC_COURSE_NAMES.test(resolved.name)) return;
+
+            const existing = map.get(id);
+            const courseName = pickBetterCourseName(
+                existing?.course_name,
+                resolved.name || `Course ${id}`,
+                id
+            );
             map.set(id, {
                 course_id: id,
-                course_name: name || `Course ${id}`,
+                course_name: courseName,
+                course_name_source:
+                    resolved.source ||
+                    existing?.course_name_source ||
+                    (resolved.name ? "anchor_text" : "fallback_id"),
                 url: new URL(`/course/view.php?id=${id}`, origin).href
             });
         });
@@ -567,25 +695,64 @@
 
     const scrapeAllCourses = async () => {
         const origin = window.location.origin;
+        const titleDebug = [];
 
         // Discover every enrolled course from the "My courses" listing.
         let courses = [];
+        let listingDoc = null;
         for (const path of ["/my/courses.php", "/my/"]) {
             try {
-                const listing = await fetchDocument(new URL(path, origin).href);
-                courses = getAllCourseLinks(listing, origin);
+                listingDoc = await fetchDocument(new URL(path, origin).href);
+                courses = getAllCourseLinks(listingDoc, origin);
                 if (courses.length) break;
             } catch (_error) {
                 /* try the next listing */
             }
         }
         // Fallback: course links present on the current page (nav menu, etc.).
-        if (!courses.length) courses = getAllCourseLinks(document, origin);
+        if (!courses.length) {
+            listingDoc = document;
+            courses = getAllCourseLinks(document, origin);
+        }
+
+        // Second pass: resolve bare titles from the listing DOM by course id.
+        if (listingDoc) {
+            courses = courses.map((course) => {
+                const resolved = resolveCourseNameFromDocument(listingDoc, course.course_id);
+                const courseName = pickBetterCourseName(
+                    course.course_name,
+                    resolved.name,
+                    course.course_id
+                );
+                return {
+                    ...course,
+                    course_name: courseName,
+                    course_name_source:
+                        resolved.source || course.course_name_source || "listing_lookup"
+                };
+            });
+        }
 
         let scraped = 0;
         for (const course of courses) {
             try {
                 const courseDoc = await fetchDocument(course.url);
+                const resolved = resolveCourseNameFromDocument(courseDoc, course.course_id);
+                if (resolved.name) {
+                    course.course_name = pickBetterCourseName(
+                        course.course_name,
+                        resolved.name,
+                        course.course_id
+                    );
+                    course.course_name_source = resolved.source;
+                }
+
+                titleDebug.push({
+                    course_id: course.course_id,
+                    course_name: course.course_name,
+                    course_name_source: course.course_name_source || "unknown"
+                });
+
                 const materials = await extractMaterialsFromCourse(course, courseDoc, course.url);
                 if (materials.length) sendMessage("materials", materials);
 
@@ -601,10 +768,17 @@
 
                 scraped += 1;
             } catch (_error) {
+                titleDebug.push({
+                    course_id: course.course_id,
+                    course_name: course.course_name,
+                    course_name_source: course.course_name_source || "scrape_failed"
+                });
                 /* skip a course that fails to load, keep going */
             }
         }
 
+        sendMessage("courses", courses);
+        sendMessage("course_title_debug", titleDebug);
         sendMessage("identity", getStudentIdentity());
         return { courses: courses.length, scraped };
     };

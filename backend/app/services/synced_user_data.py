@@ -149,6 +149,9 @@ def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
                 "grade": course_avg,
                 "courseId": cid,
                 "code": course.get("code") or _course_code(course["name"], cid),
+                "source": course.get("source", "moodle_sync"),
+                "lastSyncedAt": course.get("lastSyncedAt"),
+                "titleSource": course.get("titleSource"),
                 "activity": _course_activity_summary(user_id, cid),
             }
         )

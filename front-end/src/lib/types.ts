@@ -57,6 +57,8 @@ export interface DemoCourseResult {
   grade: number | null;
   courseId?: string;
   code?: string;
+  source?: "moodle_sync" | "seeded" | string;
+  lastSyncedAt?: string | null;
   activity?: {
     quizAttempts?: number;
     assignmentSubmissions?: number;
@@ -101,6 +103,8 @@ export interface Course {
   name: string;
   /** Short code shown in compact UI, e.g. "CS204". */
   code: string;
+  source?: "moodle_sync" | "seeded" | string;
+  lastSyncedAt?: string | null;
 }
 
 /** Four-level burnout classification from the burnout-detection model. */
