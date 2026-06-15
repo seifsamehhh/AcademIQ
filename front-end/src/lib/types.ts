@@ -51,18 +51,29 @@ export interface LoginResult {
   role: Role;
 }
 
-/** A course row in demo student results. */
+/** A course row in student results. */
 export interface DemoCourseResult {
   name: string;
-  grade: number;
+  grade: number | null;
+  courseId?: string;
+  code?: string;
+  activity?: {
+    quizAttempts?: number;
+    assignmentSubmissions?: number;
+    timeSpentSeconds?: number;
+    activitySource?: string;
+  };
 }
 
-/** Demo academic results from GET /student/{student_id}/results. */
+/** Academic results from GET /student/{student_id}/results. */
 export interface StudentResults {
   name?: string;
-  gpa?: number;
+  gpa?: number | null;
   risk?: string;
   courses?: DemoCourseResult[];
+  dataSource?: "synced" | "demo" | "metrics_only" | "none";
+  lastSync?: string | null;
+  averageScore?: number | null;
 }
 
 /** Payload for an admin creating or editing a user. */
@@ -209,8 +220,10 @@ export interface LearningMaterial {
   title: string;
   /** e.g. "PDF", "Slides", "Notes". */
   kind: string;
-  /** True when PDF text was uploaded to the backend (required for quiz gen). */
+  /** True when enough extracted text exists for quiz generation. */
   hasContent?: boolean;
+  source?: "moodle_sync" | "seeded" | string;
+  contentNote?: string | null;
 }
 
 export interface QuizQuestion {

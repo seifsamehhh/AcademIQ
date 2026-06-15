@@ -37,7 +37,7 @@ export function MaterialSelect({
               <label
                 key={material.id}
                 className={cn(
-                  "flex items-center gap-3 rounded-lg border border-border bg-background p-3 transition-colors",
+                  "flex flex-wrap items-center gap-3 rounded-lg border border-border bg-background p-3 transition-colors",
                   selectable
                     ? "cursor-pointer hover:bg-accent has-[:checked]:border-primary/50"
                     : "cursor-not-allowed opacity-70",
@@ -59,7 +59,15 @@ export function MaterialSelect({
                 ) : (
                   <Badge variant="muted">Content not available</Badge>
                 )}
+                {material.source === "moodle_sync" ? (
+                  <Badge variant="muted">Moodle</Badge>
+                ) : null}
                 <Badge variant="muted">{material.kind}</Badge>
+                {!selectable && material.contentNote ? (
+                  <p className="w-full basis-full pl-9 text-xs text-muted-foreground">
+                    {material.contentNote}
+                  </p>
+                ) : null}
               </label>
             );
           })

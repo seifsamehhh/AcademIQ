@@ -1,0 +1,235 @@
+"""
+Resolve dashboard / identity data for Moodle-synced students vs seeded demo accounts.
+
+Synced users are detected from student_metrics (activity_source=synced) or a
+non-demo raw_moodle_payload audit record. Demo accounts student1/student2 keep
+DEMO_RESULTS when no Moodle sync is present.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from app.config.database import (
+    course_materials_collection,
+    feature_vectors_collection,
+    raw_moodle_payload_collection,
+    student_metrics_collection,
+)
+from app.repositories import metrics_repository, user_repository
+from app.demo_data import DEMO_RESULTS, DEMO_STUDENT_IDS
+from app.services.moodle_sync_status import has_synced_moodle_data
+from app.services.moodle_ingest import is_real_course
+from app.services.student_data import (
+    _avg_percentage,
+    _clean_course_name,
+    _course_code,
+    _grades,
+    get_courses,
+)
+
+
+def _normalize_identifier(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def can_access_student_param(user: Dict[str, Any], student_id_param: str) -> bool:
+    """True when the JWT user may read results for the path identifier."""
+    if user.get("role") == "admin":
+        return True
+    param = _normalize_identifier(student_id_param)
+    allowed = {
+        _normalize_identifier(user.get("student_id")),
+        _normalize_identifier(user.get("email")),
+        str(user.get("_id")),
+    }
+    return param in allowed
+
+
+def _last_sync_iso(user_id: str) -> Optional[str]:
+    raw = raw_moodle_payload_collection.find_one({"academiq_user_id": user_id})
+    if not raw:
+        return None
+    ts = raw.get("updated_at") or raw.get("created_at")
+    if isinstance(ts, datetime):
+        return ts.isoformat()
+    return str(ts) if ts else None
+
+
+def _course_activity_summary(user_id: str, course_id: str) -> Dict[str, Any]:
+    doc = metrics_repository.get(user_id, str(course_id)) or {}
+    metrics = doc.get("metrics") or {}
+    return {
+        "quizAttempts": metrics.get("quiz_attempts", 0) or 0,
+        "assignmentSubmissions": metrics.get("assignment_submissions", 0) or 0,
+        "timeSpentSeconds": metrics.get("total_time_spent_seconds", 0) or 0,
+        "activitySource": metrics.get("activity_source") or "none",
+    }
+
+
+def _derive_risk(avg_grade: Optional[float]) -> str:
+    if avg_grade is None:
+        return "Unknown"
+    if avg_grade >= 80:
+        return "Low"
+    if avg_grade >= 65:
+        return "Medium"
+    return "High"
+
+
+def _gpa_from_percentages(grades: List[float]) -> Optional[float]:
+    if not grades:
+        return None
+    avg_pct = sum(grades) / len(grades)
+    return round(min(4.0, avg_pct / 25.0), 2)
+
+
+def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
+    """Build dashboard results from synced MongoDB collections."""
+    user_id = str(user["_id"])
+    display_name = user.get("full_name") or user.get("name") or "Student"
+    grade_rows = _grades(user_id)
+    courses_out: List[Dict[str, Any]] = []
+
+    for course in get_courses(user_id):
+        cid = str(course["id"])
+        course_avg = _avg_percentage(grade_rows, cid)
+        courses_out.append(
+            {
+                "name": course["name"],
+                "grade": course_avg,
+                "courseId": cid,
+                "code": course.get("code") or _course_code(course["name"], cid),
+                "activity": _course_activity_summary(user_id, cid),
+            }
+        )
+
+    graded = [c["grade"] for c in courses_out if c["grade"] is not None]
+    overall_avg = round(sum(graded) / len(graded), 1) if graded else None
+
+    return {
+        "name": display_name,
+        "gpa": _gpa_from_percentages(graded),
+        "risk": _derive_risk(overall_avg),
+        "courses": courses_out,
+        "dataSource": "synced",
+        "lastSync": _last_sync_iso(user_id),
+        "averageScore": overall_avg,
+    }
+
+
+def build_student_results(user: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Return dashboard results for the authenticated user.
+
+    Synced Moodle data wins when present; demo accounts fall back to DEMO_RESULTS.
+    """
+    user_id = str(user["_id"])
+    student_id = user.get("student_id")
+
+    if has_synced_moodle_data(user_id):
+        return build_synced_results(user)
+
+    if student_id in DEMO_STUDENT_IDS:
+        demo = DEMO_RESULTS.get(student_id, {})
+        if demo:
+            return {**demo, "dataSource": "demo", "lastSync": None}
+
+    display_name = user.get("full_name") or user.get("name") or "Student"
+    courses_out: List[Dict[str, Any]] = []
+    grade_rows = _grades(user_id)
+
+    for row in metrics_repository.list_for_user(user_id):
+        cid = row.get("course_id")
+        if cid == metrics_repository.OVERALL:
+            continue
+        metrics = row.get("metrics") or {}
+        raw_name = metrics.get("course_name")
+        if not is_real_course(cid, raw_name):
+            continue
+        name = _clean_course_name(raw_name)
+        course_avg = _avg_percentage(grade_rows, str(cid))
+        courses_out.append(
+            {
+                "name": name,
+                "grade": course_avg,
+                "courseId": str(cid),
+                "code": _course_code(name, str(cid)),
+                "activity": _course_activity_summary(user_id, str(cid)),
+            }
+        )
+    courses_out.sort(key=lambda c: c["name"])
+
+    graded = [c["grade"] for c in courses_out if c["grade"] is not None]
+    overall_avg = round(sum(graded) / len(graded), 1) if graded else None
+
+    return {
+        "name": display_name,
+        "gpa": _gpa_from_percentages(graded),
+        "risk": _derive_risk(overall_avg),
+        "courses": courses_out,
+        "dataSource": "metrics_only" if courses_out else "none",
+        "lastSync": _last_sync_iso(user_id),
+        "averageScore": overall_avg,
+    }
+
+
+def summarize_user_by_email(email: str) -> Dict[str, Any]:
+    """Non-secret summary for GET /debug/user-data/{email}."""
+    normalized = email.strip().lower()
+    user = user_repository.find_by_email(normalized)
+    if not user:
+        return {
+            "email": normalized,
+            "userExists": False,
+            "academiqUserId": None,
+            "studentId": None,
+            "coursesCount": 0,
+            "materialsCount": 0,
+            "metricsCount": 0,
+            "featureVectorsCount": 0,
+            "lastSyncedAt": None,
+            "hasSyncedMoodleData": False,
+            "dataSource": "none",
+        }
+
+    user_id = str(user["_id"])
+    course_ids = {
+        str(row.get("course_id"))
+        for row in metrics_repository.list_for_user(user_id)
+        if row.get("course_id") not in (None, metrics_repository.OVERALL)
+        and is_real_course(
+            row.get("course_id"),
+            (row.get("metrics") or {}).get("course_name"),
+        )
+    }
+
+    materials_count = 0
+    if course_ids:
+        materials_count = course_materials_collection.count_documents(
+            {"course_id": {"$in": list(course_ids)}}
+        )
+
+    metrics_count = student_metrics_collection.count_documents(
+        {"academiq_user_id": user_id}
+    )
+    fv_count = feature_vectors_collection.count_documents(
+        {"$or": [{"academiq_user_id": user_id}, {"student_id": user.get("student_id")}]}
+    )
+
+    synced = has_synced_moodle_data(user_id)
+    return {
+        "email": user.get("email"),
+        "userExists": True,
+        "academiqUserId": user_id,
+        "studentId": user.get("student_id"),
+        "moodleUserId": user.get("moodle_user_id"),
+        "coursesCount": len(course_ids),
+        "materialsCount": materials_count,
+        "metricsCount": metrics_count,
+        "featureVectorsCount": fv_count,
+        "lastSyncedAt": _last_sync_iso(user_id),
+        "hasSyncedMoodleData": synced,
+        "dataSource": "synced" if synced else "demo_or_none",
+    }

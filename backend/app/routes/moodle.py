@@ -12,6 +12,7 @@ from app.services.moodle_ingest import normalize_payload, slim_payload
 from app.services.user_provisioning import extract_identity, resolve_or_create_user
 from app.repositories import material_repository
 from app.services import quiz_gen
+from app.services.synced_features import build_synced_course_features
 
 router = APIRouter()
 
@@ -99,10 +100,17 @@ async def post_raw_moodle_payload(payload: Dict[str, Any], background_tasks: Bac
         # 4. Upsert ONE slim audit record per student — a re-sync UPDATES the
         #    same document instead of inserting a new one each time.
         slim = slim_payload(payload)
+        grades = payload.get("grades") or []
         raw_result = raw_moodle_payload_collection.update_one(
             {"academiq_user_id": academiq_user_id},
             {
-                "$set": {**slim, "academiq_user_id": academiq_user_id, "updated_at": now},
+                "$set": {
+                    **slim,
+                    "academiq_user_id": academiq_user_id,
+                    "grades": grades,
+                    "updated_at": now,
+                },
+                "$unset": {"grades_source": ""},
                 "$setOnInsert": {"created_at": now},
                 "$inc": {"sync_count": 1},
             },
@@ -115,6 +123,7 @@ async def post_raw_moodle_payload(payload: Dict[str, Any], background_tasks: Bac
         raw_id = str(raw_doc["_id"])
 
         # 5. Upsert ONE feature vector per student (the current snapshot).
+        course_features = build_synced_course_features(payload, features)
         fv_result = feature_vectors_collection.update_one(
             {"academiq_user_id": academiq_user_id},
             {
@@ -122,6 +131,7 @@ async def post_raw_moodle_payload(payload: Dict[str, Any], background_tasks: Bac
                     "raw_payload_id": raw_id,
                     "student_id": student_id or features.get("student_id"),
                     "features": features,
+                    "course_features": course_features,
                     "feature_source": "synced",
                     "updated_at": now,
                 },

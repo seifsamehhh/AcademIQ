@@ -125,6 +125,18 @@ def debug_db_info():
     }
 
 
+@app.get("/debug/user-data/{email}")
+def debug_user_data(email: str):
+    """
+    Safe per-user sync summary (no passwords, tokens, or document bodies).
+  """
+    from app.services.synced_user_data import summarize_user_by_email
+
+    if not connect_database():
+        raise HTTPException(status_code=503, detail="Database unreachable")
+    return summarize_user_by_email(email)
+
+
 @app.exception_handler(RuntimeError)
 async def runtime_error_handler(_request: Request, exc: RuntimeError):
     return JSONResponse(status_code=503, content={"detail": str(exc)})

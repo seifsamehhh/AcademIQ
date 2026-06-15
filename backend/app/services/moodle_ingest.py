@@ -112,6 +112,7 @@ def normalize_payload(payload: Dict[str, Any], academiq_user_id: str) -> Dict[st
         doc = build_material_doc(material, cid, names.get(str(cid or "")))
         if doc is None:
             continue
+        doc["source"] = "moodle_sync"
         if material_repository.upsert(doc):
             materials_new += 1
 

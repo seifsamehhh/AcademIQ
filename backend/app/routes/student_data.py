@@ -114,16 +114,32 @@ def generate_quiz(
         len(text or ""),
     )
 
+    if not (text or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Selected materials have no extracted text yet. The material exists "
+                "in Moodle but quiz content was not uploaded — use the Chrome extension "
+                "→ Upload PDFs for quiz."
+            ),
+        )
+
+    if len(text.strip()) < student_data.MIN_QUIZ_CONTENT_CHARS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Selected materials have insufficient extracted text for quiz generation. "
+                "Re-upload the PDF via the Chrome extension to extract more content."
+            ),
+        )
+
     questions, engine = quiz_gen.generate_questions(text, num_questions=8)
 
     if not questions:
         detail = (
-            "Selected materials have no uploaded text. Upload PDFs via the extension "
-            "or seed demo content before generating a quiz."
-            if not (text or "").strip()
-            else
             f"Quiz generation failed for course {course_id} (engine={engine}). "
-            "Content may lack definition-style sentences."
+            "Content may lack definition-style sentences — try another material "
+            "or re-upload a richer PDF."
         )
         logger.error(detail)
         raise HTTPException(status_code=422, detail=detail)

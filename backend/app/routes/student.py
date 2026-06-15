@@ -4,39 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Dict, Any
 from datetime import datetime
 
-from app.services.auth_service import get_current_user
+from app.auth import get_current_user
+from app.services.synced_user_data import build_student_results, can_access_student_param
 
 router = APIRouter(prefix="/api/student", tags=["Student"])
 
 # Demo results — always mountable without ML dependencies.
 demo_router = APIRouter(prefix="/student", tags=["Student Demo"])
-
-DEMO_RESULTS: Dict[str, Dict[str, Any]] = {
-    "student1": {
-        "name": "Seif Sameh",
-        "gpa": 3.5,
-        "risk": "Low",
-        "courses": [
-            {"name": "Programming", "grade": 85},
-            {"name": "Database", "grade": 78},
-            {"name": "Computer Vision", "grade": 82},
-            {"name": "Artificial Intelligence", "grade": 88},
-            {"name": "Software Engineering", "grade": 80},
-        ],
-    },
-    "student2": {
-        "name": "Aly Ehab",
-        "gpa": 2.8,
-        "risk": "Medium",
-        "courses": [
-            {"name": "Programming", "grade": 74},
-            {"name": "Database", "grade": 69},
-            {"name": "Web Development", "grade": 84},
-            {"name": "Data Structures", "grade": 76},
-            {"name": "Machine Learning", "grade": 72},
-        ],
-    },
-}
 
 
 @demo_router.get("/{student_id}/results")
@@ -44,14 +18,13 @@ async def get_student_results(
     student_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Return demo academic results — JWT required; students see only their own."""
-    role = current_user.get("role")
-    if role != "admin" and current_user.get("student_id") != student_id:
+    """Return academic results — synced Moodle data when available, else demo fallback."""
+    if not can_access_student_param(current_user, student_id):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to access this resource",
         )
-    return DEMO_RESULTS.get(student_id, {})
+    return build_student_results(current_user)
 
 def get_latest_features(student_id: str) -> Dict[str, Any]:
     from app.config.database import feature_vectors_collection

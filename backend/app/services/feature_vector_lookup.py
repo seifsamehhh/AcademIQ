@@ -91,14 +91,26 @@ def resolve_course_features(
     ]
 
     course_feats = _course_vector(by_course, course_key)
-    if course_feats:
-        debug["course_vector_found"] = True
-        return course_feats, debug
 
-    legacy = doc.get("features") or {}
-    if legacy and not course_key:
-        debug["course_vector_found"] = bool(legacy)
-        return legacy, debug
+    # Moodle-synced snapshot: per-course vectors, else overall synced features.
+    if doc.get("feature_source") == "synced":
+        if course_feats and course_feats.get("feature_source") == "synced":
+            debug["course_vector_found"] = True
+            debug["feature_source"] = "synced"
+            return course_feats, debug
+        overall = doc.get("features") or {}
+        if overall:
+            debug["course_vector_found"] = True
+            debug["feature_source"] = "synced"
+            debug["used_overall_synced"] = True
+            return overall, debug
+        return {}, debug
+
+    # Seeded demo vectors: per-course only (ignore legacy top-level features).
+    if course_feats and course_feats.get("feature_source") == "seeded":
+        debug["course_vector_found"] = True
+        debug["feature_source"] = "seeded"
+        return course_feats, debug
 
     return {}, debug
 

@@ -78,6 +78,13 @@ export default function DashboardPage() {
         </h1>
         <p className="text-muted-foreground">
           Signed in as <span className="font-medium">{studentId}</span>
+          {results?.dataSource === "synced" && results.lastSync ? (
+            <>
+              {" "}
+              · Last Moodle sync{" "}
+              {new Date(results.lastSync).toLocaleString()}
+            </>
+          ) : null}
         </p>
       </div>
 
@@ -99,7 +106,7 @@ export default function DashboardPage() {
               </CardHeader>
               <CardContent>
                 <p className="text-3xl font-bold text-foreground">
-                  {results!.gpa}
+                  {results!.gpa ?? "—"}
                 </p>
               </CardContent>
             </Card>
@@ -125,14 +132,14 @@ export default function DashboardPage() {
               <ul className="divide-y divide-border">
                 {(results!.courses ?? []).map((course) => (
                   <li
-                    key={course.name}
+                    key={course.courseId ?? course.name}
                     className="flex items-center justify-between py-3 first:pt-0 last:pb-0"
                   >
                     <span className="font-medium text-foreground">
                       {course.name}
                     </span>
                     <span className="text-lg font-semibold text-primary">
-                      {course.grade}
+                      {course.grade != null ? course.grade : "—"}
                     </span>
                   </li>
                 ))}

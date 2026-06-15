@@ -95,7 +95,7 @@ function SignInForm() {
             Sign In
           </h1>
           <p className="mb-8 text-center text-sm text-muted-foreground">
-            Sign in with your Student ID and password.
+            Sign in with your Student ID, Moodle email, and password.
           </p>
 
           <form onSubmit={handleSubmit} className="space-y-6">
@@ -106,14 +106,14 @@ function SignInForm() {
             )}
 
             <div className="space-y-2">
-              <Label htmlFor="studentId">Student ID</Label>
+              <Label htmlFor="studentId">Student ID or email</Label>
               <Input
                 id="studentId"
                 name="studentId"
                 type="text"
                 value={formData.studentId}
                 onChange={handleChange}
-                placeholder="student1"
+                placeholder="student1 or you@university.edu"
                 className={
                   errors.studentId
                     ? "border-destructive focus-visible:ring-destructive"
