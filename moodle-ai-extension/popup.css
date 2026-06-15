@@ -29,9 +29,17 @@ h3 {
     font-size: 14px;
 }
 
-.subtle {
-    color: #5f6f86;
-    font-size: 12px;
+.row-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: flex-end;
+}
+
+.row-actions button.primary {
+    background: #2563eb;
+    color: #fff;
+    border: none;
 }
 
 .card {

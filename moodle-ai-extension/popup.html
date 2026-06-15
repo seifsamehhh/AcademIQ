@@ -33,9 +33,14 @@
       <section class="card">
         <div class="row">
           <h2>Extracted Learning Materials</h2>
-          <button id="downloadAllPdfsBtn" class="primary" type="button">Download All Files</button>
+          <div class="row-actions">
+            <button id="uploadQuizBtn" class="primary" type="button">Upload materials for quiz</button>
+            <button id="downloadAllPdfsBtn" type="button">Download All Files</button>
+          </div>
         </div>
-        <p id="downloadMeta" class="subtle">Download-ready files: 0</p>
+        <p id="uploadMeta" class="subtle">Upload sends files to AcademIQ for quiz generation (does not download locally).</p>
+        <p id="downloadMeta" class="subtle">Download saves files to your laptop only.</p>
+        <input id="manualQuizFileInput" type="file" accept=".pdf,.pptx,.ppt,.docx,.doc,.txt" multiple hidden />
         <div id="materialsList" class="materials-list"></div>
       </section>
     </section>

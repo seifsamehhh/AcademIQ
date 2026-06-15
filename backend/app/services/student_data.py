@@ -395,13 +395,26 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             continue
         content = (doc.get("content_text") or "").strip()
         quiz_ready, content_note = _quiz_content_status(content)
+        if doc.get("ready_for_quiz") is True:
+            quiz_ready = True
+            content_note = None
+        elif doc.get("extraction_status") == "extraction_failed":
+            quiz_ready = False
+            content_note = doc.get("extraction_error") or (
+                "Content not available — file text could not be extracted."
+            )
+        elif doc.get("extraction_status") == "insufficient_text" and content:
+            quiz_ready = False
+            content_note = doc.get("extraction_error") or content_note
         out.append({
             "id": doc.get("material_id"),
             "title": doc.get("title", "Untitled"),
             "kind": (doc.get("file_type") or doc.get("category") or "file").upper(),
             "hasContent": quiz_ready,
+            "readyForQuiz": bool(doc.get("ready_for_quiz", quiz_ready)),
             "source": _material_source(doc),
             "contentNote": content_note,
+            "extractionStatus": doc.get("extraction_status"),
         })
     return out
 

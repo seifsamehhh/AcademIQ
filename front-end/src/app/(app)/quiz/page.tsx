@@ -101,7 +101,7 @@ export default function QuizPage() {
         <h1 className="text-2xl font-bold text-foreground">Quiz Generation</h1>
         <p className="text-muted-foreground">
           Pick a course, choose materials with &quot;Ready for quiz&quot;, then generate.
-          Upload PDFs first using the Chrome extension → &quot;Upload PDFs for quiz&quot;.
+          Use the Chrome extension → &quot;Upload materials for quiz&quot; on a Moodle course page first.
         </p>
       </div>
 

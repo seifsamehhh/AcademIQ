@@ -2,6 +2,7 @@ const PRODUCTION_SIGNIN_URL = "https://academiq-frontend.vercel.app/signin";
 const STORAGE_KEY = "moodleData";
 const PRODUCTION_API_BASE = "https://academiq-backend.vercel.app";
 const SYNC_PATH = "/raw-moodle-payloads";
+const UPLOAD_QUIZ_PATH = "/materials/upload-for-quiz";
 const CONTENT_PATH = "/materials/content";
 
 /** Always POST to {base}/raw-moodle-payloads even if storage holds base URL only. */
@@ -9,6 +10,7 @@ const normalizeApiBase = (url) => {
     const raw = (url || PRODUCTION_API_BASE).trim().replace(/\/$/, "");
     return raw
         .replace(/\/raw-moodle-payloads\/?$/, "")
+        .replace(/\/materials\/upload-for-quiz\/?$/, "")
         .replace(/\/materials\/content\/?$/, "");
 };
 
@@ -16,11 +18,13 @@ const buildBackendUrls = (apiBase) => {
     const base = normalizeApiBase(apiBase);
     return {
         sync: `${base}${SYNC_PATH}`,
+        uploadQuiz: `${base}${UPLOAD_QUIZ_PATH}`,
         content: `${base}${CONTENT_PATH}`,
     };
 };
 
 let BACKEND_URL = buildBackendUrls(PRODUCTION_API_BASE).sync;
+let UPLOAD_QUIZ_URL = buildBackendUrls(PRODUCTION_API_BASE).uploadQuiz;
 let CONTENT_URL = buildBackendUrls(PRODUCTION_API_BASE).content;
 
 const loadBackendConfig = () =>
@@ -28,6 +32,7 @@ const loadBackendConfig = () =>
         chrome.storage.local.get(["backendUrl"], (res) => {
             const urls = buildBackendUrls(res.backendUrl || PRODUCTION_API_BASE);
             BACKEND_URL = urls.sync;
+            UPLOAD_QUIZ_URL = urls.uploadQuiz;
             CONTENT_URL = urls.content;
             resolve();
         });
@@ -38,6 +43,9 @@ const refs = {
     downloadJsonBtn: document.getElementById("downloadJsonBtn"),
     clearDataBtn: document.getElementById("clearDataBtn"),
     downloadAllPdfsBtn: document.getElementById("downloadAllPdfsBtn"),
+    uploadQuizBtn: document.getElementById("uploadQuizBtn"),
+    manualQuizFileInput: document.getElementById("manualQuizFileInput"),
+    uploadMeta: document.getElementById("uploadMeta"),
     emptyState: document.getElementById("emptyState"),
     dashboard: document.getElementById("dashboard"),
     courseSelector: document.getElementById("courseSelector"),
@@ -313,7 +321,7 @@ const addSyncButton = () => {
                     `Login email: ${email}\n` +
                     passwordLine +
                     `Sign in: ${signinUrl}\n\n` +
-                    `Optional: click "Upload PDFs for quiz" in this popup to send course PDFs to the backend for quiz generation.`
+                    `Optional: click "Upload materials for quiz" in this popup to send course files to the backend for quiz generation.`
                 );
             } else {
                 syncBtn.textContent = "Sync Failed";
@@ -359,9 +367,67 @@ const addScanAllButton = () => {
     });
 };
 
-// Upload the current course's PDF materials' content to the backend so quizzes
-// can be generated from them. The extension holds the Moodle session, so it can
-// fetch the files; the backend extracts the text.
+const QUIZ_UPLOAD_FILE_TYPES = new Set(["pdf", "pptx", "ppt", "docx", "doc", "txt", "text"]);
+
+const isQuizUploadableMaterial = (material) => {
+    const ft = (material.fileType || "").toLowerCase();
+    const url = material.url || "";
+    if (QUIZ_UPLOAD_FILE_TYPES.has(ft)) return true;
+    return /\.(pdf|pptx?|docx?|txt)(\?|$)/i.test(url);
+};
+
+const getActiveMoodleTab = () =>
+    new Promise((resolve) => {
+        chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => resolve(tab || null));
+    });
+
+const scrapeCurrentCourseOnActiveTab = (courseId) =>
+    new Promise((resolve) => {
+        getActiveMoodleTab().then((tab) => {
+            if (!tab?.id) {
+                resolve({ status: "error", error: "Open a Moodle course tab first." });
+                return;
+            }
+            chrome.tabs.sendMessage(
+                tab.id,
+                { type: "scrape_current_course", courseId },
+                (response) => {
+                    if (chrome.runtime.lastError) {
+                        resolve({ status: "error", error: chrome.runtime.lastError.message });
+                        return;
+                    }
+                    resolve(response || { status: "error", error: "No response from Moodle page." });
+                }
+            );
+        });
+    });
+
+const uploadMaterialsOnActiveTab = (courseId) =>
+    new Promise((resolve) => {
+        getActiveMoodleTab().then((tab) => {
+            if (!tab?.id) {
+                resolve({ status: "error", error: "Open a Moodle course tab first." });
+                return;
+            }
+            chrome.tabs.sendMessage(
+                tab.id,
+                {
+                    type: "upload_materials_for_quiz",
+                    backendUploadUrl: UPLOAD_QUIZ_URL,
+                    courseId
+                },
+                (response) => {
+                    if (chrome.runtime.lastError) {
+                        resolve({ status: "error", error: chrome.runtime.lastError.message });
+                        return;
+                    }
+                    resolve(response || { status: "error", error: "No response from Moodle page." });
+                }
+            );
+        });
+    });
+
+// Upload materials to the backend for quiz generation (uses Moodle session in the active tab).
 const arrayBufferToBase64 = (buf) => {
     const bytes = new Uint8Array(buf);
     let binary = "";
@@ -372,46 +438,139 @@ const arrayBufferToBase64 = (buf) => {
     return btoa(binary);
 };
 
-const uploadMaterialContent = async (material) => {
-    const materialId = material.id || material.material_id;
-    if (!materialId || !material.url) return false;
-    const res = await fetch(material.url, { credentials: "include" });
-    if (!res.ok) return false;
-    const b64 = arrayBufferToBase64(await res.arrayBuffer());
-    const post = await fetch(CONTENT_URL, {
+const uploadMaterialPayload = async (payload) => {
+    const response = await fetch(UPLOAD_QUIZ_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            course_id: material.courseId || currentCourseId,
-            material_id: materialId,
-            content_base64: b64,
-        }),
+        body: JSON.stringify(payload)
     });
-    return post.ok;
+    let data = {};
+    try {
+        data = await response.json();
+    } catch (_error) {
+        data = {};
+    }
+    return { ok: response.ok, ...data };
 };
 
-const addUploadQuizButton = () => {
-    const btn = document.createElement("button");
-    btn.id = "uploadQuizBtn";
-    btn.textContent = "Upload PDFs for quiz";
-    btn.style.marginLeft = "10px";
-    refs.downloadAllPdfsBtn.parentNode.insertBefore(btn, refs.downloadAllPdfsBtn.nextSibling);
-    btn.addEventListener("click", async () => {
-        const pdfs = getCourseMaterials(currentData, currentCourseId)
-            .filter((m) => (m.fileType || "").toLowerCase() === "pdf" && m.url);
-        if (!pdfs.length) {
-            btn.textContent = "No PDFs in this course";
-            setTimeout(() => (btn.textContent = "Upload PDFs for quiz"), 2500);
+const uploadStoredMaterial = async (material, identity) => {
+    const materialId = material.id || material.material_id;
+    const url = material.url;
+    if (!materialId || !url) return { ok: false, error: "missing_id_or_url" };
+    const res = await fetch(url, { credentials: "include" });
+    if (!res.ok) return { ok: false, error: `http_${res.status}` };
+    return uploadMaterialPayload({
+        course_id: material.courseId || currentCourseId,
+        course_name: currentData?.metricsByCourse?.[currentCourseId]?.course_name,
+        material_id: materialId,
+        title: material.title,
+        material_type: material.type,
+        file_type: material.fileType,
+        source_url: url,
+        content_base64: arrayBufferToBase64(await res.arrayBuffer()),
+        content_type: res.headers.get("content-type") || "",
+        user_email: identity?.email || null
+    });
+};
+
+const uploadPickedFiles = async (files, courseId, identity) => {
+    const results = [];
+    for (const file of files) {
+        const ext = (file.name.split(".").pop() || "").toLowerCase();
+        const materialId = `manual_${ext}_${file.name.replace(/[^a-z0-9._-]+/gi, "_")}`;
+        const buf = await file.arrayBuffer();
+        const result = await uploadMaterialPayload({
+            course_id: courseId,
+            course_name: currentData?.metricsByCourse?.[courseId]?.course_name,
+            material_id: materialId,
+            title: file.name,
+            material_type: "resource",
+            file_type: ext || "unknown",
+            source_url: null,
+            content_base64: arrayBufferToBase64(buf),
+            content_type: file.type || "",
+            user_email: identity?.email || null
+        });
+        results.push(result);
+    }
+    return results;
+};
+
+const runQuizMaterialUpload = async () => {
+    const btn = refs.uploadQuizBtn;
+    const courseId = currentCourseId;
+    if (!courseId) {
+        refs.uploadMeta.textContent = "Select a course first.";
+        return;
+    }
+
+    btn.disabled = true;
+    refs.uploadMeta.textContent = "Scanning Moodle course page and uploading materials...";
+
+    const identity = currentData?.student || {};
+    let uploaded = 0;
+    let ready = 0;
+    let total = 0;
+
+    const tabResult = await uploadMaterialsOnActiveTab(courseId);
+    if (tabResult.status === "done") {
+        uploaded = tabResult.uploaded || 0;
+        ready = tabResult.ready || 0;
+        total = tabResult.total || 0;
+        await refreshData();
+    } else {
+        const stored = getCourseMaterials(currentData, courseId).filter(isQuizUploadableMaterial);
+        if (stored.length) {
+            refs.uploadMeta.textContent = `Falling back to ${stored.length} stored material(s)...`;
+            for (let i = 0; i < stored.length; i += 1) {
+                btn.textContent = `Uploading ${i + 1}/${stored.length}...`;
+                try {
+                    const result = await uploadStoredMaterial(stored[i], identity);
+                    if (result.ok) uploaded += 1;
+                    if (result.ready_for_quiz) ready += 1;
+                } catch (_error) {
+                    /* skip */
+                }
+            }
+            total = stored.length;
+        } else {
+            refs.uploadMeta.textContent =
+                `${tabResult.error || "Could not upload from Moodle tab."} Open the course page, refresh, or pick files manually.`;
+            btn.disabled = false;
+            btn.textContent = "Upload materials for quiz";
+            refs.manualQuizFileInput.click();
             return;
         }
-        btn.disabled = true;
-        let ok = 0;
-        for (let i = 0; i < pdfs.length; i += 1) {
-            btn.textContent = `Uploading ${i + 1}/${pdfs.length}...`;
-            try { if (await uploadMaterialContent(pdfs[i])) ok += 1; } catch (_e) { /* skip */ }
-        }
-        btn.textContent = `Uploaded ${ok}/${pdfs.length} PDFs`;
-        setTimeout(() => { btn.disabled = false; btn.textContent = "Upload PDFs for quiz"; }, 3000);
+    }
+
+    btn.textContent = "Upload materials for quiz";
+    btn.disabled = false;
+    refs.uploadMeta.textContent =
+        `Uploaded ${uploaded}/${total} to AcademIQ · ${ready} ready for quiz. Open Quiz Generation in AcademIQ to verify.`;
+};
+
+const bindQuizUploadControls = () => {
+    refs.uploadQuizBtn.addEventListener("click", () => {
+        runQuizMaterialUpload().catch((error) => {
+            refs.uploadMeta.textContent = `Upload failed: ${error.message || error}`;
+            refs.uploadQuizBtn.disabled = false;
+            refs.uploadQuizBtn.textContent = "Upload materials for quiz";
+        });
+    });
+
+    refs.manualQuizFileInput.addEventListener("change", async (event) => {
+        const files = Array.from(event.target.files || []);
+        event.target.value = "";
+        if (!files.length || !currentCourseId) return;
+        refs.uploadMeta.textContent = `Uploading ${files.length} picked file(s)...`;
+        refs.uploadQuizBtn.disabled = true;
+        const identity = currentData?.student || {};
+        const results = await uploadPickedFiles(files, currentCourseId, identity);
+        const uploaded = results.filter((row) => row.ok).length;
+        const ready = results.filter((row) => row.ready_for_quiz).length;
+        refs.uploadQuizBtn.disabled = false;
+        refs.uploadMeta.textContent =
+            `Manual upload: ${uploaded}/${files.length} stored · ${ready} ready for quiz.`;
     });
 };
 
@@ -458,6 +617,6 @@ document.addEventListener("DOMContentLoaded", () => {
         refreshData();
         addSyncButton();
         addScanAllButton();
-        addUploadQuizButton();
+        bindQuizUploadControls();
     });
 });

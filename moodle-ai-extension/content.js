@@ -793,13 +793,141 @@
         return { courses: courses.length, scraped };
     };
 
+    const arrayBufferToBase64 = (buf) => {
+        const bytes = new Uint8Array(buf);
+        let binary = "";
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+            binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+        }
+        return btoa(binary);
+    };
+
+    const QUIZ_UPLOAD_FILE_TYPES = new Set(["pdf", "pptx", "ppt", "docx", "doc", "txt", "text"]);
+
+    const isQuizUploadableMaterial = (material) => {
+        const ft = (material.file_type || material.fileType || "").toLowerCase();
+        const url = material.resolvedUrl || material.url || "";
+        if (QUIZ_UPLOAD_FILE_TYPES.has(ft)) return true;
+        return /\.(pdf|pptx?|docx?|txt)(\?|$)/i.test(url);
+    };
+
+    const fetchMaterialBytes = async (material) => {
+        const url = material.resolvedUrl || material.url;
+        if (!url) return { ok: false, error: "missing_url" };
+        try {
+            const res = await fetch(url, { credentials: "include", redirect: "follow" });
+            if (!res.ok) return { ok: false, error: `http_${res.status}` };
+            const buf = await res.arrayBuffer();
+            return {
+                ok: true,
+                base64: arrayBufferToBase64(buf),
+                contentType: res.headers.get("content-type") || ""
+            };
+        } catch (error) {
+            return { ok: false, error: String(error) };
+        }
+    };
+
+    const uploadMaterialToBackend = async (backendUploadUrl, material, identity) => {
+        const fetched = await fetchMaterialBytes(material);
+        if (!fetched.ok) {
+            return {
+                material_id: material.material_id || material.id,
+                title: material.title,
+                ok: false,
+                error: fetched.error
+            };
+        }
+        const body = {
+            course_id: material.course_id || material.courseId,
+            course_name: material.course_name,
+            material_id: material.material_id || material.id,
+            title: material.title,
+            material_type: material.material_type || material.type,
+            file_type: material.file_type || material.fileType,
+            source_url: material.url,
+            content_base64: fetched.base64,
+            content_type: fetched.contentType,
+            user_email: identity?.email || null
+        };
+        const res = await fetch(backendUploadUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+        });
+        let data = {};
+        try {
+            data = await res.json();
+        } catch (_error) {
+            data = {};
+        }
+        return {
+            material_id: body.material_id,
+            title: body.title,
+            ok: res.ok,
+            ...data
+        };
+    };
+
+    const uploadMaterialsForQuiz = async (backendUploadUrl, courseId) => {
+        const course = getCourseContext();
+        const targetCourseId = courseId || course.course_id;
+        if (!targetCourseId) {
+            return { status: "error", error: "Open a Moodle course page first." };
+        }
+        const courseCtx =
+            String(course.course_id) === String(targetCourseId)
+                ? course
+                : { course_id: targetCourseId, course_name: `Course ${targetCourseId}` };
+
+        let materials = await extractMaterialsFromCourse(courseCtx);
+        materials = materials.filter(isQuizUploadableMaterial);
+        if (materials.length) {
+            sendMessage("materials", materials);
+        }
+
+        const identity = getStudentIdentity();
+        const results = [];
+        for (const material of materials) {
+            results.push(await uploadMaterialToBackend(backendUploadUrl, material, identity));
+        }
+        return {
+            status: "done",
+            course_id: targetCourseId,
+            uploaded: results.filter((row) => row.ok).length,
+            ready: results.filter((row) => row.ready_for_quiz).length,
+            total: materials.length,
+            results
+        };
+    };
+
     // Allow the popup to trigger a full all-courses scan on demand.
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (message?.type === "scrape_all_courses") {
             scrapeAllCourses()
                 .then((result) => sendResponse({ status: "done", ...result }))
                 .catch((error) => sendResponse({ status: "error", error: String(error) }));
-            return true; // keep the channel open for the async response
+            return true;
+        }
+        if (message?.type === "scrape_current_course") {
+            (async () => {
+                const course = getCourseContext();
+                if (!course.course_id) {
+                    sendResponse({ status: "error", error: "Open a Moodle course page first." });
+                    return;
+                }
+                const materials = await extractMaterialsFromCourse(course);
+                if (materials.length) sendMessage("materials", materials);
+                sendResponse({ status: "done", course, materials });
+            })().catch((error) => sendResponse({ status: "error", error: String(error) }));
+            return true;
+        }
+        if (message?.type === "upload_materials_for_quiz") {
+            uploadMaterialsForQuiz(message.backendUploadUrl, message.courseId)
+                .then((result) => sendResponse(result))
+                .catch((error) => sendResponse({ status: "error", error: String(error) }));
+            return true;
         }
         return false;
     });

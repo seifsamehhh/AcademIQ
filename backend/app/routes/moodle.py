@@ -3,10 +3,9 @@ from bson import ObjectId
 from datetime import datetime
 from typing import Dict, Any
 
-import base64
-
 from app.config.database import raw_moodle_payload_collection, feature_vectors_collection
 from app.schema.schemas import list_raw_moodle_payload_serial
+from app.services.material_quiz_upload import process_material_upload_for_quiz
 from app.services.preprocessing import compute_features
 from app.services.moodle_ingest import normalize_payload, slim_payload
 from app.services.user_provisioning import (
@@ -14,8 +13,6 @@ from app.services.user_provisioning import (
     issue_demo_sync_temporary_password,
     resolve_or_create_user,
 )
-from app.repositories import material_repository
-from app.services import quiz_gen
 from app.services.synced_features import build_synced_course_features
 
 router = APIRouter()
@@ -24,29 +21,35 @@ router = APIRouter()
 EXTENSION_SIGNIN_URL = "https://academiq-frontend.vercel.app/signin"
 
 
+@router.post("/materials/upload-for-quiz")
+async def upload_material_for_quiz(payload: Dict[str, Any]):
+    """
+    Extension upload: Moodle file bytes or pre-extracted text → course_materials.
+
+    Body (JSON):
+      course_id, material_id, title, course_name, material_type, file_type,
+      source_url, content_base64 OR content_text,
+      user_email / academiq_user_id (optional, for audit only)
+    """
+    try:
+        return process_material_upload_for_quiz(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {exc}")
+
+
 @router.post("/materials/content")
 async def upload_material_content(payload: Dict[str, Any]):
     """
-    Open endpoint (same trust model as /raw-moodle-payloads): the extension —
-    which holds the Moodle session — fetches a material's PDF and uploads its
-    bytes here. We extract the text (PyPDF2) and store it so quizzes can be
-    generated from it later.
-
-    Body: { course_id, material_id, content_base64 }
+    Legacy alias — forwards to /materials/upload-for-quiz.
     """
-    course_id = str(payload.get("course_id") or "").strip()
-    material_id = str(payload.get("material_id") or "").strip()
-    b64 = payload.get("content_base64")
-    if not course_id or not material_id or not b64:
-        raise HTTPException(status_code=400, detail="course_id, material_id, content_base64 required")
     try:
-        data = base64.b64decode(b64)
-        text = quiz_gen.extract_pdf_text(data)
+        return process_material_upload_for_quiz(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Could not read PDF: {exc}")
-
-    material_repository.set_content(course_id, material_id, text)
-    return {"status": "stored", "material_id": material_id, "chars": len(text)}
+        raise HTTPException(status_code=500, detail=f"Upload failed: {exc}")
 
 
 # GET all raw moodle payloads
