@@ -148,12 +148,13 @@ def generate_quiz(
 
     if not questions:
         detail = {
-            "error": "insufficient_quiz_structure",
+            "error": "quiz_generation_failed",
             "message": (
-                f"Text was retrieved ({content_chars} chars, engine={engine}) but "
-                "does not contain enough definition-style sentences for quiz generation. "
-                "Try selecting a different material, or upload a lecture PDF that contains "
-                "clear concept explanations (e.g. 'X is a Y' sentences)."
+                f"Could not generate quiz questions from the selected material "
+                f"({content_chars} characters of text). "
+                "The content may be too short, contain only images, or have no "
+                "readable sentences. Try selecting a different material or "
+                "re-uploading with a text-based PDF."
             ),
             "content_chars": content_chars,
             "engine": engine,

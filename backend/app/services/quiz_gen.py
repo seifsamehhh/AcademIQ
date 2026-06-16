@@ -162,7 +162,7 @@ def generate_questions(text: str, num_questions: int = 8) -> Tuple[List[Dict[str
     except Exception as exc:
         logger.error("Lecture quiz engine failed: %s", exc, exc_info=True)
 
-    # ── 3. Heavy NLTK (last resort — local dev only, may use generic templates) ──
+    # ── 3. Heavy NLTK (local dev only, may use generic templates) ────────────
     if available():
         try:
             heavy = generate_from_text(text, num_questions=num_questions)
@@ -175,5 +175,21 @@ def generate_questions(text: str, num_questions: int = 8) -> Tuple[List[Dict[str
             )
         except Exception as exc:
             logger.warning("Heavy quiz engine failed: %s", exc, exc_info=True)
+
+    # ── 4. Fragment fallback (any extractable text) ───────────────────────────
+    # Works on ANY material with ≥4 readable sentences — lecture, lab, revision,
+    # PPTX fragments, bullet points, short explanations.  Generates content-recall
+    # MCQs: "Which of the following was in this material?"  All options come from
+    # the same selected text; nothing is invented.
+    try:
+        from app.services.quiz_gen_fragment import generate_fragment_quiz
+
+        fragment = generate_fragment_quiz(text, num_questions=num_questions)
+        if fragment:
+            logger.info("Quiz generated via fragment engine (%d questions)", len(fragment))
+            return fragment, "fragment"
+        logger.warning("Fragment quiz engine returned no questions")
+    except Exception as exc:
+        logger.error("Fragment quiz engine failed: %s", exc, exc_info=True)
 
     return [], "failed"

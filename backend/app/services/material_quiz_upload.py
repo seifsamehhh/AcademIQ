@@ -50,6 +50,18 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     Upsert material metadata + extracted text from extension upload.
 
     Accepts either content_base64 (file bytes) or content_text (pre-extracted).
+
+    Caching:
+      If a material already has content_text with enough characters, the
+      re-extraction step is skipped and the response includes
+      status="skipped_existing" so the extension can report a fast second upload.
+
+    Readiness rule (simplified):
+      Any material with extracted text >= MIN_QUIZ_CONTENT_CHARS is marked
+      ready_for_quiz=True.  The strict probe-based check is removed — the quiz
+      generator handles all content types via its four-engine pipeline (light →
+      lecture → heavy → fragment).  Only truly failed extractions or empty files
+      are marked not-ready.
     """
     course_id = str(payload.get("course_id") or "").strip()
     raw_material_id = str(
@@ -73,6 +85,33 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         if user:
             academiq_user_id = str(user["_id"])
 
+    # ── Caching: skip re-extraction if text already saved ────────────────────
+    existing_doc = material_repository.get(course_id, material_id)
+    if existing_doc:
+        existing_text = (existing_doc.get("content_text") or "").strip()
+        existing_chars = len(existing_text)
+        if existing_chars >= MIN_QUIZ_CONTENT_CHARS:
+            # Material already processed — skip re-extraction, return cached result
+            already_ready = bool(existing_doc.get("ready_for_quiz", True))
+            return {
+                "status": "skipped_existing",
+                "already_ready": already_ready,
+                "course_id": course_id,
+                "material_id": material_id,
+                "resolved_from_material_id": (
+                    raw_material_id if raw_material_id != material_id else None
+                ),
+                "title": existing_doc.get("title", title),
+                "chars": existing_chars,
+                "ready_for_quiz": already_ready,
+                "hasContent": already_ready,
+                "extraction_status": existing_doc.get("extraction_status", "success"),
+                "extraction_error": None,
+                "content_note": None,
+                "inserted": False,
+            }
+
+    # ── Extract text ─────────────────────────────────────────────────────────
     text = (payload.get("content_text") or "").strip()
     extraction_error: Optional[str] = None
 
@@ -93,6 +132,15 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     text = (text or "").strip()
     chars = len(text)
 
+    # ── Determine readiness (simplified — no probe, just text length check) ──
+    #
+    # The quiz generator uses a four-engine pipeline (light → lecture → heavy →
+    # fragment) that handles any educational content type.  We no longer run a
+    # per-material probe at upload time because:
+    #   1. It was rejecting valid lab/PPTX/fragmented materials.
+    #   2. The fragment fallback now covers any text with ≥4 readable sentences.
+    # Only true failures (no bytes, corrupted file, unsupported format) are
+    # marked not-ready.
     if extraction_error and not text:
         extraction_status = "extraction_failed"
         ready_for_quiz = False
@@ -106,31 +154,10 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
         ready_for_quiz = False
     else:
-        # Text is long enough — probe whether it can actually produce quiz questions.
-        # Uses lightweight generator (Vercel-safe) and, if available, the heavy engine.
-        try:
-            from app.services.quiz_material_eligibility import assess_quiz_eligibility
-
-            eligible, reason_code, probe_meta = assess_quiz_eligibility(
-                text, file_type=str(file_type), probe=True
-            )
-        except Exception:
-            eligible, reason_code, probe_meta = True, None, {}  # best-effort: assume ok
-
-        if eligible:
-            ready_for_quiz = True
-            extraction_status = "success"
-            extraction_error = None
-        else:
-            ready_for_quiz = False
-            extraction_status = reason_code or "insufficient_quiz_structure"
-            pair_count = probe_meta.get("definition_pair_count", 0)
-            probe_count = probe_meta.get("probe_question_count", 0)
-            extraction_error = (
-                f"Text extracted ({chars} chars, {pair_count} definition pairs, "
-                f"{probe_count} probe questions) but not enough structure for quiz "
-                "generation. Try a PDF with clear concept definitions or descriptions."
-            )
+        # Any material with enough extracted text is selectable for quiz generation.
+        extraction_status = "success"
+        extraction_error = None
+        ready_for_quiz = True
 
     material_doc = build_material_doc(
         {
@@ -171,18 +198,16 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not ready_for_quiz:
         if extraction_status == "extraction_failed":
             content_note = (
-                "Content not available — file text could not be extracted. "
-                f"Reason: {extraction_error}"
+                "No readable text extracted — file may be scanned/image-only, "
+                f"encrypted, or in an unsupported format. Reason: {extraction_error}"
             )
         elif extraction_status == "insufficient_text":
             content_note = (
-                "Material uploaded but has limited text for quiz generation. "
-                f"({chars} chars; need {MIN_QUIZ_CONTENT_CHARS}+)."
+                f"Only {chars} characters extracted (need at least {MIN_QUIZ_CONTENT_CHARS}). "
+                "Try uploading a text-based PDF or PPTX."
             )
-        elif extraction_status == "insufficient_quiz_structure":
-            content_note = extraction_error
         else:
-            content_note = "Content not available yet."
+            content_note = "No readable text could be extracted from this file."
 
     return {
         "status": "stored",

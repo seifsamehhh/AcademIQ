@@ -20,8 +20,8 @@ export function MaterialSelect({
     <Card>
       <CardHeader>
         <CardTitle>Select Learning Materials</CardTitle>
-        <CardDescription>
-          Only materials with available content can be used for quiz generation.
+              <CardDescription>
+          Materials with extracted text are selectable. Works with lectures, labs, revisions, slides, and any uploaded PDF or PPTX.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
@@ -57,7 +57,11 @@ export function MaterialSelect({
                 {selectable ? (
                   <Badge variant="default">Ready for quiz</Badge>
                 ) : (
-                  <Badge variant="muted">Content not available</Badge>
+                  <Badge variant="muted">
+                    {material.contentNote?.startsWith("No readable text")
+                      ? "Not uploaded yet"
+                      : "Content unavailable"}
+                  </Badge>
                 )}
                 {material.source === "moodle_sync" ? (
                   <Badge variant="muted">Moodle</Badge>

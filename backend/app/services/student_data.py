@@ -355,17 +355,25 @@ def _material_source(doc: Dict[str, Any]) -> str:
 
 
 def _quiz_content_status(content: str) -> tuple[bool, str | None]:
+    """
+    Return (selectable, content_note).
+
+    A material is selectable for quiz generation if it has enough extracted text.
+    The quiz generator handles all content types (definition, lecture, lab, PPTX,
+    bullets) via its four-engine pipeline — no structural quality check here.
+    """
     text = (content or "").strip()
     if len(text) >= MIN_QUIZ_CONTENT_CHARS:
         return True, None
     if text:
         return False, (
-            "Material has limited extracted text. Upload the PDF via the Chrome "
-            "extension to enable quiz generation."
+            f"Only {len(text)} characters of text extracted "
+            f"(need at least {MIN_QUIZ_CONTENT_CHARS}). "
+            "Re-upload a text-based PDF or PPTX via the Chrome extension."
         )
     return False, (
-        "Material is listed from Moodle but quiz content is not extracted yet. "
-        "Use the Chrome extension → Upload PDFs for quiz."
+        "No readable text extracted yet. "
+        "Use the Chrome extension → 'Upload materials for quiz' on the Moodle course page."
     )
 
 
@@ -394,18 +402,36 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
         if apply_demo_name_filter and enrolled_name and doc_name and doc_name != enrolled_name:
             continue
         content = (doc.get("content_text") or "").strip()
-        quiz_ready, content_note = _quiz_content_status(content)
-        if doc.get("ready_for_quiz") is True:
+        extraction_status = doc.get("extraction_status") or ""
+
+        if extraction_status == "extraction_failed":
+            # Truly failed extraction (corrupted/scanned/image-only file)
+            quiz_ready = False
+            content_note = (
+                doc.get("extraction_error")
+                or "No readable text could be extracted. Try re-uploading a text-based PDF."
+            )
+        elif not content:
+            # No content_text stored yet — material listed from Moodle but not uploaded
+            quiz_ready = False
+            content_note = (
+                "No readable text extracted yet. "
+                "Use the Chrome extension → 'Upload materials for quiz' on the Moodle course page."
+            )
+        elif len(content) < MIN_QUIZ_CONTENT_CHARS:
+            # Extracted text exists but is too short for quiz generation
+            quiz_ready = False
+            content_note = (
+                f"Only {len(content)} characters extracted "
+                f"(need at least {MIN_QUIZ_CONTENT_CHARS}). "
+                "Re-upload a text-based PDF or PPTX."
+            )
+        else:
+            # Any material with sufficient extracted text is selectable.
+            # The quiz generator's four-engine pipeline (light → lecture → heavy →
+            # fragment) handles definition, lecture, lab, PPTX, and bullet-style content.
             quiz_ready = True
             content_note = None
-        elif doc.get("extraction_status") == "extraction_failed":
-            quiz_ready = False
-            content_note = doc.get("extraction_error") or (
-                "Content not available — file text could not be extracted."
-            )
-        elif doc.get("extraction_status") == "insufficient_text" and content:
-            quiz_ready = False
-            content_note = doc.get("extraction_error") or content_note
         out.append({
             "id": str(doc.get("material_id") or ""),
             "title": doc.get("title", "Untitled"),
