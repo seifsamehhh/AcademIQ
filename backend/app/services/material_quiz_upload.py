@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 from app.models.material import build_material_doc, stable_material_id
 from app.repositories import material_repository, user_repository
 from app.services.material_text_extract import extract_text_from_bytes
-from app.services.student_data import MIN_QUIZ_CONTENT_CHARS
+from app.services.student_data import MIN_QUIZ_CONTENT_CHARS, _classify_non_quiz_material
 
 
 def _material_id_from_url(url: Optional[str]) -> Optional[str]:
@@ -85,13 +85,70 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         if user:
             academiq_user_id = str(user["_id"])
 
-    # ── Caching: skip re-extraction if text already saved ────────────────────
+    # ── Step 1: classify by title/type before any extraction work ────────────
+    # Non-quiz materials (grades, folders, admin, forums, etc.) are stored with
+    # minimal metadata but NO text extraction — fast and idempotent on re-upload.
+    is_non_quiz, non_quiz_reason = _classify_non_quiz_material(title, str(file_type))
+    if is_non_quiz:
+        existing_doc = material_repository.get(course_id, material_id)
+        if existing_doc and existing_doc.get("extraction_status") == "not_quiz_material":
+            # Already classified — return immediately without touching the DB
+            return {
+                "status": "already_classified",
+                "already_ready": False,
+                "course_id": course_id,
+                "material_id": material_id,
+                "resolved_from_material_id": raw_material_id if raw_material_id != material_id else None,
+                "title": existing_doc.get("title", title),
+                "chars": 0,
+                "ready_for_quiz": False,
+                "hasContent": False,
+                "extraction_status": "not_quiz_material",
+                "extraction_error": non_quiz_reason,
+                "content_note": f"Not quiz material: {non_quiz_reason}",
+                "inserted": False,
+            }
+        # Store minimal record so the material is visible in the UI
+        minimal_doc = {
+            "course_id": course_id,
+            "material_id": material_id,
+            "title": title,
+            "file_type": file_type,
+            "source": "moodle_sync",
+            "ready_for_quiz": False,
+            "extraction_status": "not_quiz_material",
+            "extraction_error": non_quiz_reason,
+        }
+        if course_name:
+            minimal_doc["course_name"] = course_name
+        if source_url:
+            minimal_doc["url"] = source_url
+        material_repository.upsert(minimal_doc)
+        return {
+            "status": "classified",
+            "already_ready": False,
+            "course_id": course_id,
+            "material_id": material_id,
+            "resolved_from_material_id": raw_material_id if raw_material_id != material_id else None,
+            "title": title,
+            "chars": 0,
+            "ready_for_quiz": False,
+            "hasContent": False,
+            "extraction_status": "not_quiz_material",
+            "extraction_error": non_quiz_reason,
+            "content_note": f"Not quiz material: {non_quiz_reason}",
+            "inserted": True,
+        }
+
+    # ── Step 2: caching — skip re-extraction if already processed ────────────
     existing_doc = material_repository.get(course_id, material_id)
     if existing_doc:
+        existing_status = existing_doc.get("extraction_status") or ""
         existing_text = (existing_doc.get("content_text") or "").strip()
         existing_chars = len(existing_text)
+
         if existing_chars >= MIN_QUIZ_CONTENT_CHARS:
-            # Material already processed — skip re-extraction, return cached result
+            # Already has enough content — skip re-extraction entirely
             already_ready = bool(existing_doc.get("ready_for_quiz", True))
             return {
                 "status": "skipped_existing",
@@ -110,6 +167,31 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "content_note": None,
                 "inserted": False,
             }
+
+        if existing_status == "extraction_failed":
+            # Extraction was already attempted and failed — skip unless force_reupload
+            force = bool(payload.get("force_reupload"))
+            if not force:
+                return {
+                    "status": "skipped_existing",
+                    "already_ready": False,
+                    "course_id": course_id,
+                    "material_id": material_id,
+                    "resolved_from_material_id": (
+                        raw_material_id if raw_material_id != material_id else None
+                    ),
+                    "title": existing_doc.get("title", title),
+                    "chars": 0,
+                    "ready_for_quiz": False,
+                    "hasContent": False,
+                    "extraction_status": "extraction_failed",
+                    "extraction_error": existing_doc.get("extraction_error"),
+                    "content_note": (
+                        "Extraction previously failed. "
+                        "Re-upload with force_reupload=true to retry."
+                    ),
+                    "inserted": False,
+                }
 
     # ── Extract text ─────────────────────────────────────────────────────────
     text = (payload.get("content_text") or "").strip()

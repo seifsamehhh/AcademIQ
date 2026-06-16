@@ -40,7 +40,9 @@ MIN_QUIZ_CONTENT_CHARS = 200
 _NON_QUIZ_ACTIVITY_TYPES: frozenset[str] = frozenset({
     "folder", "assign", "forum", "quiz", "url", "choice",
     "feedback", "survey", "chat", "glossary", "wiki", "workshop",
-    "scorm", "lti", "attendance",
+    "scorm", "lti", "attendance", "book",
+    # Moodle label/page types are HTML widgets, not downloadable lecture content
+    "label", "page",
 })
 
 # Spreadsheet/data-export extensions that are almost always grades or admin data.
@@ -48,17 +50,30 @@ _NON_QUIZ_FILE_EXTENSIONS: frozenset[str] = frozenset({
     "xlsx", "xls", "csv", "ods",
 })
 
-# Title keywords that clearly indicate grades / admin content, not lecture material.
+# Title keywords that clearly indicate administrative / non-lecture content.
+# The goal is to catch files a student would never revise from — grade sheets,
+# submission forms, project briefs, admin announcements — while keeping actual
+# lecture, lab, revision, handout, notes, and chapter documents selectable.
 _NON_QUIZ_TITLE_RE = re.compile(
     r"\b(?:"
-    r"grade[sd]?|grading|mark[sd]?|marking"
-    r"|attendance|absent(?:ee)?"
-    r"|final\s+(?:mark[sd]?|grade[sd]?|score[sd]?)"
-    r"|score\s+sheet|grade\s+sheet|mark\s+sheet|grade\s+book|mark\s+book"
-    r"|submission\s+(?:report|status|list)"
-    r"|student\s+(?:list|roster|record[sd]?)"
-    r"|project\s+(?:criteria|rubric)"
-    r"|exam\s+(?:schedule|timetable)"
+    # Grades / marks / scores
+    r"grade[sd]?|grading|mark[sd]?|marking|score\s+sheet|grade\s+sheet"
+    r"|mark\s+sheet|grade\s+book|mark\s+book|final\s+(?:mark[sd]?|grade[sd]?|score[sd]?)"
+    # Attendance / roster
+    r"|attendance|absent(?:ee)?|student\s+(?:list|roster|record[sd]?)"
+    # Submission / status reports
+    r"|submission\s+(?:report|status|list|guide|form)"
+    r"|assignment\s+(?:submission|status|report|list)"
+    # Project admin (requirements/brief/rubric — not the lecture content itself)
+    r"|project\s+(?:requirements?|criteria|rubric|description|brief|plan|outline|guide)"
+    r"|assignment\s+(?:instructions?|brief|description|rubric|criteria|requirements?)"
+    # Course admin documents
+    r"|course\s+(?:outline|plan|schedule|syllabus|calendar|timetable)"
+    r"|semester\s+(?:plan|schedule|calendar|timetable)"
+    r"|exam\s+(?:schedule|timetable|calendar)"
+    r"|due\s+dates?"
+    # Announcements / notifications
+    r"|announcements?"
     r")\b",
     re.I,
 )
@@ -80,6 +95,9 @@ _ACTIVITY_TYPE_REASON: Dict[str, str] = {
     "scorm": "SCORM package",
     "lti": "External tool (LTI)",
     "attendance": "Attendance activity",
+    "book": "Moodle Book (HTML activity, use PDF upload instead)",
+    "label": "Moodle label (inline text widget, not a document)",
+    "page": "Moodle page (HTML page widget, not a document)",
 }
 
 
@@ -481,7 +499,11 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
         extraction_status = doc.get("extraction_status") or ""
 
         # ── Step 1: check if this is non-educational material ──────────────
+        # Honour classification stored at upload time, then re-check by title/type.
         is_non_quiz, non_quiz_reason = _classify_non_quiz_material(title, raw_file_type)
+        if not is_non_quiz and extraction_status == "not_quiz_material":
+            is_non_quiz = True
+            non_quiz_reason = doc.get("extraction_error") or "Non-educational material"
         if is_non_quiz:
             out.append({
                 "id": str(doc.get("material_id") or ""),

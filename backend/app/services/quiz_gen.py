@@ -107,7 +107,57 @@ def generate_from_text(text: str, num_questions: int = 8) -> List[Dict[str, Any]
     return out
 
 
-def generate_questions(text: str, num_questions: int = 8) -> Tuple[List[Dict[str, Any]], str]:
+def _supplement_to_target(
+    primary: List[Dict[str, Any]],
+    text: str,
+    num_questions: int,
+    primary_engine: str,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    If primary has fewer than num_questions, fill the gap with fragment-engine
+    recall questions drawn from the same material text.
+
+    Deduplicates by comparing the first 60 chars of each question string.
+    Renumbers all question IDs sequentially.
+    Returns (combined, combined_engine_label).
+    """
+    if len(primary) >= num_questions:
+        return primary[:num_questions], primary_engine
+
+    needed = num_questions - len(primary)
+    try:
+        from app.services.quiz_gen_fragment import generate_fragment_quiz
+
+        # Request a few extra candidates to absorb duplicates
+        fragments = generate_fragment_quiz(text, num_questions=needed + 4)
+        if not fragments:
+            return primary, primary_engine
+
+        existing_keys = {q["question"].lower()[:60] for q in primary}
+        combined = list(primary)
+        for q in fragments:
+            if len(combined) >= num_questions:
+                break
+            key = q["question"].lower()[:60]
+            if key not in existing_keys:
+                q = dict(q)
+                q["id"] = f"q{len(combined) + 1}"
+                combined.append(q)
+                existing_keys.add(key)
+
+        added = len(combined) - len(primary)
+        engine = f"{primary_engine}+fragment" if added > 0 else primary_engine
+        logger.info(
+            "Supplemented %s quiz: %d → %d questions (+%d fragment)",
+            primary_engine, len(primary), len(combined), added,
+        )
+        return combined, engine
+    except Exception as exc:
+        logger.warning("Fragment supplement failed: %s", exc)
+        return primary, primary_engine
+
+
+def generate_questions(text: str, num_questions: int = 5) -> Tuple[List[Dict[str, Any]], str]:
     """
     Generate MCQs from stored content_text.
 
@@ -115,83 +165,73 @@ def generate_questions(text: str, num_questions: int = 8) -> Tuple[List[Dict[str
       1. Lightweight (regex, definition/concept extraction) — always available,
          all distractors come from the SAME material text.
       2. Lecture fallback (arrow notation, heading+bullet groups) — for slide/lab PDFs.
-      3. Heavy NLTK (ai/quiz_generator-main) — local-dev only, used as last resort
-         because its question templates can sound domain-inappropriate for technical
-         content (electronics, hardware, etc.).
+      3. Heavy NLTK (ai/quiz_generator-main) — local-dev only.
+      4. Fragment fallback (content-recall MCQs from any readable sentences).
 
-    Keeping heavy as last resort means:
-      - Lab and lecture PDFs always get content-grounded questions first.
-      - Seeded demo content (rich prose) still works via lightweight (≥5 pairs).
+    After each primary engine produces questions, if the count is below
+    num_questions, the fragment engine is used to supplement up to the target.
+    This guarantees exactly num_questions whenever there is sufficient text.
     """
     if not text or not text.strip():
         logger.warning("Quiz generation skipped: no content_text")
         return [], "no_text"
 
-    # Deep-clean the text BEFORE passing to any engine.
-    # deep_clean_quiz_text removes emails, ToC lines, name headers, page numbers
-    # and artifact characters while PRESERVING newlines so line-aware engines
-    # (lightweight colon-pairs, lecture headings) still work correctly.
+    # Deep-clean: removes emails, ToC lines, name headers, page numbers while
+    # PRESERVING newlines so line-aware engines still work correctly.
     try:
         from app.services.quiz_material_eligibility import deep_clean_quiz_text
         text = deep_clean_quiz_text(text)
     except Exception:
-        pass  # cleaning is best-effort
+        pass
 
     if not text.strip():
         return [], "no_text"
 
-    # ── 1. Lightweight (content-grounded, all distractors from the same material) ──
+    # ── 1. Lightweight ────────────────────────────────────────────────────────
     try:
         from app.services.quiz_gen_light import generate_lightweight
 
         light = generate_lightweight(text, num_questions=num_questions)
         if light:
-            logger.info("Quiz generated via lightweight engine (%d questions)", len(light))
-            return light, "light"
-        logger.warning("Lightweight quiz engine returned no questions")
+            logger.info("Lightweight engine: %d questions", len(light))
+            return _supplement_to_target(light, text, num_questions, "light")
+        logger.warning("Lightweight engine returned 0 questions")
     except Exception as exc:
-        logger.error("Lightweight quiz engine failed: %s", exc, exc_info=True)
+        logger.error("Lightweight engine failed: %s", exc, exc_info=True)
 
-    # ── 2. Lecture fallback (arrow notation, bullet/heading groups) ──────────────
+    # ── 2. Lecture fallback ───────────────────────────────────────────────────
     try:
         from app.services.quiz_gen_lecture import generate_lecture_quiz
 
         lecture = generate_lecture_quiz(text, num_questions=num_questions)
         if lecture:
-            logger.info("Quiz generated via lecture engine (%d questions)", len(lecture))
-            return lecture, "lecture"
-        logger.warning("Lecture quiz engine returned no questions")
+            logger.info("Lecture engine: %d questions", len(lecture))
+            return _supplement_to_target(lecture, text, num_questions, "lecture")
+        logger.warning("Lecture engine returned 0 questions")
     except Exception as exc:
-        logger.error("Lecture quiz engine failed: %s", exc, exc_info=True)
+        logger.error("Lecture engine failed: %s", exc, exc_info=True)
 
-    # ── 3. Heavy NLTK (local dev only, may use generic templates) ────────────
+    # ── 3. Heavy NLTK (local dev only) ────────────────────────────────────────
     if available():
         try:
             heavy = generate_from_text(text, num_questions=num_questions)
             if len(heavy) >= 3:
-                logger.info("Quiz generated via heavy engine (%d questions)", len(heavy))
-                return heavy, "heavy"
-            logger.warning(
-                "Heavy quiz engine returned only %d questions",
-                len(heavy),
-            )
+                logger.info("Heavy engine: %d questions", len(heavy))
+                return _supplement_to_target(heavy, text, num_questions, "heavy")
+            logger.warning("Heavy engine: only %d questions", len(heavy))
         except Exception as exc:
-            logger.warning("Heavy quiz engine failed: %s", exc, exc_info=True)
+            logger.warning("Heavy engine failed: %s", exc, exc_info=True)
 
-    # ── 4. Fragment fallback (any extractable text) ───────────────────────────
-    # Works on ANY material with ≥4 readable sentences — lecture, lab, revision,
-    # PPTX fragments, bullet points, short explanations.  Generates content-recall
-    # MCQs: "Which of the following was in this material?"  All options come from
-    # the same selected text; nothing is invented.
+    # ── 4. Fragment fallback (pure content-recall) ────────────────────────────
     try:
         from app.services.quiz_gen_fragment import generate_fragment_quiz
 
         fragment = generate_fragment_quiz(text, num_questions=num_questions)
         if fragment:
-            logger.info("Quiz generated via fragment engine (%d questions)", len(fragment))
-            return fragment, "fragment"
-        logger.warning("Fragment quiz engine returned no questions")
+            logger.info("Fragment engine: %d questions", len(fragment))
+            return fragment[:num_questions], "fragment"
+        logger.warning("Fragment engine returned 0 questions")
     except Exception as exc:
-        logger.error("Fragment quiz engine failed: %s", exc, exc_info=True)
+        logger.error("Fragment engine failed: %s", exc, exc_info=True)
 
     return [], "failed"
