@@ -69,11 +69,23 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
             ready_count += 1
 
         # Quick eligibility check (no heavy generator — Vercel safe)
-        eligible, reason_code, _meta = assess_material_doc(doc, probe=False)
+        eligible, reason_code, emeta = assess_material_doc(doc, probe=False)
         if eligible:
             quiz_eligible_count += 1
 
         failure_reason = reason_message(reason_code) if not eligible else None
+
+        # Determine generator mode from extraction_status or probe_engine
+        probe_engine = emeta.get("probe_engine")
+        ext_status = doc.get("extraction_status") or ""
+        if ext_status == "insufficient_quiz_structure":
+            generator_mode = "definition_based"
+        elif probe_engine and probe_engine != "none":
+            generator_mode = "lecture_fallback" if probe_engine == "lecture" else "definition_based"
+        elif eligible:
+            generator_mode = "definition_based"
+        else:
+            generator_mode = None
 
         materials_out.append(
             {
@@ -83,10 +95,13 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
                 "source": doc.get("source") or doc.get("seed_source") or "unknown",
                 "has_content_text": has_content_text,
                 "content_text_length": length,
+                "definition_pair_count": emeta.get("definition_pair_count"),
+                "lecture_concept_count": emeta.get("lecture_concept_count"),
+                "generator_mode": generator_mode,
                 "ready_for_quiz": bool(ready_flag) if ready_flag is not None else api_ready,
                 "api_has_content": api_ready,
                 "quiz_generation_eligible": eligible,
-                "extraction_status": doc.get("extraction_status"),
+                "extraction_status": ext_status or None,
                 "failure_reason": failure_reason,
             }
         )
@@ -141,11 +156,17 @@ def debug_single_material(material_id: str) -> Dict[str, Any]:
                 "file_type": (doc.get("file_type") or "unknown").lower(),
                 "source": doc.get("source") or doc.get("seed_source") or "unknown",
                 "content_text_length": meta.get("content_text_length", 0),
+                "definition_pair_count": meta.get("definition_pair_count"),
+                "lecture_concept_count": meta.get("lecture_concept_count"),
+                "generator_mode": (
+                    "definition_based"
+                    if meta.get("definition_pair_count", 0) >= 3
+                    else ("lecture_fallback" if meta.get("lecture_concept_count", 0) >= 3 else None)
+                ),
                 "ready_for_quiz": bool(doc.get("ready_for_quiz")),
                 "extraction_status": doc.get("extraction_status"),
                 "quiz_generation_eligible": eligible,
                 "failure_reason": reason_message(reason_code) if not eligible else None,
-                "definition_pair_count": meta.get("definition_pair_count"),
             }
         )
 

@@ -154,4 +154,16 @@ def generate_questions(text: str, num_questions: int = 8) -> Tuple[List[Dict[str
     except Exception as exc:
         logger.error("Lightweight quiz engine failed: %s", exc, exc_info=True)
 
+    # Lecture fallback — works on slide/lab PDFs with bullets, arrows, headings
+    try:
+        from app.services.quiz_gen_lecture import generate_lecture_quiz
+
+        lecture = generate_lecture_quiz(text, num_questions=num_questions)
+        if lecture:
+            logger.info("Quiz generated via lecture engine (%d questions)", len(lecture))
+            return lecture, "lecture"
+        logger.warning("Lecture quiz engine returned no questions")
+    except Exception as exc:
+        logger.error("Lecture quiz engine failed: %s", exc, exc_info=True)
+
     return [], "failed"

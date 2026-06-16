@@ -52,6 +52,23 @@ _COLON_PATTERN = re.compile(
     re.MULTILINE,
 )
 
+# "Concept (qualifier) is a/an/the definition."  — parenthetical between concept and "is"
+_PAREN_SKIP_PATTERN = re.compile(
+    r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,5})\s+\([^)]{0,80}\)\s+is\s+(?:a|an|the)?\s*([^.\n]{15,200})\.",
+    re.MULTILINE,
+)
+
+# "Concept (ABBREV) is a definition."  — also extracts ABBREV as concept
+_ABBREV_IS_PATTERN = re.compile(
+    r"\b([A-Z][A-Za-z][A-Za-z0-9\s/&\-]{1,45}?)\s+\(\s*([A-Z][A-Z0-9]{1,7})\s*\)\s+is\s+(?:a|an|the)?\s*([^.\n]{15,200})\.",
+    re.MULTILINE,
+)
+
+# "What is X? / What are X?" on one line; answer is next non-empty line(s)
+_QA_LINE_RE = re.compile(
+    r"^[Ww]hat\s+(?:is|are)\s+(?:a\s+|an\s+|the\s+)?([A-Za-z][A-Za-z0-9\s/&()\-]{2,60}?)\s*\??\s*$",
+)
+
 _SLIDE_TITLE_RE = re.compile(r"^[A-Z][A-Za-z0-9][\w\s/&\-]{2,55}$")
 
 _SECTION_HEADERS = (
@@ -83,6 +100,16 @@ _INVALID_CONCEPTS = {
     "database lecture",
     "seeded demo material",
     "academiq test content",
+    "note",
+    "hint",
+    "warning",
+    "important",
+    "overview",
+    "objective",
+    "objectives",
+    "agenda",
+    "contents",
+    "outline",
 }
 
 _GENERIC_DISTRACTORS = [
@@ -183,6 +210,20 @@ def _normalize_source_text(text: str) -> str:
     return _strip_section_headers(normalize_quiz_text(text))
 
 
+def _structure_normalize(text: str) -> str:
+    """Clean noise chars but preserve newlines for structural (line-aware) extraction."""
+    cleaned = text or ""
+    cleaned = cleaned.replace("\x00", " ")
+    cleaned = re.sub(r"[\uf000-\uf8ff]", " ", cleaned)
+    cleaned = re.sub(r"[\u25a0-\u25ff\u2022\u2023\u2043]", " ", cleaned)
+    # Merge hyphenated line breaks: "two-\n-dimensional" → "two-dimensional"
+    cleaned = re.sub(r"-\n[ \t]*-?[ \t]*", "", cleaned)
+    cleaned = re.sub(r"\n[ \t]*-\n[ \t]*", "", cleaned)
+    # Normalise per-line whitespace, drop blank lines
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in cleaned.splitlines()]
+    return "\n".join(l for l in lines if l)
+
+
 def _add_pair(
     pairs: List[Tuple[str, str]],
     seen: set[str],
@@ -205,6 +246,54 @@ def _extract_colon_pairs(text: str, seen: set[str], pairs: List[Tuple[str, str]]
         _add_pair(pairs, seen, concept_raw, defn_raw)
 
 
+def _extract_paren_skip(text: str, seen: set[str], pairs: List[Tuple[str, str]]) -> None:
+    """Extract 'X (qualifier) is a Y' definitions skipping the parenthetical."""
+    for m in _PAREN_SKIP_PATTERN.finditer(text):
+        _add_pair(pairs, seen, m.group(1), m.group(2))
+
+
+def _extract_abbrev_is(text: str, seen: set[str], pairs: List[Tuple[str, str]]) -> None:
+    """Extract 'Full Name (ABB) is a Y' — adds both the abbreviation and full name."""
+    for m in _ABBREV_IS_PATTERN.finditer(text):
+        full_name = m.group(1).strip()
+        abbrev = m.group(2).strip()
+        definition = m.group(3).strip()
+        _add_pair(pairs, seen, abbrev, f"{full_name}: {definition}")
+        _add_pair(pairs, seen, full_name, definition)
+
+
+def _extract_qa_adjacent(text: str, seen: set[str], pairs: List[Tuple[str, str]]) -> None:
+    """
+    Extract 'What is X?  \\n  Answer sentence(s)' patterns from line-structured text.
+    Works with slide PDFs that present Q&A on consecutive lines.
+    """
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    skip_tokens = {"=", "http", "@", "www."}
+    for i, line in enumerate(lines[:-1]):
+        m = _QA_LINE_RE.match(line)
+        if not m:
+            continue
+        # Strip leading article from captured concept
+        concept_raw = re.sub(r"^(?:a|an|the)\s+", "", m.group(1).strip(), flags=re.IGNORECASE)
+        # Collect next 1-3 non-empty lines as the answer
+        answer_lines: list[str] = []
+        for j in range(i + 1, min(i + 4, len(lines))):
+            next_l = lines[j]
+            if any(tok in next_l.lower() for tok in skip_tokens):
+                break
+            # Stop if we hit another question
+            if _QA_LINE_RE.match(next_l):
+                break
+            answer_lines.append(next_l)
+            # Stop after a complete sentence
+            if next_l.rstrip().endswith((".", "!", "?")):
+                break
+        definition = " ".join(answer_lines)
+        if len(definition.split()) < 5:
+            continue
+        _add_pair(pairs, seen, concept_raw, definition)
+
+
 def _extract_slide_pairs(text: str, seen: set[str], pairs: List[Tuple[str, str]]) -> None:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     for index, line in enumerate(lines[:-1]):
@@ -222,11 +311,20 @@ def extract_definitions(text: str) -> List[Tuple[str, str]]:
     """Pull concept/definition pairs from lecture-style prose and slide PDFs."""
     seen: set[str] = set()
     pairs: List[Tuple[str, str]] = []
-    source = _normalize_source_text(text)
-    _extract_colon_pairs(source, seen, pairs)
-    _extract_slide_pairs(source, seen, pairs)
 
-    normalized = re.sub(r"\s+", " ", source.replace("\n", " "))
+    # ── Line-aware extractions (use original line structure) ──────────────────
+    structured = _strip_section_headers(_structure_normalize(text))
+    _extract_qa_adjacent(structured, seen, pairs)       # "What is X?\n Answer"
+    _extract_colon_pairs(structured, seen, pairs)        # "Heading: description."
+    _extract_slide_pairs(structured, seen, pairs)        # "Title\n long sentence"
+
+    # ── Blob extractions (use fully normalised text) ──────────────────────────
+    source = _normalize_source_text(text)
+    blob = re.sub(r"\s+", " ", source)
+    _extract_paren_skip(blob, seen, pairs)               # "X (qual) is a Y."
+    _extract_abbrev_is(blob, seen, pairs)                # "Name (ABB) is a Y."
+
+    normalized = blob
     sentences = re.split(r"(?<=[.!?])\s+", normalized)
 
     for sentence in sentences:

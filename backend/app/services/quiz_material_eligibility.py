@@ -22,15 +22,25 @@ _REASON_MESSAGES = {
         "Use the Chrome extension → Upload materials for quiz."
     ),
     "content_too_short": (
-        "Material has limited extracted text. Upload the PDF via the Chrome "
-        "extension to enable quiz generation."
+        "Material has very little extracted text (under 200 characters). "
+        "Upload the full PDF via the Chrome extension to enable quiz generation."
+    ),
+    "content_mostly_noise": (
+        "Extracted text appears to be mostly filenames, page numbers, or formatting "
+        "noise with no meaningful content. Try uploading the lecture PDF directly."
+    ),
+    "no_meaningful_concepts": (
+        "Text was extracted but no teachable concepts were found. "
+        "This may be a grades sheet, schedule, or non-lecture document."
     ),
     "insufficient_quiz_structure": (
-        "Text was extracted but does not contain enough teachable definitions "
-        "for quiz generation. Try a lecture PDF or slides with clear concepts."
+        "Text was extracted but does not contain enough structured concepts "
+        "for quiz generation. Works best with lecture slides or lab handouts "
+        "that describe concepts, steps, or definitions."
     ),
     "unsupported_material_format": (
-        "This file type or layout is not supported for automatic quiz generation."
+        "This file type or layout is not supported for automatic quiz generation. "
+        "Try uploading a PDF or PPTX lecture file instead."
     ),
 }
 
@@ -53,7 +63,7 @@ def reason_message(code: Optional[str]) -> Optional[str]:
 
 def probe_question_count(text: str, num_questions: int = 8) -> Tuple[int, str]:
     """
-    Try lightweight then heavy generators. Returns (count, engine_used).
+    Try lightweight → lecture → heavy generators. Returns (count, engine_used).
     Does not raise — used for eligibility probes and debug endpoints.
     """
     normalized = normalize_quiz_text(text)
@@ -68,6 +78,15 @@ def probe_question_count(text: str, num_questions: int = 8) -> Tuple[int, str]:
             return len(light), "light"
     except Exception as exc:
         logger.warning("Lightweight quiz probe failed: %s", exc)
+
+    try:
+        from app.services.quiz_gen_lecture import generate_lecture_quiz
+
+        lecture = generate_lecture_quiz(normalized, num_questions=num_questions)
+        if len(lecture) >= _MIN_PROBE_QUESTIONS:
+            return len(lecture), "lecture"
+    except Exception as exc:
+        logger.warning("Lecture quiz probe failed: %s", exc)
 
     try:
         from app.services import quiz_gen
@@ -94,7 +113,8 @@ def assess_quiz_eligibility(
     Return (eligible, reason_code, meta).
 
     reason_code is one of:
-      missing_content_text | content_too_short | insufficient_quiz_structure |
+      missing_content_text | content_too_short | content_mostly_noise |
+      no_meaningful_concepts | insufficient_quiz_structure |
       unsupported_material_format | None when eligible
     """
     normalized = normalize_quiz_text(text)
@@ -109,10 +129,26 @@ def assess_quiz_eligibility(
     if len(normalized) < MIN_QUIZ_CONTENT_CHARS:
         return False, "content_too_short", meta
 
-    unsupported_types = {"html", "link", "zip", "xlsx", "unknown"}
+    # Detect text that is almost entirely noise (short tokens, no real words)
+    words = normalized.split()
+    long_words = [w for w in words if len(w) >= 4]
+    if len(words) > 20 and len(long_words) / len(words) < 0.25:
+        meta["long_word_ratio"] = round(len(long_words) / len(words), 2)
+        return False, "content_mostly_noise", meta
+
+    unsupported_types = {"html", "link", "zip", "xlsx"}
     ft = meta["file_type"]
     if ft in unsupported_types and len(normalized) < 500:
         return False, "unsupported_material_format", meta
+
+    # Quick lecture concept count (fast, no heavy engine)
+    try:
+        from app.services.quiz_gen_lecture import count_lecture_concepts
+        lecture_count = count_lecture_concepts(normalized)
+        meta["lecture_concept_count"] = lecture_count
+    except Exception:
+        lecture_count = 0
+        meta["lecture_concept_count"] = 0
 
     if probe:
         count, engine = probe_question_count(normalized)
@@ -122,18 +158,27 @@ def assess_quiz_eligibility(
             meta["quiz_generation_eligible"] = True
             return True, None, meta
 
+    # Fallback: check definition pairs + lecture concepts without full probe
+    definition_pair_count = 0
     try:
         from app.services.quiz_gen_light import extract_definitions
-
         pairs = extract_definitions(normalized)
-        meta["definition_pair_count"] = len(pairs)
-        if len(pairs) >= _MIN_PROBE_QUESTIONS:
-            meta["quiz_generation_eligible"] = True
-            return True, None, meta
+        definition_pair_count = len(pairs)
+        meta["definition_pair_count"] = definition_pair_count
     except Exception as exc:
         logger.warning("Definition extraction failed during eligibility: %s", exc)
         meta["parsing_error"] = str(exc)
-        return False, "parsing_error", meta
+
+    total_concepts = definition_pair_count + lecture_count
+    meta["total_concepts"] = total_concepts
+
+    if total_concepts >= _MIN_PROBE_QUESTIONS:
+        meta["quiz_generation_eligible"] = True
+        return True, None, meta
+
+    # Distinguish between "no concepts found" and "some concepts but too few"
+    if total_concepts == 0 and len(normalized) > 500:
+        return False, "no_meaningful_concepts", meta
 
     return False, "insufficient_quiz_structure", meta
 
