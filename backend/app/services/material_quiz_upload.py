@@ -41,13 +41,14 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not course_id:
         raise ValueError("course_id required")
 
-    # ── Bulk-load all materials for this course (ONE DB query) ────────────────
+    # ── Phase 1: Bulk-load all materials for this course (ONE query) ─────────
     all_docs = material_repository.list_by_course(course_id)
 
-    # Build in-memory lookup maps
-    by_material_id: Dict[str, Any] = {}
-    by_url: Dict[str, Any] = {}
-    by_title_ft: Dict[str, Any] = {}
+    # Build in-memory lookup maps from the bulk load
+    by_material_id: Dict[str, Any] = {}   # stored material_id → doc
+    by_url: Dict[str, Any] = {}           # stored url/resolved_url → doc
+    by_url_cmid: Dict[str, Any] = {}      # cmid extracted from stored URL → doc
+    by_title_ft: Dict[str, Any] = {}      # (normalized_title, file_type) → doc
 
     for doc in all_docs:
         mid = str(doc.get("material_id") or "").strip()
@@ -58,16 +59,29 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             u = str(doc.get(url_field) or "").strip()
             if u:
                 by_url[u] = doc
+                # Also index by the cmid extracted from the stored URL — covers
+                # cases where material_id was stored as the full URL or a hash
+                stored_cmid = _material_id_from_url(u)
+                if stored_cmid:
+                    by_url_cmid[stored_cmid] = doc
 
         t_key = _normalize_title(doc.get("title") or "")
         ft = str(doc.get("file_type") or "").lower().strip()
         if t_key and ft and ft != "unknown":
             by_title_ft[(t_key, ft)] = doc
         if t_key:
-            by_title_ft[(t_key, "")] = doc  # title-only fallback
+            by_title_ft[(t_key, "")] = doc
+
+    # Sample of stored material_ids for the response (helps debug course_id mismatches)
+    db_sample = [
+        {"material_id": d.get("material_id"), "url": (d.get("url") or "")[:60]}
+        for d in all_docs[:5]
+    ]
 
     # ── Per-material matching ─────────────────────────────────────────────────
     results: List[Dict[str, Any]] = []
+    # Import collection for Phase 2 fallback queries
+    from app.config.database import course_materials_collection
 
     for item in materials_in:
         title = (item.get("title") or "Untitled").strip()
@@ -78,7 +92,7 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             item.get("material_id") or item.get("id") or stable_material_id(item) or ""
         ).strip()
 
-        # Extract cmid from activity URL if available (most stable key)
+        # Extract cmid from the activity URL (?id=NNNN) — most stable identifier
         url_cmid = _material_id_from_url(activity_url) or _material_id_from_url(resolved_url)
         material_id = url_cmid or raw_material_id
 
@@ -102,31 +116,36 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             })
             continue
 
-        # ── B: DB lookup — try four methods in priority order ────────────────
+        # ── B: Phase 1 — in-memory lookup (fast, uses bulk-load data) ─────────
         existing_doc = None
         matched_by = None
 
-        # Method 1: exact material_id match (cmid)
+        # Method 1: exact material_id match (cmid string)
         if material_id and material_id in by_material_id:
             existing_doc = by_material_id[material_id]
             matched_by = f"material_id:{material_id}"
 
-        # Method 2: raw material_id from extension (before cmid extraction)
+        # Method 2: raw material_id before cmid extraction
         if not existing_doc and raw_material_id and raw_material_id in by_material_id:
             existing_doc = by_material_id[raw_material_id]
             matched_by = f"raw_material_id:{raw_material_id}"
 
-        # Method 3: activity URL
+        # Method 3: cmid extracted from incoming URL vs cmid extracted from stored URLs
+        if not existing_doc and url_cmid and url_cmid in by_url_cmid:
+            existing_doc = by_url_cmid[url_cmid]
+            matched_by = f"url_cmid:{url_cmid}"
+
+        # Method 4: exact activity URL string match
         if not existing_doc and activity_url and activity_url in by_url:
             existing_doc = by_url[activity_url]
-            matched_by = f"activity_url"
+            matched_by = "activity_url"
 
-        # Method 4: resolved URL (pluginfile)
+        # Method 5: exact resolved URL string match
         if not existing_doc and resolved_url and resolved_url in by_url:
             existing_doc = by_url[resolved_url]
-            matched_by = f"resolved_url"
+            matched_by = "resolved_url"
 
-        # Method 5: normalized title + file_type
+        # Method 6: normalized title + file_type
         if not existing_doc:
             t_key = _normalize_title(title)
             ft = raw_file_type.lower()
@@ -136,6 +155,32 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             elif t_key and (t_key, "") in by_title_ft:
                 existing_doc = by_title_ft[(t_key, "")]
                 matched_by = f"title_only:{t_key[:30]}"
+
+        # ── C: Phase 2 fallback — direct MongoDB query (no course_id filter) ──
+        # This handles course_id mismatches: materials are saved under a
+        # different course_id than what the extension sends in preflight.
+        # Moodle cmids are globally unique so querying by material_id alone is safe.
+        if not existing_doc:
+            fallback_clauses: List[Dict[str, Any]] = []
+            if material_id:
+                fallback_clauses.append({"material_id": str(material_id)})
+            if raw_material_id and raw_material_id != material_id:
+                fallback_clauses.append({"material_id": str(raw_material_id)})
+            if url_cmid and url_cmid not in (material_id, raw_material_id):
+                fallback_clauses.append({"material_id": str(url_cmid)})
+            if activity_url:
+                fallback_clauses.append({"url": activity_url})
+                fallback_clauses.append({"resolved_url": activity_url})
+            if resolved_url:
+                fallback_clauses.append({"url": resolved_url})
+                fallback_clauses.append({"resolved_url": resolved_url})
+
+            if fallback_clauses:
+                existing_doc = course_materials_collection.find_one(
+                    {"$or": fallback_clauses}
+                )
+                if existing_doc:
+                    matched_by = f"fallback_db:{matched_by or 'new'}"
 
         debug_info = {
             "material_id_sent": raw_material_id,
@@ -243,6 +288,7 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         "db_materials_found_for_course": len(all_docs),
         "status_summary": status_summary,
         "match_method_summary": match_method_summary,
+        "db_sample": db_sample,
         "materials": results,
     }
 

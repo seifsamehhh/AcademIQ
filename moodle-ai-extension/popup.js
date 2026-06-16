@@ -709,6 +709,7 @@ const runQuizMaterialUpload = async () => {
         // Log full preflight response to console for debugging
         console.group(`[AcademIQ] Preflight response — course ${courseId}`);
         console.log("DB materials found for course:", pf.data.db_materials_found_for_course);
+        console.log("DB sample (first 5 stored):", pf.data.db_sample);
         console.log("Status summary:", pf.data.status_summary);
         console.log("Match method summary:", pf.data.match_method_summary);
         console.log("Should upload count:", pf.data.should_upload_count);
@@ -723,6 +724,18 @@ const runQuizMaterialUpload = async () => {
             should_upload: m.should_upload
         })));
         console.groupEnd();
+
+        // Show DB count in visible popup text so user can spot a course_id mismatch
+        // without needing DevTools open
+        if (dbFound === 0) {
+            refs.uploadMeta.textContent =
+                `WARNING: DB has 0 materials for course_id "${courseId}". ` +
+                `Make sure you are on the correct Moodle course page. ` +
+                `Expected course_id: check /debug/raw-course-materials/email/COURSE_ID.`;
+        } else {
+            refs.uploadMeta.textContent =
+                `Preflight done: DB has ${dbFound} saved · checking ${preflightChecked} materials...`;
+        }
 
         onlyMaterialIds = [];
         for (const item of (pf.data.materials || [])) {
@@ -763,8 +776,8 @@ const runQuizMaterialUpload = async () => {
         }
 
         refs.uploadMeta.textContent =
-            `Uploading ${onlyMaterialIds.length}/${uploadable.length} files ` +
-            `(${skippedExisting} already processed)...`;
+            `DB: ${dbFound} saved · Uploading ${onlyMaterialIds.length}/${uploadable.length} ` +
+            `(${skippedExisting} already skipped)...`;
     }
 
     // ── Step 3: download + upload only the filtered materials ─────────────────
