@@ -38,13 +38,18 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
     for item in materials_in:
         title = (item.get("title") or "Untitled").strip()
         raw_file_type = str(item.get("file_type") or item.get("fileType") or "unknown")
-        source_url = str(item.get("source_url") or item.get("url") or "").strip()
+        # activity_url = Moodle activity URL (/mod/resource/view.php?id=cmid) — used for cmid extraction
+        # resolved_url = actual file URL after redirect (pluginfile.php) — used as fallback
+        activity_url = str(item.get("source_url") or item.get("url") or "").strip()
+        resolved_url = str(item.get("resolved_url") or "").strip()
         raw_material_id = str(
             item.get("material_id") or item.get("id") or stable_material_id(item) or ""
         ).strip()
 
-        # Align material_id with Moodle cmid extracted from URL
-        material_id = _resolve_material_id(course_id, raw_material_id, source_url)
+        # Prefer the activity URL for cmid extraction (has ?id=), fall back to resolved_url
+        material_id = _resolve_material_id(
+            course_id, raw_material_id, activity_url or resolved_url
+        )
 
         # ── 1. Non-quiz classification ─────────────────────────────────────────
         is_non_quiz, non_quiz_reason = _classify_non_quiz_material(title, raw_file_type)
@@ -59,10 +64,12 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             })
             continue
 
-        # ── 2. Check existing DB record (by ID, then by URL) ──────────────────
+        # ── 2. Check existing DB record (by ID, then by activity URL, then resolved URL) ──
         existing_doc = material_repository.get(course_id, material_id)
-        if not existing_doc and source_url:
-            existing_doc = material_repository.find_by_course_and_url(course_id, source_url)
+        if not existing_doc and activity_url:
+            existing_doc = material_repository.find_by_course_and_url(course_id, activity_url)
+        if not existing_doc and resolved_url:
+            existing_doc = material_repository.find_by_course_and_url(course_id, resolved_url)
 
         if existing_doc:
             existing_status = existing_doc.get("extraction_status") or ""

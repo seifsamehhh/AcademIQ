@@ -499,25 +499,33 @@ const uploadPickedFiles = async (files, courseId, identity) => {
 const formatQuizUploadSummary = ({
     courseId,
     courseName,
-    uploaded,
-    ready,
-    failed,
-    total,
+    detected = 0,
+    preflightChecked = 0,
+    uploaded = 0,
+    ready = 0,
+    failed = 0,
+    total = 0,
     skippedExisting = 0,
     alreadyReady = 0,
     alreadyClassified = 0,
+    skippedExtractionFailed = 0,
     endpoint,
     extra = ""
 }) => {
     const parts = [
         `Course ${courseId}${courseName ? ` · ${courseName}` : ""}`,
-        `Uploaded ${uploaded}/${total}`
+        `Detected ${detected}`
     ];
+    if (preflightChecked > 0) {
+        parts.push(`Preflight checked ${preflightChecked}`);
+    }
+    parts.push(`Uploaded ${uploaded}/${total}`);
     if (skippedExisting > 0) {
         const detail = [];
         if (alreadyReady > 0) detail.push(`${alreadyReady} already ready`);
-        if (alreadyClassified > 0) detail.push(`${alreadyClassified} non-quiz`);
-        const rest = skippedExisting - alreadyReady - alreadyClassified;
+        if (alreadyClassified > 0) detail.push(`${alreadyClassified} already classified`);
+        if (skippedExtractionFailed > 0) detail.push(`${skippedExtractionFailed} extraction failed`);
+        const rest = skippedExisting - alreadyReady - alreadyClassified - skippedExtractionFailed;
         if (rest > 0) detail.push(`${rest} other`);
         parts.push(`Skipped ${skippedExisting}${detail.length ? ` (${detail.join(", ")})` : ""}`);
     }
@@ -584,25 +592,38 @@ const runQuizMaterialUpload = async () => {
         failed = tabResult.failed ?? Math.max(0, (tabResult.total || 0) - uploaded);
         total = tabResult.total || 0;
         endpoint = tabResult.backend_endpoint || endpoint;
-        // Caching summary fields from preflight
-        const skippedExisting = tabResult.skipped_existing || 0;
-        const alreadyReady = tabResult.already_ready || 0;
-        const alreadyClassified = tabResult.already_classified || 0;
         await refreshData();
         btn.textContent = "Upload materials for quiz";
         btn.disabled = false;
         refs.uploadMeta.textContent = formatQuizUploadSummary({
             courseId,
             courseName: tabResult.course_name || courseName,
+            detected: tabResult.detected || 0,
+            preflightChecked: tabResult.preflight_checked || 0,
             uploaded,
             ready,
             failed,
             total,
-            skippedExisting,
-            alreadyReady,
-            alreadyClassified,
+            skippedExisting: tabResult.skipped_existing || 0,
+            alreadyReady: tabResult.already_ready || 0,
+            alreadyClassified: tabResult.already_classified || 0,
+            skippedExtractionFailed: tabResult.skipped_extraction_failed || 0,
             endpoint
         });
+        return;
+    } else if (tabResult.status === "preflight_failed") {
+        // Preflight endpoint unreachable or returned an error.
+        // Show the exact error instead of silently uploading everything.
+        const httpNote = tabResult.preflight_http_status === 404
+            ? " (endpoint not found — backend may need redeployment)"
+            : tabResult.preflight_http_status === 0
+                ? " (network error — check backend URL in extension settings)"
+                : "";
+        refs.uploadMeta.textContent =
+            `Preflight check failed${httpNote}: ${tabResult.preflight_error || "unknown error"}. ` +
+            `Open the extension, go to Settings, confirm the backend URL, then try again.`;
+        btn.disabled = false;
+        btn.textContent = "Upload materials for quiz";
         return;
     } else if (tabResult.tab_course_id && String(tabResult.tab_course_id) !== String(courseId)) {
         refs.uploadMeta.textContent =
