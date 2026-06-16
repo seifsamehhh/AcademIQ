@@ -4,13 +4,15 @@ const PRODUCTION_API_BASE = "https://academiq-backend.vercel.app";
 const SYNC_PATH = "/raw-moodle-payloads";
 const UPLOAD_QUIZ_PATH = "/materials/upload-for-quiz";
 const CONTENT_PATH = "/materials/content";
+const PREFLIGHT_PATH = "/materials/preflight";
 
-/** Always POST to {base}/raw-moodle-payloads even if storage holds base URL only. */
+/** Strip any known API paths from the end so we always have a clean base URL. */
 const normalizeApiBase = (url) => {
     const raw = (url || PRODUCTION_API_BASE).trim().replace(/\/$/, "");
     return raw
         .replace(/\/raw-moodle-payloads\/?$/, "")
         .replace(/\/materials\/upload-for-quiz\/?$/, "")
+        .replace(/\/materials\/preflight\/?$/, "")
         .replace(/\/materials\/content\/?$/, "");
 };
 
@@ -19,24 +21,87 @@ const buildBackendUrls = (apiBase) => {
     return {
         sync: `${base}${SYNC_PATH}`,
         uploadQuiz: `${base}${UPLOAD_QUIZ_PATH}`,
+        preflight: `${base}${PREFLIGHT_PATH}`,
         content: `${base}${CONTENT_PATH}`,
+        base,
     };
 };
 
 let BACKEND_URL = buildBackendUrls(PRODUCTION_API_BASE).sync;
 let UPLOAD_QUIZ_URL = buildBackendUrls(PRODUCTION_API_BASE).uploadQuiz;
+let PREFLIGHT_URL = buildBackendUrls(PRODUCTION_API_BASE).preflight;
 let CONTENT_URL = buildBackendUrls(PRODUCTION_API_BASE).content;
 
+/** Load saved API base URL, update all globals, and fill the settings input. */
 const loadBackendConfig = () =>
     new Promise((resolve) => {
         chrome.storage.local.get(["backendUrl"], (res) => {
-            const urls = buildBackendUrls(res.backendUrl || PRODUCTION_API_BASE);
+            const base = res.backendUrl || PRODUCTION_API_BASE;
+            const urls = buildBackendUrls(base);
             BACKEND_URL = urls.sync;
             UPLOAD_QUIZ_URL = urls.uploadQuiz;
+            PREFLIGHT_URL = urls.preflight;
             CONTENT_URL = urls.content;
+            // Populate the settings input if it exists in the DOM
+            const input = document.getElementById("backendUrlInput");
+            if (input) input.value = urls.base;
             resolve();
         });
     });
+
+/**
+ * Call POST /materials/preflight from the POPUP context (chrome-extension:// origin).
+ *
+ * Running the fetch here rather than in content.js ensures the request carries
+ * "Origin: chrome-extension://…" which is explicitly allowed by the backend CORS
+ * middleware.  Content-script fetches carry the Moodle page's origin and may be
+ * blocked by the CORS policy.
+ *
+ * Returns { ok: true, data, preflightUrl } or { ok: false, error, httpStatus, preflightUrl }.
+ */
+const callPreflightFromPopup = async (courseId, materials, identity) => {
+    const preflightUrl = PREFLIGHT_URL;
+
+    const body = {
+        course_id: String(courseId),
+        user_email: identity?.email || null,
+        materials: materials.map((m) => ({
+            material_id: m.material_id || m.id,
+            title: m.title || "Untitled",
+            // activity URL (has ?id=cmid) is most stable; resolved_url is pluginfile fallback
+            source_url: m.url || m.source_url || null,
+            resolved_url: m.resolvedUrl || m.resolved_url || null,
+            file_type: m.fileType || m.file_type || "unknown"
+        }))
+    };
+
+    try {
+        const res = await fetch(preflightUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+        });
+        if (!res.ok) {
+            let errText = "";
+            try { errText = await res.text(); } catch (_) {}
+            return {
+                ok: false,
+                httpStatus: res.status,
+                error: `HTTP ${res.status}${errText ? `: ${errText.slice(0, 160)}` : ""}`,
+                preflightUrl
+            };
+        }
+        const data = await res.json();
+        return { ok: true, data, preflightUrl };
+    } catch (err) {
+        return {
+            ok: false,
+            httpStatus: 0,
+            error: String(err.message || err),
+            preflightUrl
+        };
+    }
+};
 
 const refs = {
     refreshBtn: document.getElementById("refreshBtn"),
@@ -52,7 +117,11 @@ const refs = {
     performanceStats: document.getElementById("performanceStats"),
     materialsList: document.getElementById("materialsList"),
     downloadMeta: document.getElementById("downloadMeta"),
-    lastUpdated: document.getElementById("lastUpdated")
+    lastUpdated: document.getElementById("lastUpdated"),
+    // Settings
+    backendUrlInput: document.getElementById("backendUrlInput"),
+    saveBackendUrlBtn: document.getElementById("saveBackendUrlBtn"),
+    backendUrlStatus: document.getElementById("backendUrlStatus"),
 };
 
 let currentData = null;
@@ -402,7 +471,15 @@ const scrapeCurrentCourseOnActiveTab = (courseId) =>
         });
     });
 
-const uploadMaterialsOnActiveTab = (courseId) =>
+/**
+ * Ask content.js to upload materials for quiz.
+ *
+ * @param {string} courseId
+ * @param {string[]|null} onlyMaterialIds  When provided, content.js only
+ *   downloads and uploads materials whose id is in this list.  Pass null to
+ *   upload everything (no pre-filtering).
+ */
+const uploadMaterialsOnActiveTab = (courseId, onlyMaterialIds = null) =>
     new Promise((resolve) => {
         getActiveMoodleTab().then((tab) => {
             if (!tab?.id) {
@@ -414,7 +491,10 @@ const uploadMaterialsOnActiveTab = (courseId) =>
                 {
                     type: "upload_materials_for_quiz",
                     backendUploadUrl: UPLOAD_QUIZ_URL,
-                    courseId
+                    courseId,
+                    // Pre-filtered list from popup's preflight call.
+                    // content.js skips any material not in this set.
+                    only_material_ids: onlyMaterialIds
                 },
                 (response) => {
                     if (chrome.runtime.lastError) {
@@ -554,7 +634,9 @@ const syncPopupCourseToTab = async () => {
         }
         renderDashboard();
     }
-    return { ok: true, courseId: tabId, courseName: tabName };
+    // Return scraped materials so the popup can run preflight without
+    // a second round-trip to the Moodle tab.
+    return { ok: true, courseId: tabId, courseName: tabName, materials: scrape.materials || [] };
 };
 
 const runQuizMaterialUpload = async () => {
@@ -565,8 +647,9 @@ const runQuizMaterialUpload = async () => {
     }
 
     btn.disabled = true;
-    refs.uploadMeta.textContent = "Aligning with active Moodle tab...";
+    refs.uploadMeta.textContent = "Scanning Moodle course page...";
 
+    // ── Step 1: scrape material list from the active Moodle tab ──────────────
     const tabSync = await syncPopupCourseToTab();
     if (!tabSync.ok) {
         refs.uploadMeta.textContent = tabSync.error;
@@ -576,99 +659,165 @@ const runQuizMaterialUpload = async () => {
 
     const courseId = tabSync.courseId;
     const courseName = tabSync.courseName;
-    refs.uploadMeta.textContent = `Uploading materials for course ${courseId}...`;
-
     const identity = currentData?.student || {};
-    let uploaded = 0;
-    let ready = 0;
-    let failed = 0;
-    let total = 0;
-    let endpoint = UPLOAD_QUIZ_URL;
 
-    const tabResult = await uploadMaterialsOnActiveTab(courseId);
+    // All materials visible on the page (metadata only, no downloads yet)
+    const scrapedMaterials = tabSync.materials || [];
+    const uploadable = scrapedMaterials.filter(isQuizUploadableMaterial);
+    const detected = scrapedMaterials.length;
+
+    // ── Step 2: preflight — runs from popup context (chrome-extension:// origin) ──
+    // This avoids CORS rejection that would occur if fetch ran from content.js
+    // (which carries the Moodle page's origin, not the extension origin).
+    refs.uploadMeta.textContent =
+        `Preflight check: ${PREFLIGHT_URL} (${uploadable.length} files)...`;
+
+    let skippedExisting = 0;
+    let alreadyReady = 0;
+    let alreadyClassified = 0;
+    let skippedExtractionFailed = 0;
+    let preflightChecked = 0;
+    let onlyMaterialIds = null; // null = upload everything (fallback if preflight fails)
+
+    if (uploadable.length > 0) {
+        const pf = await callPreflightFromPopup(courseId, uploadable, identity);
+
+        if (!pf.ok) {
+            const httpNote =
+                pf.httpStatus === 404
+                    ? " — endpoint not found (backend may need redeployment)"
+                    : pf.httpStatus === 0
+                        ? " — network error"
+                        : ` — HTTP ${pf.httpStatus}`;
+            refs.uploadMeta.textContent =
+                `Preflight failed at ${pf.preflightUrl}${httpNote}: ${pf.error}. ` +
+                `Check the backend URL in Settings below and try again.`;
+            btn.disabled = false;
+            btn.textContent = "Upload materials for quiz";
+            return;
+        }
+
+        // Preflight succeeded — build the filtered upload list
+        preflightChecked = (pf.data.materials || []).length;
+        onlyMaterialIds = [];
+        for (const item of (pf.data.materials || [])) {
+            if (item.should_upload) {
+                onlyMaterialIds.push(String(item.material_id));
+            } else {
+                if (item.status === "ready") { alreadyReady += 1; skippedExisting += 1; }
+                else if (item.status === "not_quiz_material") { alreadyClassified += 1; skippedExisting += 1; }
+                else if (item.status === "extraction_failed") { skippedExtractionFailed += 1; skippedExisting += 1; }
+                else { skippedExisting += 1; }
+            }
+        }
+
+        if (onlyMaterialIds.length === 0) {
+            // Everything is already processed — report immediately, no upload needed.
+            await refreshData();
+            btn.textContent = "Upload materials for quiz";
+            btn.disabled = false;
+            refs.uploadMeta.textContent = formatQuizUploadSummary({
+                courseId,
+                courseName,
+                detected,
+                preflightChecked,
+                uploaded: 0,
+                ready: 0,
+                failed: 0,
+                total: 0,
+                skippedExisting,
+                alreadyReady,
+                alreadyClassified,
+                skippedExtractionFailed,
+                endpoint: UPLOAD_QUIZ_URL
+            });
+            return;
+        }
+
+        refs.uploadMeta.textContent =
+            `Uploading ${onlyMaterialIds.length}/${uploadable.length} files ` +
+            `(${skippedExisting} already processed)...`;
+    }
+
+    // ── Step 3: download + upload only the filtered materials ─────────────────
+    const tabResult = await uploadMaterialsOnActiveTab(courseId, onlyMaterialIds);
+
     if (tabResult.status === "done") {
-        uploaded = tabResult.uploaded || 0;
-        ready = tabResult.ready || 0;
-        failed = tabResult.failed ?? Math.max(0, (tabResult.total || 0) - uploaded);
-        total = tabResult.total || 0;
-        endpoint = tabResult.backend_endpoint || endpoint;
+        const uploaded = tabResult.uploaded || 0;
+        const ready = tabResult.ready || 0;
+        const failed = tabResult.failed ?? Math.max(0, (tabResult.total || 0) - uploaded);
+        const total = tabResult.total || 0;
         await refreshData();
         btn.textContent = "Upload materials for quiz";
         btn.disabled = false;
         refs.uploadMeta.textContent = formatQuizUploadSummary({
             courseId,
             courseName: tabResult.course_name || courseName,
-            detected: tabResult.detected || 0,
-            preflightChecked: tabResult.preflight_checked || 0,
+            detected,
+            preflightChecked,
             uploaded,
             ready,
             failed,
             total,
-            skippedExisting: tabResult.skipped_existing || 0,
-            alreadyReady: tabResult.already_ready || 0,
-            alreadyClassified: tabResult.already_classified || 0,
-            skippedExtractionFailed: tabResult.skipped_extraction_failed || 0,
-            endpoint
+            skippedExisting,
+            alreadyReady,
+            alreadyClassified,
+            skippedExtractionFailed,
+            endpoint: tabResult.backend_endpoint || UPLOAD_QUIZ_URL
         });
         return;
-    } else if (tabResult.status === "preflight_failed") {
-        // Preflight endpoint unreachable or returned an error.
-        // Show the exact error instead of silently uploading everything.
-        const httpNote = tabResult.preflight_http_status === 404
-            ? " (endpoint not found — backend may need redeployment)"
-            : tabResult.preflight_http_status === 0
-                ? " (network error — check backend URL in extension settings)"
-                : "";
-        refs.uploadMeta.textContent =
-            `Preflight check failed${httpNote}: ${tabResult.preflight_error || "unknown error"}. ` +
-            `Open the extension, go to Settings, confirm the backend URL, then try again.`;
-        btn.disabled = false;
-        btn.textContent = "Upload materials for quiz";
-        return;
-    } else if (tabResult.tab_course_id && String(tabResult.tab_course_id) !== String(courseId)) {
+    }
+
+    if (tabResult.tab_course_id && String(tabResult.tab_course_id) !== String(courseId)) {
         refs.uploadMeta.textContent =
             tabResult.error ||
             `Course mismatch: tab is ${tabResult.tab_course_id}, dropdown is ${courseId}.`;
         btn.disabled = false;
         btn.textContent = "Upload materials for quiz";
         return;
-    } else {
-        const stored = getCourseMaterials(currentData, courseId).filter(isQuizUploadableMaterial);
-        if (stored.length) {
-            refs.uploadMeta.textContent = `Falling back to ${stored.length} stored material(s)...`;
-            for (let i = 0; i < stored.length; i += 1) {
-                btn.textContent = `Uploading ${i + 1}/${stored.length}...`;
-                try {
-                    const result = await uploadStoredMaterial(stored[i], identity);
-                    if (result.ok) uploaded += 1;
-                    else failed += 1;
-                    if (result.ready_for_quiz) ready += 1;
-                } catch (_error) {
-                    failed += 1;
-                }
-            }
-            total = stored.length;
-        } else {
-            refs.uploadMeta.textContent =
-                `${tabResult.error || "Could not upload from Moodle tab."} Open the course page, refresh, or pick files manually.`;
-            btn.disabled = false;
-            btn.textContent = "Upload materials for quiz";
-            refs.manualQuizFileInput.click();
-            return;
-        }
     }
 
-    btn.textContent = "Upload materials for quiz";
-    btn.disabled = false;
-    refs.uploadMeta.textContent = formatQuizUploadSummary({
-        courseId,
-        courseName: tabResult.course_name || courseName,
-        uploaded,
-        ready,
-        failed,
-        total,
-        endpoint
-    });
+    // Final fallback — content script failed; try stored materials from popup context
+    const stored = getCourseMaterials(currentData, courseId).filter(isQuizUploadableMaterial);
+    if (stored.length) {
+        refs.uploadMeta.textContent = `Falling back to ${stored.length} stored material(s)...`;
+        let uploaded = 0; let ready = 0; let failed = 0;
+        for (let i = 0; i < stored.length; i += 1) {
+            btn.textContent = `Uploading ${i + 1}/${stored.length}...`;
+            try {
+                const result = await uploadStoredMaterial(stored[i], identity);
+                if (result.ok) uploaded += 1; else failed += 1;
+                if (result.ready_for_quiz) ready += 1;
+            } catch (_error) {
+                failed += 1;
+            }
+        }
+        btn.textContent = "Upload materials for quiz";
+        btn.disabled = false;
+        refs.uploadMeta.textContent = formatQuizUploadSummary({
+            courseId,
+            courseName,
+            detected,
+            preflightChecked,
+            uploaded,
+            ready,
+            failed,
+            total: stored.length,
+            skippedExisting,
+            alreadyReady,
+            alreadyClassified,
+            skippedExtractionFailed,
+            endpoint: UPLOAD_QUIZ_URL,
+            extra: "Fallback: stored materials"
+        });
+    } else {
+        refs.uploadMeta.textContent =
+            `${tabResult.error || "Could not reach Moodle tab."} ` +
+            `Open the course page, refresh, or pick files manually.`;
+        btn.disabled = false;
+        btn.textContent = "Upload materials for quiz";
+        refs.manualQuizFileInput.click();
+    }
 };
 
 const bindQuizUploadControls = () => {
@@ -743,11 +892,34 @@ refs.clearDataBtn.addEventListener("click", () => {
 });
 
 refs.refreshBtn.addEventListener("click", refreshData);
+
+const bindSettingsControls = () => {
+    if (!refs.saveBackendUrlBtn) return;
+    refs.saveBackendUrlBtn.addEventListener("click", () => {
+        const raw = (refs.backendUrlInput?.value || "").trim();
+        if (!raw) return;
+        const normalized = normalizeApiBase(raw);
+        chrome.storage.local.set({ backendUrl: normalized }, () => {
+            const urls = buildBackendUrls(normalized);
+            BACKEND_URL = urls.sync;
+            UPLOAD_QUIZ_URL = urls.uploadQuiz;
+            PREFLIGHT_URL = urls.preflight;
+            CONTENT_URL = urls.content;
+            if (refs.backendUrlInput) refs.backendUrlInput.value = normalized;
+            if (refs.backendUrlStatus) {
+                refs.backendUrlStatus.textContent = `Saved. Preflight: ${urls.preflight}`;
+                setTimeout(() => { refs.backendUrlStatus.textContent = ""; }, 4000);
+            }
+        });
+    });
+};
+
 document.addEventListener("DOMContentLoaded", () => {
     loadBackendConfig().then(() => {
         refreshData();
         addSyncButton();
         addScanAllButton();
         bindQuizUploadControls();
+        bindSettingsControls();
     });
 });

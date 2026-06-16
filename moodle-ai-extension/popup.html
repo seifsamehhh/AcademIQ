@@ -50,6 +50,17 @@
       <button id="downloadJsonBtn" type="button">Download JSON</button>
       <button id="clearDataBtn" type="button" class="danger">Clear Data</button>
     </section>
+
+    <section class="card settings-card">
+      <h2>Backend Settings</h2>
+      <label class="setting-label" for="backendUrlInput">API base URL</label>
+      <div class="setting-row">
+        <input id="backendUrlInput" type="url" class="backend-url-input"
+               placeholder="https://academiq-backend.vercel.app" />
+        <button id="saveBackendUrlBtn" type="button" class="save-btn">Save</button>
+      </div>
+      <p id="backendUrlStatus" class="subtle backend-url-status"></p>
+    </section>
   </main>
 
   <script src="popup.js"></script>

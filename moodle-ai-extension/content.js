@@ -870,83 +870,19 @@
         };
     };
 
-    // Build the preflight URL from the upload URL by replacing the endpoint path.
-    const buildPreflightUrl = (backendUploadUrl) =>
-        backendUploadUrl.replace(/\/materials\/upload-for-quiz\/?$/, "/materials/preflight");
-
     /**
-     * Ask the backend which materials still need uploading (no file bytes sent).
+     * Download and upload course materials.
      *
-     * Returns { ok: true, data: preflight_response } on success.
-     * Returns { ok: false, httpStatus: N, error: "..." } on HTTP error.
-     * Returns { ok: false, httpStatus: 0, error: "..." } on network failure.
+     * Preflight is now called from popup.js (chrome-extension:// origin) which
+     * avoids CORS rejection.  The popup passes the pre-filtered list of
+     * material IDs via `message.only_material_ids`.
      *
-     * NEVER silently swallows errors — the caller decides whether to abort or proceed.
+     * @param {string}        backendUploadUrl  Full URL to /materials/upload-for-quiz
+     * @param {string}        courseId          Moodle course ID from the popup dropdown
+     * @param {string[]|null} onlyMaterialIds   IDs approved for upload by popup's preflight.
+     *                                          null = upload everything (no pre-filtering).
      */
-    const callPreflight = async (backendUploadUrl, courseId, materials, identity) => {
-        const preflightUrl = buildPreflightUrl(backendUploadUrl);
-
-        const body = {
-            course_id: String(courseId),
-            user_email: identity?.email || null,
-            // Send both the activity URL (has ?id= for cmid lookup) AND the
-            // resolved file URL (for URL-based fallback lookup) so the backend
-            // has the best chance of finding an existing record.
-            materials: materials.map((m) => ({
-                material_id: m.material_id || m.id,
-                title: m.title,
-                // Prefer the activity URL (has ?id=cmid) for stable key lookup;
-                // resolved_url (pluginfile) is sent as fallback.
-                source_url: m.url || null,
-                resolved_url: m.resolvedUrl || null,
-                file_type: m.file_type || m.fileType || "unknown"
-            }))
-        };
-
-        // ── Console debug ───────────────────────────────────────────────────
-        console.group("[AcademIQ] Preflight check");
-        console.log("URL:", preflightUrl);
-        console.log("course_id:", courseId);
-        console.log("Materials to check:", materials.length);
-        const sample = body.materials.slice(0, 5);
-        sample.forEach((m, i) => console.log(`  [${i}] id=${m.material_id} url=${m.source_url} title=${m.title}`));
-        console.groupEnd();
-
-        try {
-            const res = await fetch(preflightUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body)
-            });
-            if (!res.ok) {
-                let errText = "";
-                try { errText = await res.text(); } catch (_) {}
-                const msg = `Preflight HTTP ${res.status}${errText ? `: ${errText.slice(0, 120)}` : ""}`;
-                console.error("[AcademIQ] Preflight failed:", msg);
-                return { ok: false, httpStatus: res.status, error: msg };
-            }
-            const data = await res.json();
-            // ── Console debug: preflight response ──────────────────────────
-            const summary = (data.materials || []).reduce((acc, m) => {
-                acc[m.status] = (acc[m.status] || 0) + 1;
-                return acc;
-            }, {});
-            console.group("[AcademIQ] Preflight response");
-            console.log("total:", data.total, "| should_upload:", data.should_upload_count, "| skip:", data.skip_count);
-            console.log("status breakdown:", summary);
-            (data.materials || []).slice(0, 5).forEach((m) =>
-                console.log(`  [${m.material_id}] ${m.should_upload ? "UPLOAD" : "SKIP"} (${m.status}) — ${m.title}`)
-            );
-            console.groupEnd();
-            return { ok: true, data };
-        } catch (err) {
-            const msg = `Preflight network error: ${err.message || err}`;
-            console.error("[AcademIQ]", msg);
-            return { ok: false, httpStatus: 0, error: msg };
-        }
-    };
-
-    const uploadMaterialsForQuiz = async (backendUploadUrl, courseId) => {
+    const uploadMaterialsForQuiz = async (backendUploadUrl, courseId, onlyMaterialIds = null) => {
         const course = getCourseContext();
         const tabCourseId = course.course_id;
         if (!tabCourseId) {
@@ -967,76 +903,26 @@
         }
 
         // ── 1. Detect all materials on this course page ───────────────────────
-        let allMaterials = await extractMaterialsFromCourse(course);
+        const allMaterials = await extractMaterialsFromCourse(course);
         if (allMaterials.length) {
             sendMessage("materials", allMaterials);
         }
 
-        // Filter to uploadable file types (pdf, pptx, docx, txt, …)
+        // Filter to uploadable types, then apply popup's preflight filter if present
         let uploadable = allMaterials.filter(isQuizUploadableMaterial);
-        const detected = allMaterials.length;
+
+        if (Array.isArray(onlyMaterialIds)) {
+            // Popup already ran preflight — only download what it approved
+            const allowed = new Set(onlyMaterialIds.map(String));
+            uploadable = uploadable.filter((m) => allowed.has(String(m.material_id || m.id)));
+            console.log(
+                `[AcademIQ] Upload: ${uploadable.length}/${allMaterials.length} materials after preflight filter`
+            );
+        }
 
         const identity = getStudentIdentity();
 
-        // ── 2. Preflight: check backend BEFORE downloading anything ───────────
-        let preflight_checked = 0;
-        let skippedExisting = 0;
-        let alreadyReady = 0;
-        let alreadyClassified = 0;
-        let skippedExtractionFailed = 0;
-        let tooShort = 0;
-
-        const preflightResult = await callPreflight(
-            backendUploadUrl, tabCourseId, uploadable, identity
-        );
-
-        if (!preflightResult.ok) {
-            // Preflight failed — do NOT silently upload everything.
-            // Return the error so popup.js can show it clearly.
-            return {
-                status: "preflight_failed",
-                preflight_error: preflightResult.error,
-                preflight_http_status: preflightResult.httpStatus,
-                course_id: String(tabCourseId),
-                course_name: course.course_name,
-                backend_endpoint: backendUploadUrl,
-                detected
-            };
-        }
-
-        const preflightData = preflightResult.data;
-        preflight_checked = (preflightData.materials || []).length;
-
-        // Build a set of material_ids that need uploading
-        const shouldUploadIds = new Set();
-        for (const item of (preflightData.materials || [])) {
-            if (item.should_upload) {
-                shouldUploadIds.add(String(item.material_id));
-            } else {
-                if (item.status === "ready") {
-                    alreadyReady += 1;
-                    skippedExisting += 1;
-                } else if (item.status === "not_quiz_material") {
-                    alreadyClassified += 1;
-                    skippedExisting += 1;
-                } else if (item.status === "extraction_failed") {
-                    skippedExtractionFailed += 1;
-                    skippedExisting += 1;
-                } else if (item.status === "too_short") {
-                    tooShort += 1;
-                    skippedExisting += 1;
-                } else {
-                    skippedExisting += 1;
-                }
-            }
-        }
-
-        // Only download+upload the materials where should_upload is true
-        uploadable = uploadable.filter(
-            (m) => shouldUploadIds.has(String(m.material_id || m.id))
-        );
-
-        // ── 3. Download + upload only the materials that need it ──────────────
+        // ── 2. Download + upload approved materials ───────────────────────────
         const results = [];
         for (const material of uploadable) {
             results.push(await uploadMaterialToBackend(backendUploadUrl, material, identity));
@@ -1051,17 +937,11 @@
             course_id: String(tabCourseId),
             course_name: course.course_name,
             backend_endpoint: backendUploadUrl,
-            detected,
-            preflight_checked,
+            detected: allMaterials.length,
             uploaded,
             ready,
             failed,
             total: uploadable.length,
-            skipped_existing: skippedExisting,
-            already_ready: alreadyReady,
-            already_classified: alreadyClassified,
-            skipped_extraction_failed: skippedExtractionFailed,
-            too_short: tooShort,
             results
         };
     };
@@ -1088,7 +968,11 @@
             return true;
         }
         if (message?.type === "upload_materials_for_quiz") {
-            uploadMaterialsForQuiz(message.backendUploadUrl, message.courseId)
+            uploadMaterialsForQuiz(
+                message.backendUploadUrl,
+                message.courseId,
+                message.only_material_ids || null
+            )
                 .then((result) => sendResponse(result))
                 .catch((error) => sendResponse({ status: "error", error: String(error) }));
             return true;

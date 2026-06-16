@@ -138,3 +138,59 @@ button.danger {
 .empty {
     text-align: center;
 }
+
+.settings-card {
+    margin-top: 10px;
+}
+
+.setting-label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: #374151;
+    margin-bottom: 5px;
+}
+
+.setting-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.backend-url-input {
+    flex: 1;
+    border: 1px solid #c6d4e1;
+    border-radius: 8px;
+    background: #f5f8fc;
+    color: #1d2734;
+    padding: 6px 8px;
+    font-size: 11px;
+    font-family: monospace;
+    min-width: 0;
+}
+
+.backend-url-input:focus {
+    outline: 2px solid #2563eb;
+    outline-offset: 1px;
+}
+
+.save-btn {
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.backend-url-status {
+    margin-top: 4px;
+    font-size: 11px;
+    min-height: 14px;
+}
+
+input[type="url"],
+input[type="text"] {
+    border: 1px solid #c6d4e1;
+    border-radius: 8px;
+    background: #f5f8fc;
+    color: #1d2734;
+    padding: 6px 10px;
+    font-size: 12px;
+}
