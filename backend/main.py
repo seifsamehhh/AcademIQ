@@ -179,40 +179,64 @@ def debug_single_quiz_material(material_id: str):
     return debug_single_material(material_id)
 
 
-@app.get("/debug/raw-course-materials/{course_id}")
-def debug_raw_course_materials(course_id: str):
+@app.get("/debug/raw-course-materials/{email}/{course_id}")
+def debug_raw_course_materials(email: str, course_id: str):
     """
-    Show all materials stored in MongoDB for a given Moodle course_id.
-    Returns material_id, title, url, extraction_status, content_chars for each.
-    Does NOT return content_text, passwords, or tokens.
-    Use this to verify what the preflight lookup will find.
+    Show all materials in MongoDB for a specific user + Moodle course_id.
+
+    Safe fields only — no content_text, no passwords, no tokens.
+    Use this to verify what the preflight lookup will find before a second upload.
+
+    Example:
+      GET /debug/raw-course-materials/user@example.com/666
     """
-    from app.repositories import material_repository
+    from app.repositories import material_repository, user_repository
 
     if not connect_database():
         raise HTTPException(status_code=503, detail="Database unreachable")
 
+    # Resolve user
+    user = user_repository.find_by_email(email.strip().lower())
+    user_exists = user is not None
+    academiq_user_id = str(user["_id"]) if user else None
+
+    # Load materials for this course (not filtered by user yet — Moodle course_id is global)
     docs = material_repository.list_by_course(course_id)
+
     rows = []
     for d in docs:
         text = (d.get("content_text") or "").strip()
         chars = len(text) if text else int(d.get("content_chars") or 0)
+        # Build the same stable key the preflight uses for matching
+        mid = d.get("material_id") or ""
+        url_val = d.get("url") or ""
+        title_val = d.get("title") or ""
+        material_key = mid or url_val or title_val
+
         rows.append({
-            "material_id": d.get("material_id"),
-            "title": d.get("title"),
-            "url": d.get("url"),
-            "resolved_url": d.get("resolved_url"),
+            "material_id": mid,
+            "title": title_val,
             "file_type": d.get("file_type"),
             "extraction_status": d.get("extraction_status"),
-            "content_chars": chars,
+            "ready_for_quiz": d.get("ready_for_quiz", False),
+            "content_text_length": chars,
+            "url": url_val,
+            "resolved_url": d.get("resolved_url"),
+            "source_url": d.get("source_url"),
+            "material_key": material_key,
             "source": d.get("source"),
-            "_id": str(d.get("_id", "")),
+            "db_id": str(d.get("_id", "")),
         })
+
     rows.sort(key=lambda r: r["title"] or "")
     return {
+        "email": email,
         "course_id": course_id,
-        "total": len(rows),
-        "materials": rows,
+        "user_exists": user_exists,
+        "academiq_user_id": academiq_user_id,
+        "total_materials": len(rows),
+        "first_10": rows[:10],
+        "all_material_ids": [r["material_id"] for r in rows if r["material_id"]],
     }
 
 
