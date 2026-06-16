@@ -114,12 +114,17 @@ def _supplement_to_target(
     primary_engine: str,
 ) -> Tuple[List[Dict[str, Any]], str]:
     """
-    If primary has fewer than num_questions, fill the gap with fragment-engine
-    recall questions drawn from the same material text.
+    If primary has fewer than num_questions, attempt to fill the gap with
+    concept questions from the fragment engine.
+
+    The fragment engine (quiz_gen_fragment.py) produces ONLY concept-style
+    questions — "What does X refer to?", "What is the purpose of Y?" — using
+    relaxed (term, explanation) extraction patterns.  It returns [] when fewer
+    than 3 valid concept pairs are found, so this supplement is a no-op for
+    truly sparse content and never falls back to generic recall questions.
 
     Deduplicates by comparing the first 60 chars of each question string.
     Renumbers all question IDs sequentially.
-    Returns (combined, combined_engine_label).
     """
     if len(primary) >= num_questions:
         return primary[:num_questions], primary_engine
@@ -128,9 +133,14 @@ def _supplement_to_target(
     try:
         from app.services.quiz_gen_fragment import generate_fragment_quiz
 
-        # Request a few extra candidates to absorb duplicates
+        # Request extra candidates to absorb any duplicates with primary questions
         fragments = generate_fragment_quiz(text, num_questions=needed + 4)
         if not fragments:
+            # Fragment engine found < 3 concept pairs — return primary as-is
+            logger.info(
+                "Supplement skipped: fragment engine found no concept pairs for %s quiz",
+                primary_engine,
+            )
             return primary, primary_engine
 
         existing_keys = {q["question"].lower()[:60] for q in primary}
@@ -148,7 +158,7 @@ def _supplement_to_target(
         added = len(combined) - len(primary)
         engine = f"{primary_engine}+fragment" if added > 0 else primary_engine
         logger.info(
-            "Supplemented %s quiz: %d → %d questions (+%d fragment)",
+            "Supplemented %s quiz: %d → %d questions (+%d fragment concept questions)",
             primary_engine, len(primary), len(combined), added,
         )
         return combined, engine
@@ -162,15 +172,23 @@ def generate_questions(text: str, num_questions: int = 5) -> Tuple[List[Dict[str
     Generate MCQs from stored content_text.
 
     Engine priority (content-grounded first):
-      1. Lightweight (regex, definition/concept extraction) — always available,
-         all distractors come from the SAME material text.
-      2. Lecture fallback (arrow notation, heading+bullet groups) — for slide/lab PDFs.
-      3. Heavy NLTK (ai/quiz_generator-main) — local-dev only.
-      4. Fragment fallback (content-recall MCQs from any readable sentences).
+      1. Lightweight — regex definition/concept extraction; all distractors from
+         the same material text.
+      2. Lecture fallback — arrow notation, heading+bullet groups; for slide/lab PDFs.
+      3. Heavy NLTK — local-dev only (ai/quiz_generator-main).
+      4. Fragment — relaxed concept extraction; last resort.
 
-    After each primary engine produces questions, if the count is below
-    num_questions, the fragment engine is used to supplement up to the target.
-    This guarantees exactly num_questions whenever there is sufficient text.
+    After each primary engine, if the count is below num_questions,
+    _supplement_to_target fills the gap using the fragment engine's concept
+    questions ("What does X refer to?").  The supplement is a no-op when the
+    fragment engine cannot find ≥3 valid concept pairs — it never produces
+    generic recall questions ("Which statement is from this material?").
+
+    Quality guarantees:
+      - No generic recall/statement-matching question stems.
+      - All answer options ≤ 120 characters.
+      - Every question names a real concept from the selected material.
+      - Returns [] only when truly no concept pairs can be extracted.
     """
     if not text or not text.strip():
         logger.warning("Quiz generation skipped: no content_text")

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 _MIN_DEFINITION_LEN = 20
 _MAX_DEFINITION_LEN = 160
-_MAX_OPTION_LEN = 110
+_MAX_OPTION_LEN = 120   # hard cap on every answer option including sentence-fragment distractors
 _MIN_QUESTIONS = 3
 
 _DEFINITION_PATTERNS = [
@@ -160,7 +160,15 @@ def _extract_material_sentences(
         if len(words) < min_words:
             continue
         if len(s) > max_chars:
-            s = " ".join(words[:18])
+            # Trim to word boundary within _MAX_OPTION_LEN
+            trimmed = ""
+            for w in words:
+                candidate = (trimmed + " " + w).strip()
+                if len(candidate) <= _MAX_OPTION_LEN:
+                    trimmed = candidate
+                else:
+                    break
+            s = trimmed or " ".join(words[:18])
         # Skip lines that are mostly numbers/symbols/single words
         if re.match(r"^[\d\s\W]+$", s):
             continue
@@ -493,6 +501,9 @@ def _pick_distractors(
         if other_concept.lower() == concept.lower():
             continue
         option = _definition_option(other_concept, other_def)
+        # Hard-cap option length (applies after _format_option already trimmed)
+        if len(option) > _MAX_OPTION_LEN:
+            option = _format_option(option, max_len=_MAX_OPTION_LEN)
         key = _option_key(option)
         if key == correct_key or key in used_global or option in candidates:
             continue

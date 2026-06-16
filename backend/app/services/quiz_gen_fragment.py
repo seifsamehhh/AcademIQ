@@ -1,18 +1,21 @@
 """
-Last-resort quiz generator — works on any extractable text.
+Concept-extraction fallback quiz generator.
 
-Used when definition-extraction (lightweight), structural-pattern (lecture),
-and NLTK (heavy) engines all fail.  Generates MCQs by selecting the most
-informative sentences from the material and using other sentences from the
-same material as distractors.
+Used when the primary engines (lightweight definition extractor, lecture
+structural parser) produce fewer than num_questions questions.
 
-Questions are purely content-recall:
+Strategy:
+  - Extract (term, explanation) pairs using RELAXED patterns:
+    "Term is a/an/the ..."  "Term refers to..."  "Term: ..."  "Term – ..."
+  - Trim every answer option to ≤ MAX_ANSWER_LEN characters at a word boundary.
+  - Generate concept questions:  "What does X refer to?",
+    "What is the purpose of X?",  "Which statement best describes X?" etc.
+  - All distractors come from OTHER extracted pairs in the SAME material.
+  - Returns [] if fewer than 3 valid (term, explanation) pairs are found.
+
+IMPORTANT: This engine NEVER produces generic recall questions such as
   "Which of the following statements is from this material?"
-
-All four options (correct + 3 distractors) come from the SAME selected
-material — nothing is invented or imported from elsewhere.
-
-Returns [] only if the text has fewer than 4 usable sentences.
+Every question names a real concept extracted from the selected material.
 """
 
 from __future__ import annotations
@@ -20,112 +23,168 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-_MIN_WORDS = 7        # minimum words in a usable sentence
-_MAX_CHARS = 160      # trim long sentences to this length
-_ARTIFACT_RE = re.compile(r"[\uf000-\uf8ff\ufffd\u25a0-\u25ff\u2013\u2014]")
+# ── Constants ─────────────────────────────────────────────────────────────────
+MAX_ANSWER_LEN = 120   # hard character cap per answer option
+MIN_ANSWER_LEN = 15    # skip trivially short answers
+MIN_TERM_LEN   = 3     # skip single-char tokens
+MAX_TERM_WORDS = 8     # skip overly long noun phrases
+
+_ARTIFACT_RE = re.compile(
+    r"[\uf000-\uf8ff\ufffd\u25a0-\u25ff\u2013\u2014\u2022\u25cf\u00b7]"
+)
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
-# Sentence-start pronouns/deictic words that produce vague questions
-_WEAK_START_WORDS = frozenset(
+# ── Vague first-word filter (mirrors quiz_gen_light blacklist) ────────────────
+_VAGUE_TERMS: frozenset[str] = frozenset(
     "it its this that these those they their there what which when where "
-    "who how why please click refer see go open close".split()
+    "who how why note example use case step output result method overview "
+    "introduction conclusion summary basically generally typically usually "
+    "often always never sometimes".split()
 )
 
-# Question stems — rotated to reduce monotony
-_QUESTION_STEMS = [
-    "Which of the following statements is from this material?",
-    "Which statement was mentioned in this material?",
-    "Which of the following was described in this material?",
-    "Which statement accurately represents content from this material?",
-    "Which of the following is covered in this material?",
+# ── Relaxed (term, explanation) extraction patterns ──────────────────────────
+# More permissive than quiz_gen_light: case-insensitive, more verbs, dash lines.
+_PAIR_PATTERNS: List[re.Pattern] = [
+    # "Term is a/an/the explanation."
+    re.compile(
+        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,6})"
+        r"\s+is\s+(?:a|an|the)\s+([^.\n]{15,200})\.",
+        re.MULTILINE,
+    ),
+    # "Term is explanation."
+    re.compile(
+        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,6})"
+        r"\s+is\s+([^.\n]{15,200})\.",
+        re.MULTILINE,
+    ),
+    # "Term refers/means/allows/enables/provides/represents/involves explanation."
+    re.compile(
+        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,6})"
+        r"\s+(?:refers?\s+to|means?|allows?|enables?|provides?|represents?|involves?)\s+([^.\n]{15,200})\.",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    # "Term: explanation."  (colon — common in slide notes and labs)
+    re.compile(
+        r"(?:^|\n)\s*([A-Z][A-Za-z0-9][A-Za-z0-9 /&\-]{1,50}?)\s*:\s+([^.\n]{15,200})\.",
+        re.MULTILINE,
+    ),
+    # "Term – explanation." or "Term — explanation."  (dash — common in bullets)
+    re.compile(
+        r"(?:^|\n)\s*([A-Z][A-Za-z0-9][A-Za-z0-9 /&\-]{1,40}?)\s+[\u2013\u2014\-]\s+([^.\n]{15,200})\.",
+        re.MULTILINE,
+    ),
+    # "Term (ABBREV) is a/an explanation."
+    re.compile(
+        r"\b([A-Z][A-Za-z][A-Za-z0-9\s/&\-]{1,40}?)\s+\(\s*([A-Z][A-Z0-9]{1,7})\s*\)"
+        r"\s+is\s+(?:a|an|the)?\s*([^.\n]{15,200})\.",
+        re.MULTILINE,
+    ),
+]
+
+# ── Question templates cycled across questions ────────────────────────────────
+_QUESTION_TEMPLATES: List[str] = [
+    "What does {} refer to?",
+    "What is the purpose of {}?",
+    "Which statement best describes {}?",
+    "What is {}?",
+    "What is one key aspect of {}?",
+    "How is {} defined in this material?",
+    "Which concept is described as {}?",
 ]
 
 
-def _clean_sentence(s: str, max_chars: int = _MAX_CHARS) -> str:
-    """Trim, capitalise, and ensure terminal punctuation."""
-    s = s.strip()
-    words = s.split()
-    if len(s) > max_chars:
-        s = " ".join(words[:22])
-    if not s:
-        return ""
-    s = s[0].upper() + s[1:]
-    if s[-1] not in ".!?":
-        s += "."
-    return s
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _clean_term(raw: str) -> Optional[str]:
+    """Validate and normalise a candidate concept term."""
+    term = re.sub(r"\s+", " ", raw.strip())
+    term = re.sub(r"^(?:a|an|the)\s+", "", term, flags=re.IGNORECASE)
+    term = term.strip()
+    if len(term) < MIN_TERM_LEN:
+        return None
+    words = term.split()
+    if len(words) > MAX_TERM_WORDS:
+        return None
+    if words[0].lower() in _VAGUE_TERMS:
+        return None
+    if _ARTIFACT_RE.search(term):
+        return None
+    # Must contain at least one real alphabetic word of ≥3 chars
+    if not any(re.match(r"[A-Za-z]{3,}", w) for w in words):
+        return None
+    return term
 
 
-def _info_score(sentence: str) -> int:
-    """Score a sentence by information density (more unique long words = higher)."""
-    words = re.findall(r"[a-zA-Z]{4,}", sentence)
-    return len(set(w.lower() for w in words))
+def _trim_to_len(text: str, max_len: int = MAX_ANSWER_LEN) -> str:
+    """Trim text to max_len at a word boundary, preserving terminal punctuation."""
+    text = re.sub(r"\s+", " ", text.strip()).rstrip(".,;:")
+    if len(text) <= max_len:
+        return text
+    trimmed = ""
+    for word in text.split():
+        candidate = (trimmed + " " + word).strip()
+        if len(candidate) <= max_len:
+            trimmed = candidate
+        else:
+            break
+    return trimmed or text[:max_len]
 
 
-def _extract_sentences(text: str) -> List[str]:
+def _clean_answer(raw: str) -> Optional[str]:
+    """Validate, trim, and format an answer option."""
+    ans = re.sub(r"\s+", " ", raw.strip()).rstrip(".,;:")
+    if _ARTIFACT_RE.search(ans):
+        return None
+    if _EMAIL_RE.search(ans):
+        return None
+    if len(ans) < MIN_ANSWER_LEN:
+        return None
+    ans = _trim_to_len(ans, MAX_ANSWER_LEN)
+    if len(ans) < MIN_ANSWER_LEN:
+        return None
+    ans = ans[0].upper() + ans[1:]
+    if ans[-1] not in ".!?":
+        ans += "."
+    return ans
+
+
+def _extract_pairs(text: str) -> List[Tuple[str, str]]:
     """
-    Extract meaningful, clean sentences from any material text.
+    Extract (term, explanation) pairs using relaxed patterns.
 
-    Filters applied (in order):
-      - Artifact / private-use characters
-      - Emails and email-containing sentences
-      - Sentences starting with pronouns (It, Its, This, That…)
-      - Mostly-numeric / symbolic lines
-      - Document-title patterns (em-dash + parenthetical)
-      - High-uppercase lines (slide headers, acronym blocks)
-      - Navigation noise (click, see, refer…)
-      - Table-of-contents / section-header fragments
+    Returns a deduplicated list ordered by first appearance.
+    For ABBREV patterns (3 groups), the main term is used as the key and
+    the explanation is taken from group 3.
     """
-    blob = re.sub(r"\s+", " ", (text or "").strip())
-    raw = re.split(r"(?<=[.!?])\s+", blob)
+    seen_terms: Set[str] = set()
+    pairs: List[Tuple[str, str]] = []
 
-    result: List[str] = []
-    seen: Set[str] = set()
+    for pattern in _PAIR_PATTERNS:
+        for m in pattern.finditer(text):
+            groups = m.groups()
+            if len(groups) < 2:
+                continue
+            # ABBREV pattern produces 3 groups: (full_name, abbrev, explanation)
+            if len(groups) == 3:
+                term_raw, _, ans_raw = groups
+            else:
+                term_raw, ans_raw = groups[0], groups[-1]
 
-    for s in raw:
-        s = s.strip()
-        words = s.split()
-        if len(words) < _MIN_WORDS:
-            continue
-        # Skip artifact characters
-        if _ARTIFACT_RE.search(s):
-            continue
-        # Skip any sentence containing an email address
-        if _EMAIL_RE.search(s):
-            continue
-        # Skip sentences that start with weak/pronoun words (produce vague questions)
-        if words[0].lower() in _WEAK_START_WORDS:
-            continue
-        # Skip mostly-numeric/symbolic lines
-        if re.match(r"^[\d\s\W]+$", s):
-            continue
-        # Skip document-title patterns (em-dash + parenthetical)
-        if re.search(r"[\u2013\u2014]", s) and re.search(r"\(.*\)", s):
-            continue
-        # Skip if >40% uppercase (slide headers, acronym blocks)
-        if sum(1 for c in s if c.isupper()) / max(len(s), 1) > 0.4:
-            continue
-        # Skip PDF private-use / geometric separator characters
-        if re.search(r"[\uf000-\uf8ff\ufffd\u25a0-\u25ff]", s):
-            continue
-        # Skip ToC / navigation noise
-        if re.match(r"^(?:contents?|table\s+of\s+contents?|what\?|index|outline|agenda)\b", s, re.I):
-            continue
-        cleaned = _clean_sentence(s)
-        if not cleaned or len(cleaned) < 30:
-            continue
-        key = cleaned.lower()[:60]
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(cleaned)
+            term = _clean_term(term_raw)
+            ans = _clean_answer(ans_raw)
+            if not term or not ans:
+                continue
+            term_key = term.lower().strip()
+            if term_key in seen_terms:
+                continue
+            seen_terms.add(term_key)
+            pairs.append((term, ans))
 
-    # Sort by information density so the most informative sentences become questions
-    result.sort(key=_info_score, reverse=True)
-    return result
+    return pairs
 
 
 def _stable_shuffle(options: List[str], salt: str) -> Tuple[List[str], int]:
@@ -140,58 +199,56 @@ def _stable_shuffle(options: List[str], salt: str) -> Tuple[List[str], int]:
     return ordered, ordered.index(correct)
 
 
-def generate_fragment_quiz(text: str, num_questions: int = 8) -> List[Dict[str, Any]]:
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def generate_fragment_quiz(text: str, num_questions: int = 5) -> List[Dict[str, Any]]:
     """
-    Generate MCQs from any extractable text.
+    Concept-based fallback quiz generator.
 
-    Strategy:
-      - Extract all meaningful sentences from the material.
-      - Sort by information density (most informative first).
-      - Each question uses one sentence as the correct answer and three
-        other sentences from the same material as distractors.
-      - All four options are grounded in the selected material.
+    Extracts (term, explanation) pairs using relaxed patterns from any
+    educational text and builds real MCQ questions — never generic recall
+    questions like "Which statement is from this material?".
 
-    Returns [] if the text has fewer than 4 usable sentences.
+    All answer options are trimmed to ≤ MAX_ANSWER_LEN chars.
+    All distractors are drawn from other extracted pairs in the same material.
+
+    Returns [] when fewer than 3 valid (term, explanation) pairs are found.
     """
-    sentences = _extract_sentences(text)
-    logger.info("Fragment quiz gen: %d usable sentences extracted", len(sentences))
+    pairs = _extract_pairs(text)
+    logger.info("Fragment quiz gen: %d concept pairs extracted", len(pairs))
 
-    if len(sentences) < 4:
-        logger.warning("Fragment quiz gen: not enough sentences (%d < 4)", len(sentences))
+    if len(pairs) < 3:
+        logger.warning(
+            "Fragment quiz gen: only %d pairs (need ≥3) — returning []", len(pairs)
+        )
         return []
 
-    target = min(num_questions, len(sentences))
+    target = min(num_questions, len(pairs))
+    answers_pool = [ans for _, ans in pairs]
     questions: List[Dict[str, Any]] = []
-    used_keys: Set[str] = set()
 
-    for i, correct_sentence in enumerate(sentences):
+    for i, (term, correct_ans) in enumerate(pairs):
         if len(questions) >= target:
             break
-        key = correct_sentence.lower()[:60]
-        if key in used_keys:
-            continue
 
-        # Three distractors: any other sentences from the same material.
-        # Sentences already used as a *correct* answer can still appear as
-        # distractors — the only constraint is that a question's correct answer
-        # cannot also be one of its own distractors.
-        distractors: List[str] = [s for s in sentences if s != correct_sentence][:3]
+        distractors = [a for a in answers_pool if a != correct_ans][:3]
         if len(distractors) < 3:
             break
 
-        stem = _QUESTION_STEMS[len(questions) % len(_QUESTION_STEMS)]
-        options_raw = [correct_sentence] + distractors
-        options, correct_idx = _stable_shuffle(options_raw, f"frag:{i}:{correct_sentence[:20]}")
-        used_keys.add(key)
+        template = _QUESTION_TEMPLATES[i % len(_QUESTION_TEMPLATES)]
+        question_text = template.format(term)
 
-        questions.append(
-            {
-                "id": f"q{len(questions) + 1}",
-                "question": stem,
-                "options": options,
-                "correctIndex": correct_idx,
-            }
+        options_raw = [correct_ans] + distractors
+        options, correct_idx = _stable_shuffle(
+            options_raw, f"frag:{i}:{term[:20]}"
         )
+
+        questions.append({
+            "id": f"q{len(questions) + 1}",
+            "question": question_text,
+            "options": options,
+            "correctIndex": correct_idx,
+        })
 
     logger.info("Fragment quiz gen: produced %d questions", len(questions))
     return questions if len(questions) >= 3 else []
