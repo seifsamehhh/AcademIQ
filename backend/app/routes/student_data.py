@@ -106,13 +106,13 @@ def generate_quiz(
     if not material_ids:
         raise HTTPException(status_code=400, detail="materialIds required")
 
-    text = material_repository.get_content(course_id, material_ids)
+    # Fetch text + per-material metadata in one query
+    text, mat_meta = material_repository.get_content_with_meta(course_id, material_ids)
     content_chars = len((text or "").strip())
+
     logger.info(
         "Quiz request course=%s materials=%s content_chars=%d",
-        course_id,
-        material_ids,
-        content_chars,
+        course_id, material_ids, content_chars,
     )
 
     if not content_chars:
@@ -163,9 +163,22 @@ def generate_quiz(
         logger.error("Quiz gen failed: %s", detail)
         raise HTTPException(status_code=422, detail=detail)
 
+    # Build safe debug metadata (no content_text in response)
+    debug = {
+        "selected_material_ids": material_ids,
+        "selected_material_titles": [m.get("title") for m in mat_meta],
+        "content_text_length_per_material": {
+            m["material_id"]: m["raw_chars"] for m in mat_meta
+        },
+        "total_content_chars": content_chars,
+        "generator_mode": engine,
+        "question_count": len(questions),
+    }
+
     return {
         "courseId": course_id,
         "materialIds": material_ids,
         "questions": questions,
         "engine": engine,
+        "debug": debug,
     }

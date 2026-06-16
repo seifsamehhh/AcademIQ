@@ -127,13 +127,15 @@ def generate_questions(text: str, num_questions: int = 8) -> Tuple[List[Dict[str
         logger.warning("Quiz generation skipped: no content_text")
         return [], "no_text"
 
-    # Normalise before passing to any engine — removes Unicode private-use chars
-    # (e.g. \uf0a1) that PyPDF2 produces and that break regex matching.
+    # Deep-clean the text BEFORE passing to any engine.
+    # deep_clean_quiz_text removes emails, ToC lines, name headers, page numbers
+    # and artifact characters while PRESERVING newlines so line-aware engines
+    # (lightweight colon-pairs, lecture headings) still work correctly.
     try:
-        from app.services.quiz_material_eligibility import normalize_quiz_text
-        text = normalize_quiz_text(text)
+        from app.services.quiz_material_eligibility import deep_clean_quiz_text
+        text = deep_clean_quiz_text(text)
     except Exception:
-        pass  # normalisation is best-effort
+        pass  # cleaning is best-effort
 
     if not text.strip():
         return [], "no_text"

@@ -91,34 +91,46 @@ def _strip_section_headers(text: str) -> str:
 
 
 _INVALID_CONCEPTS = {
-    "for example",
-    "for instance",
-    "in summary",
-    "introduction",
-    "summary",
-    "programming lecture",
-    "database lecture",
-    "seeded demo material",
+    # Generic document structure terms
+    "for example", "for instance", "in summary", "introduction", "summary",
+    "note", "hint", "warning", "important", "overview", "objective",
+    "objectives", "agenda", "contents", "outline", "index", "table of contents",
+    "conclusion", "results", "discussion", "references", "bibliography",
+    "appendix", "acknowledgements", "abstract", "preface",
+    # Demo/test artifacts
+    "programming lecture", "database lecture", "seeded demo material",
     "academiq test content",
-    "note",
-    "hint",
-    "warning",
-    "important",
-    "overview",
-    "objective",
-    "objectives",
-    "agenda",
-    "contents",
-    "outline",
+    # Pronouns and deictic words that leak as concepts
+    "it", "its", "this", "that", "these", "those", "they", "their", "there",
+    "its output", "its input", "its result", "its value", "its purpose",
+    "this process", "this method", "this technique", "this approach",
+    "that is", "that means",
+    # Vague single-word subjects that lack educational specificity
+    "output", "input", "result", "value", "process", "method", "approach",
+    "step", "stage", "phase", "part", "section", "type", "form", "kind",
+    "example", "case", "item", "element", "component", "feature", "aspect",
+    "function", "operation", "action", "task", "activity", "event",
+    # Navigation / UI noise
+    "what", "click", "see", "refer", "go", "open", "close", "next", "back",
+    "continue", "return", "submit", "select",
 }
 
-# Patterns that indicate slide/course headers — should not become distractors
+# Pronouns and question words that must NEVER start a concept phrase
+_CONCEPT_BANNED_PREFIXES = (
+    "it ", "its ", "this ", "that ", "these ", "those ", "they ",
+    "their ", "there ", "what ", "which ", "when ", "where ", "who ",
+    "how ", "why ", "a ", "an ", "the ",
+)
+
+# Patterns that indicate slide/course headers or noise — not valid distractors
 _SENTENCE_SKIP_RE = re.compile(
-    r"^[A-Z]{2,6}\d+[-/]\w+"   # course codes: CSC399-SWE412, CSCE-2312
-    r"|^\d+\s+of\s+\d+"         # slide numbers: "3 of 24"
-    r"|^(?:slide|page|chapter|unit|lab|part)\s*\d"  # "Slide 3", "Lab 1"
-    r"|^https?://"              # URLs
-    r"|^\w+\.(com|org|edu|io)\b",  # domain-only lines
+    r"^[A-Z]{2,6}\d+[-/]\w+"           # course codes: CSC399-SWE412
+    r"|^\d+\s+of\s+\d+"                 # slide numbers: "3 of 24"
+    r"|^(?:slide|page|chapter|unit|lab|part)\s*\d"  # "Slide 3"
+    r"|^https?://"                       # URLs
+    r"|^\w+\.(com|org|edu|io)\b"         # domain lines
+    r"|@"                                # contains email @ symbol
+    r"|^\s*(?:contents?|what\?|index|outline)\s*$",  # ToC noise
     re.IGNORECASE,
 )
 
@@ -227,22 +239,45 @@ def _option_key(text: str) -> str:
 def _valid_concept(concept: str) -> bool:
     if not concept or len(concept) < 3:
         return False
-    lower = concept.lower()
+    lower = concept.lower().strip()
+
+    # Reject exact matches and substring noise
     if lower in _INVALID_CONCEPTS:
         return False
+
+    # Reject concepts starting with pronouns/deictic/question/article words
+    if any(lower.startswith(prefix) for prefix in _CONCEPT_BANNED_PREFIXES):
+        return False
+
     words = concept.split()
     if len(words) > 5 or len(words) < 1:
         return False
+
+    # Reject if any word is a known invalid concept (catches "Its output" where "Its" alone is bad)
+    if words[0].lower() in _INVALID_CONCEPTS:
+        return False
+
     if any(bad in lower for bad in ("introduction", "summary", "lecture", "seeded", "demo material")):
         return False
+
+    # Reject duplicate-word concepts like "flow flow"
     if len(words) >= 2 and words[-1].lower() == words[0].lower():
         return False
+
     if re.search(r"\sA\s+[A-Z]", concept):
         return False
+
+    # Reject "X and Y" compound concepts (too vague)
     if " and " in lower and len(words) > 3:
         return False
+
     if len(words) >= 2 and concept.lower().count(words[0].lower()) > 1:
         return False
+
+    # Must contain at least one alphabetic word with ≥3 letters
+    if not any(re.match(r"[A-Za-z]{3,}", w) for w in words):
+        return False
+
     return True
 
 

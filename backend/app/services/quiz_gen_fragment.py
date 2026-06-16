@@ -27,8 +27,15 @@ logger = logging.getLogger(__name__)
 _MIN_WORDS = 7        # minimum words in a usable sentence
 _MAX_CHARS = 160      # trim long sentences to this length
 _ARTIFACT_RE = re.compile(r"[\uf000-\uf8ff\ufffd\u25a0-\u25ff\u2013\u2014]")
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
-# Question stems — rotated to reduce monotony across multiple questions
+# Sentence-start pronouns/deictic words that produce vague questions
+_WEAK_START_WORDS = frozenset(
+    "it its this that these those they their there what which when where "
+    "who how why please click refer see go open close".split()
+)
+
+# Question stems — rotated to reduce monotony
 _QUESTION_STEMS = [
     "Which of the following statements is from this material?",
     "Which statement was mentioned in this material?",
@@ -47,7 +54,7 @@ def _clean_sentence(s: str, max_chars: int = _MAX_CHARS) -> str:
     if not s:
         return ""
     s = s[0].upper() + s[1:]
-    if not s[-1] in ".!?":
+    if s[-1] not in ".!?":
         s += "."
     return s
 
@@ -61,7 +68,16 @@ def _info_score(sentence: str) -> int:
 def _extract_sentences(text: str) -> List[str]:
     """
     Extract meaningful, clean sentences from any material text.
-    Filtered to remove headers, noise, and artifact lines.
+
+    Filters applied (in order):
+      - Artifact / private-use characters
+      - Emails and email-containing sentences
+      - Sentences starting with pronouns (It, Its, This, That…)
+      - Mostly-numeric / symbolic lines
+      - Document-title patterns (em-dash + parenthetical)
+      - High-uppercase lines (slide headers, acronym blocks)
+      - Navigation noise (click, see, refer…)
+      - Table-of-contents / section-header fragments
     """
     blob = re.sub(r"\s+", " ", (text or "").strip())
     raw = re.split(r"(?<=[.!?])\s+", blob)
@@ -74,8 +90,14 @@ def _extract_sentences(text: str) -> List[str]:
         words = s.split()
         if len(words) < _MIN_WORDS:
             continue
-        # Skip artifact characters (PDF private-use, geometric bullets)
+        # Skip artifact characters
         if _ARTIFACT_RE.search(s):
+            continue
+        # Skip any sentence containing an email address
+        if _EMAIL_RE.search(s):
+            continue
+        # Skip sentences that start with weak/pronoun words (produce vague questions)
+        if words[0].lower() in _WEAK_START_WORDS:
             continue
         # Skip mostly-numeric/symbolic lines
         if re.match(r"^[\d\s\W]+$", s):
@@ -83,11 +105,17 @@ def _extract_sentences(text: str) -> List[str]:
         # Skip document-title patterns (em-dash + parenthetical)
         if re.search(r"[\u2013\u2014]", s) and re.search(r"\(.*\)", s):
             continue
-        # Skip if >40% uppercase (slide headers)
+        # Skip if >40% uppercase (slide headers, acronym blocks)
         if sum(1 for c in s if c.isupper()) / max(len(s), 1) > 0.4:
             continue
+        # Skip PDF private-use / geometric separator characters
+        if re.search(r"[\uf000-\uf8ff\ufffd\u25a0-\u25ff]", s):
+            continue
+        # Skip ToC / navigation noise
+        if re.match(r"^(?:contents?|table\s+of\s+contents?|what\?|index|outline|agenda)\b", s, re.I):
+            continue
         cleaned = _clean_sentence(s)
-        if not cleaned or len(cleaned) < 25:
+        if not cleaned or len(cleaned) < 30:
             continue
         key = cleaned.lower()[:60]
         if key in seen:
@@ -143,10 +171,11 @@ def generate_fragment_quiz(text: str, num_questions: int = 8) -> List[Dict[str, 
         if key in used_keys:
             continue
 
-        # Three distractors: other sentences from the same material, avoiding duplicates
-        distractors: List[str] = [
-            s for s in sentences if s != correct_sentence and s.lower()[:60] not in used_keys
-        ][:3]
+        # Three distractors: any other sentences from the same material.
+        # Sentences already used as a *correct* answer can still appear as
+        # distractors — the only constraint is that a question's correct answer
+        # cannot also be one of its own distractors.
+        distractors: List[str] = [s for s in sentences if s != correct_sentence][:3]
         if len(distractors) < 3:
             break
 

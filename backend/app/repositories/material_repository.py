@@ -90,5 +90,41 @@ def get_content(course_id: str, material_ids: List[str]) -> str:
     return "\n\n".join(d.get("content_text", "") for d in cursor)
 
 
+def get_content_with_meta(
+    course_id: str, material_ids: List[str]
+) -> tuple[str, List[Dict[str, Any]]]:
+    """
+    Return (combined_text, per_material_meta_list).
+
+    per_material_meta_list contains one dict per found material with:
+      material_id, title, raw_chars (original content_text length).
+    Combined text uses the order of material_ids as requested.
+    """
+    ids = [str(m) for m in material_ids]
+    rows = {
+        str(d["material_id"]): d
+        for d in course_materials_collection.find(
+            {"course_id": str(course_id), "material_id": {"$in": ids}},
+            {"content_text": 1, "material_id": 1, "title": 1},
+        )
+    }
+    texts: List[str] = []
+    meta: List[Dict[str, Any]] = []
+    for mid in ids:
+        doc = rows.get(mid)
+        if not doc:
+            meta.append({"material_id": mid, "title": None, "raw_chars": 0, "found": False})
+            continue
+        raw = (doc.get("content_text") or "").strip()
+        texts.append(raw)
+        meta.append({
+            "material_id": mid,
+            "title": doc.get("title"),
+            "raw_chars": len(raw),
+            "found": bool(raw),
+        })
+    return "\n\n".join(texts), meta
+
+
 def count() -> int:
     return course_materials_collection.count_documents({})

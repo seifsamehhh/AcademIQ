@@ -46,13 +46,121 @@ _REASON_MESSAGES = {
 
 
 def normalize_quiz_text(text: str) -> str:
-    """Clean PDF/slide extraction noise before quiz parsing."""
+    """Clean PDF/slide extraction noise before quiz parsing (collapses whitespace)."""
     cleaned = text or ""
     cleaned = cleaned.replace("\x00", " ")
     cleaned = re.sub(r"[\uf000-\uf8ff]", " ", cleaned)
     cleaned = re.sub(r"[\u25a0-\u25ff\u2022\u2023\u2043]", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip()
+
+
+# ── Patterns for deep structural cleaning ────────────────────────────────────
+_EMAIL_RE = re.compile(
+    r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"
+)
+_MAILTO_LINK_RE = re.compile(
+    r"\[.*?\]\(mailto:[^\)]+\)",   # Markdown mailto: [text](mailto:email)
+    re.IGNORECASE,
+)
+_URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+_PAGE_NUM_LINE_RE = re.compile(
+    r"^\s*(?:page\s+\d+(?:\s+of\s+\d+)?|\d+\s*/\s*\d+|slide\s+\d+)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_TOC_NOISE_LINE_RE = re.compile(
+    r"^\s*(?:table\s+of\s+contents?|contents?|what\??|index|outline"
+    r"|agenda|overview|introduction)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+# "Topic ........... 3"  — table of contents entries with dotted leaders
+_TOC_ENTRY_RE = re.compile(r"^[^\n]+\.{3,}\s*\d+\s*$", re.MULTILINE)
+# Lines that are only a person's name (possibly with role/email notation)
+# e.g. "Prof. Amira Mohamed"  "Dr. Youssef Al-Said [ysaid@...]"
+_NAME_ONLY_LINE_RE = re.compile(
+    r"^\s*(?:Prof\.?\s+|Dr\.?\s+|Eng\.?\s+|Instructor:?\s+|Ass(?:t\.?\s+|ociate\s+)Prof\.?\s+)?"
+    r"[A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){1,4}"  # 2-5 capitalised name words
+    r"(?:\s+[\[\(][^\]\)]{0,60}[\]\)])?"              # optional [email] or (role)
+    r"\s*$",
+    re.MULTILINE,
+)
+# Lines that look like "Course: SWE412" or "Section: A2" or "By: Name"
+_HEADER_LABEL_LINE_RE = re.compile(
+    r"^\s*(?:course|section|semester|by|prepared\s+by|submitted\s+by"
+    r"|instructor|student|id|date|year|group)\s*:\s*.{0,80}\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def deep_clean_quiz_text(text: str) -> str:
+    """
+    Remove structural and semantic noise from extracted PDF/PPTX text while
+    PRESERVING newlines so line-aware engines can still detect headings and lists.
+
+    Removes:
+      - Email addresses and mailto: links
+      - URLs
+      - Page / slide number lines
+      - Table-of-contents lines and dotted-leader entries
+      - Person-name-only lines (author, instructor headers)
+      - Metadata label lines (Course:, By:, Date:, etc.)
+      - Isolated noise tokens: "Contents", "What?", "Index"
+    """
+    if not text:
+        return ""
+
+    t = text
+
+    # Inline substitutions (apply before line filtering)
+    t = _MAILTO_LINK_RE.sub(" ", t)
+    t = _EMAIL_RE.sub(" ", t)
+    t = _URL_RE.sub(" ", t)
+    t = _TOC_ENTRY_RE.sub("", t)     # remove dotted ToC entries first
+
+    # Line-level filtering
+    cleaned_lines: list[str] = []
+    for line in t.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            cleaned_lines.append("")
+            continue
+
+        # After email/URL removal a line may become very short or just noise —
+        # skip lines whose ALPHABETIC content is < 25 chars (not a real sentence)
+        alpha_content = re.sub(r"[^A-Za-z\s]", "", stripped).strip()
+        if len(alpha_content) < 25:
+            continue
+
+        # Skip page/slide numbers
+        if _PAGE_NUM_LINE_RE.match(stripped):
+            continue
+        # Skip pure ToC noise lines
+        if _TOC_NOISE_LINE_RE.match(stripped):
+            continue
+        # Skip name-only lines (handle hyphenated surnames too)
+        _stripped_for_name = re.sub(r"[\[\(][^\]\)]{0,60}[\]\)]", "", stripped).strip()
+        if _NAME_ONLY_LINE_RE.match(_stripped_for_name) and len(_stripped_for_name.split()) <= 6:
+            continue
+        # Also catch lines that are 1-4 capitalised words only (names without salutation)
+        name_words = _stripped_for_name.split()
+        if (1 <= len(name_words) <= 5
+                and all(re.match(r"[A-Z][a-z\-]{1,}", w) for w in name_words)):
+            continue
+        # Skip metadata header lines
+        if _HEADER_LABEL_LINE_RE.match(stripped):
+            continue
+        # Skip lines that are purely a course code
+        if re.match(r"^[A-Z]{2,6}\d{3,4}(?:[-/]\w+)?\s*$", stripped):
+            continue
+        # Skip lines that are "What?" or "Contents" after the above patterns
+        if re.match(r"^(?:what\??|contents?\??|this\??)$", stripped, re.I):
+            continue
+        cleaned_lines.append(line)
+
+    t = "\n".join(cleaned_lines)
+    # Collapse 3+ consecutive blank lines to at most 2
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
 
 
 def reason_message(code: Optional[str]) -> Optional[str]:
