@@ -144,7 +144,7 @@ def generate_quiz(
             },
         )
 
-    questions, engine = quiz_gen.generate_questions(text, num_questions=8)
+    questions, engine = quiz_gen.generate_questions(text, num_questions=5)
 
     if not questions:
         detail = {

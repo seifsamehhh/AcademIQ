@@ -11,6 +11,7 @@ venv), these can be swapped for real model output / `ml_results`.
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from app.config.database import (
@@ -33,6 +34,78 @@ logger = logging.getLogger(__name__)
 
 _OVERALL = metrics_repository.OVERALL
 MIN_QUIZ_CONTENT_CHARS = 200
+
+# ── Non-quiz material detection ──────────────────────────────────────────────
+# Moodle activity types that are never educational reading content.
+_NON_QUIZ_ACTIVITY_TYPES: frozenset[str] = frozenset({
+    "folder", "assign", "forum", "quiz", "url", "choice",
+    "feedback", "survey", "chat", "glossary", "wiki", "workshop",
+    "scorm", "lti", "attendance",
+})
+
+# Spreadsheet/data-export extensions that are almost always grades or admin data.
+_NON_QUIZ_FILE_EXTENSIONS: frozenset[str] = frozenset({
+    "xlsx", "xls", "csv", "ods",
+})
+
+# Title keywords that clearly indicate grades / admin content, not lecture material.
+_NON_QUIZ_TITLE_RE = re.compile(
+    r"\b(?:"
+    r"grade[sd]?|grading|mark[sd]?|marking"
+    r"|attendance|absent(?:ee)?"
+    r"|final\s+(?:mark[sd]?|grade[sd]?|score[sd]?)"
+    r"|score\s+sheet|grade\s+sheet|mark\s+sheet|grade\s+book|mark\s+book"
+    r"|submission\s+(?:report|status|list)"
+    r"|student\s+(?:list|roster|record[sd]?)"
+    r"|project\s+(?:criteria|rubric)"
+    r"|exam\s+(?:schedule|timetable)"
+    r")\b",
+    re.I,
+)
+
+# Mapping of activity type → human-readable reason
+_ACTIVITY_TYPE_REASON: Dict[str, str] = {
+    "folder": "Moodle folder (container, not readable content)",
+    "assign": "Assignment activity (task, not lecture material)",
+    "forum": "Discussion forum",
+    "quiz": "Moodle quiz activity",
+    "url": "External URL link",
+    "choice": "Poll / choice activity",
+    "feedback": "Feedback activity",
+    "survey": "Survey activity",
+    "chat": "Chat activity",
+    "glossary": "Glossary activity",
+    "wiki": "Wiki activity",
+    "workshop": "Workshop activity",
+    "scorm": "SCORM package",
+    "lti": "External tool (LTI)",
+    "attendance": "Attendance activity",
+}
+
+
+def _classify_non_quiz_material(
+    title: str, file_type: str
+) -> tuple[bool, str | None]:
+    """
+    Return (is_non_quiz_material, reason_string).
+
+    Checks Moodle activity types, spreadsheet extensions, and title keywords
+    that indicate grades, marks, attendance, or admin-only content.
+    """
+    ft = (file_type or "").lower().strip()
+
+    if ft in _NON_QUIZ_ACTIVITY_TYPES:
+        reason = _ACTIVITY_TYPE_REASON.get(ft, f"Moodle activity: {ft}")
+        return True, reason
+
+    if ft in _NON_QUIZ_FILE_EXTENSIONS:
+        return True, f"Spreadsheet file (.{ft}) — likely grades or data export"
+
+    if _NON_QUIZ_TITLE_RE.search(title or ""):
+        return True, "File name suggests grades, marks, or attendance data"
+
+    return False, None
+
 
 # Minimal recommendation text per heuristic risk factor (mirrors the v4 map).
 _RISK_LIBRARY = [
@@ -401,26 +474,47 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
         doc_name = _clean_course_name(doc.get("course_name"))
         if apply_demo_name_filter and enrolled_name and doc_name and doc_name != enrolled_name:
             continue
+
+        title = doc.get("title") or "Untitled"
+        raw_file_type = (doc.get("file_type") or doc.get("category") or "file")
         content = (doc.get("content_text") or "").strip()
         extraction_status = doc.get("extraction_status") or ""
 
+        # ── Step 1: check if this is non-educational material ──────────────
+        is_non_quiz, non_quiz_reason = _classify_non_quiz_material(title, raw_file_type)
+        if is_non_quiz:
+            out.append({
+                "id": str(doc.get("material_id") or ""),
+                "title": title,
+                "kind": raw_file_type.upper(),
+                "hasContent": False,
+                "readyForQuiz": False,
+                "source": _material_source(doc),
+                "contentNote": non_quiz_reason,
+                "extractionStatus": extraction_status or None,
+                "quizStatus": "not_quiz_material",
+                "quizStatusReason": non_quiz_reason,
+            })
+            continue
+
+        # ── Step 2: determine readiness and status for educational materials ──
         if extraction_status == "extraction_failed":
-            # Truly failed extraction (corrupted/scanned/image-only file)
             quiz_ready = False
+            quiz_status = "extraction_failed"
             content_note = (
                 doc.get("extraction_error")
                 or "No readable text could be extracted. Try re-uploading a text-based PDF."
             )
         elif not content:
-            # No content_text stored yet — material listed from Moodle but not uploaded
             quiz_ready = False
+            quiz_status = "not_uploaded"
             content_note = (
                 "No readable text extracted yet. "
                 "Use the Chrome extension → 'Upload materials for quiz' on the Moodle course page."
             )
         elif len(content) < MIN_QUIZ_CONTENT_CHARS:
-            # Extracted text exists but is too short for quiz generation
             quiz_ready = False
+            quiz_status = "too_short"
             content_note = (
                 f"Only {len(content)} characters extracted "
                 f"(need at least {MIN_QUIZ_CONTENT_CHARS}). "
@@ -428,19 +522,22 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             )
         else:
             # Any material with sufficient extracted text is selectable.
-            # The quiz generator's four-engine pipeline (light → lecture → heavy →
-            # fragment) handles definition, lecture, lab, PPTX, and bullet-style content.
+            # The four-engine pipeline handles definition, lecture, lab, PPTX content.
             quiz_ready = True
+            quiz_status = "ready"
             content_note = None
+
         out.append({
             "id": str(doc.get("material_id") or ""),
-            "title": doc.get("title", "Untitled"),
-            "kind": (doc.get("file_type") or doc.get("category") or "file").upper(),
+            "title": title,
+            "kind": raw_file_type.upper(),
             "hasContent": quiz_ready,
             "readyForQuiz": bool(doc.get("ready_for_quiz", quiz_ready)),
             "source": _material_source(doc),
             "contentNote": content_note,
-            "extractionStatus": doc.get("extraction_status"),
+            "extractionStatus": extraction_status or None,
+            "quizStatus": quiz_status,
+            "quizStatusReason": content_note,
         })
     return out
 

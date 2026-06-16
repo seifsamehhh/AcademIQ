@@ -137,6 +137,21 @@ def debug_user_data(email: str):
     return summarize_user_by_email(email)
 
 
+@app.get("/debug/course-material-coverage/{email}")
+def debug_course_material_coverage(email: str):
+    """
+    Account-level quiz material coverage across ALL synced Moodle courses.
+    Shows per-course status counts (ready / not_uploaded / not_quiz_material /
+    extraction_failed / too_short) and per-material details.
+    No content_text, passwords, tokens, or connection strings.
+    """
+    from app.services.quiz_materials_debug import debug_course_material_coverage as _coverage
+
+    if not connect_database():
+        raise HTTPException(status_code=503, detail="Database unreachable")
+    return _coverage(email)
+
+
 @app.get("/debug/quiz-materials/{email}/{course_id}")
 def debug_quiz_materials(email: str, course_id: str):
     """

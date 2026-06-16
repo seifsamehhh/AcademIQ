@@ -11,6 +11,27 @@ interface MaterialSelectProps {
   onToggle: (id: string) => void;
 }
 
+/** Map backend quizStatus → { label, variant } */
+function statusBadge(material: LearningMaterial): { label: string; variant: "default" | "muted" | "destructive" | "warning" } {
+  switch (material.quizStatus) {
+    case "ready":
+      return { label: "Ready for quiz", variant: "default" };
+    case "not_uploaded":
+      return { label: "Not uploaded yet", variant: "muted" };
+    case "extraction_failed":
+      return { label: "Extraction failed", variant: "destructive" };
+    case "too_short":
+      return { label: "Too little content", variant: "warning" };
+    case "not_quiz_material":
+      return { label: "Not quiz material", variant: "muted" };
+    default:
+      // Fallback for older API responses that don't include quizStatus
+      if (material.hasContent) return { label: "Ready for quiz", variant: "default" };
+      if (material.contentNote?.startsWith("No readable text")) return { label: "Not uploaded yet", variant: "muted" };
+      return { label: "Content unavailable", variant: "muted" };
+  }
+}
+
 export function MaterialSelect({
   materials,
   selectedIds,
@@ -20,8 +41,10 @@ export function MaterialSelect({
     <Card>
       <CardHeader>
         <CardTitle>Select Learning Materials</CardTitle>
-              <CardDescription>
-          Materials with extracted text are selectable. Works with lectures, labs, revisions, slides, and any uploaded PDF or PPTX.
+        <CardDescription>
+          Materials with extracted text are selectable. Works with lectures, labs,
+          revisions, slides, and any uploaded PDF or PPTX. Grades files and Moodle
+          activity types are shown but cannot be used for quiz generation.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
@@ -33,6 +56,8 @@ export function MaterialSelect({
           materials.map((material) => {
             const selectable = material.hasContent;
             const checked = selectedIds.includes(material.id);
+            const { label: statusLabel, variant: statusVariant } = statusBadge(material);
+
             return (
               <label
                 key={material.id}
@@ -54,22 +79,17 @@ export function MaterialSelect({
                 <span className="flex-1 text-sm font-medium text-foreground">
                   {material.title}
                 </span>
-                {selectable ? (
-                  <Badge variant="default">Ready for quiz</Badge>
-                ) : (
-                  <Badge variant="muted">
-                    {material.contentNote?.startsWith("No readable text")
-                      ? "Not uploaded yet"
-                      : "Content unavailable"}
-                  </Badge>
-                )}
+
+                <Badge variant={statusVariant}>{statusLabel}</Badge>
+
                 {material.source === "moodle_sync" ? (
                   <Badge variant="muted">Moodle</Badge>
                 ) : null}
                 <Badge variant="muted">{material.kind}</Badge>
-                {!selectable && material.contentNote ? (
+
+                {!selectable && (material.contentNote || material.quizStatusReason) ? (
                   <p className="w-full basis-full pl-9 text-xs text-muted-foreground">
-                    {material.contentNote}
+                    {material.quizStatusReason || material.contentNote}
                   </p>
                 ) : null}
               </label>

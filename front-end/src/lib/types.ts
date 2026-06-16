@@ -231,6 +231,17 @@ export interface LearningMaterial {
   hasContent?: boolean;
   source?: "moodle_sync" | "seeded" | string;
   contentNote?: string | null;
+  extractionStatus?: string | null;
+  /**
+   * Granular quiz-readiness classification:
+   *   "ready"             — selectable, has extracted text
+   *   "not_uploaded"      — listed from Moodle but not processed yet
+   *   "extraction_failed" — text extraction failed
+   *   "too_short"         — extracted text below minimum threshold
+   *   "not_quiz_material" — grades / admin / forum / folder type
+   */
+  quizStatus?: "ready" | "not_uploaded" | "extraction_failed" | "too_short" | "not_quiz_material" | string;
+  quizStatusReason?: string | null;
 }
 
 export interface QuizQuestion {
