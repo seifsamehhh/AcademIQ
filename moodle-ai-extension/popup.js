@@ -496,28 +496,91 @@ const uploadPickedFiles = async (files, courseId, identity) => {
     return results;
 };
 
+const formatQuizUploadSummary = ({
+    courseId,
+    courseName,
+    uploaded,
+    ready,
+    failed,
+    total,
+    endpoint,
+    extra = ""
+}) => {
+    const parts = [
+        `Course ${courseId}${courseName ? ` · ${courseName}` : ""}`,
+        `Uploaded ${uploaded}/${total}`,
+        `Ready ${ready}`,
+        `Failed ${failed}`,
+        `API ${endpoint || UPLOAD_QUIZ_URL}`
+    ];
+    if (extra) parts.push(extra);
+    parts.push("Open Quiz Generation for the same course in AcademIQ.");
+    return parts.join(" · ");
+};
+
+const syncPopupCourseToTab = async () => {
+    const scrape = await scrapeCurrentCourseOnActiveTab();
+    if (scrape.status !== "done" || !scrape.course?.course_id) {
+        return {
+            ok: false,
+            error: scrape.error || "Open a Moodle course page in the active tab first."
+        };
+    }
+    const tabId = String(scrape.course.course_id);
+    const tabName = scrape.course.course_name || null;
+    if (currentCourseId !== tabId) {
+        currentCourseId = tabId;
+        if (refs.courseSelector.querySelector(`option[value="${tabId}"]`)) {
+            refs.courseSelector.value = tabId;
+        }
+        renderDashboard();
+    }
+    return { ok: true, courseId: tabId, courseName: tabName };
+};
+
 const runQuizMaterialUpload = async () => {
     const btn = refs.uploadQuizBtn;
-    const courseId = currentCourseId;
-    if (!courseId) {
+    if (!currentCourseId) {
         refs.uploadMeta.textContent = "Select a course first.";
         return;
     }
 
     btn.disabled = true;
-    refs.uploadMeta.textContent = "Scanning Moodle course page and uploading materials...";
+    refs.uploadMeta.textContent = "Aligning with active Moodle tab...";
+
+    const tabSync = await syncPopupCourseToTab();
+    if (!tabSync.ok) {
+        refs.uploadMeta.textContent = tabSync.error;
+        btn.disabled = false;
+        return;
+    }
+
+    const courseId = tabSync.courseId;
+    const courseName = tabSync.courseName;
+    refs.uploadMeta.textContent = `Uploading materials for course ${courseId}...`;
 
     const identity = currentData?.student || {};
     let uploaded = 0;
     let ready = 0;
+    let failed = 0;
     let total = 0;
+    let endpoint = UPLOAD_QUIZ_URL;
 
     const tabResult = await uploadMaterialsOnActiveTab(courseId);
     if (tabResult.status === "done") {
         uploaded = tabResult.uploaded || 0;
         ready = tabResult.ready || 0;
+        failed = tabResult.failed ?? Math.max(0, (tabResult.total || 0) - uploaded);
         total = tabResult.total || 0;
+        endpoint = tabResult.backend_endpoint || endpoint;
         await refreshData();
+    } else if (tabResult.tab_course_id && String(tabResult.tab_course_id) !== String(courseId)) {
+        refs.uploadMeta.textContent =
+            tabResult.error ||
+            `Course mismatch: tab is ${tabResult.tab_course_id}, dropdown is ${courseId}.`;
+        btn.disabled = false;
+        btn.textContent = "Upload materials for quiz";
+        return;
     } else {
         const stored = getCourseMaterials(currentData, courseId).filter(isQuizUploadableMaterial);
         if (stored.length) {
@@ -527,9 +590,10 @@ const runQuizMaterialUpload = async () => {
                 try {
                     const result = await uploadStoredMaterial(stored[i], identity);
                     if (result.ok) uploaded += 1;
+                    else failed += 1;
                     if (result.ready_for_quiz) ready += 1;
                 } catch (_error) {
-                    /* skip */
+                    failed += 1;
                 }
             }
             total = stored.length;
@@ -545,8 +609,15 @@ const runQuizMaterialUpload = async () => {
 
     btn.textContent = "Upload materials for quiz";
     btn.disabled = false;
-    refs.uploadMeta.textContent =
-        `Uploaded ${uploaded}/${total} to AcademIQ · ${ready} ready for quiz. Open Quiz Generation in AcademIQ to verify.`;
+    refs.uploadMeta.textContent = formatQuizUploadSummary({
+        courseId,
+        courseName: tabResult.course_name || courseName,
+        uploaded,
+        ready,
+        failed,
+        total,
+        endpoint
+    });
 };
 
 const bindQuizUploadControls = () => {
@@ -568,9 +639,18 @@ const bindQuizUploadControls = () => {
         const results = await uploadPickedFiles(files, currentCourseId, identity);
         const uploaded = results.filter((row) => row.ok).length;
         const ready = results.filter((row) => row.ready_for_quiz).length;
+        const failed = results.length - uploaded;
         refs.uploadQuizBtn.disabled = false;
-        refs.uploadMeta.textContent =
-            `Manual upload: ${uploaded}/${files.length} stored · ${ready} ready for quiz.`;
+        refs.uploadMeta.textContent = formatQuizUploadSummary({
+            courseId: currentCourseId,
+            courseName: currentData?.metricsByCourse?.[currentCourseId]?.course_name,
+            uploaded,
+            ready,
+            failed,
+            total: files.length,
+            endpoint: UPLOAD_QUIZ_URL,
+            extra: "Manual file picker"
+        });
     });
 };
 

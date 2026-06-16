@@ -872,16 +872,25 @@
 
     const uploadMaterialsForQuiz = async (backendUploadUrl, courseId) => {
         const course = getCourseContext();
-        const targetCourseId = courseId || course.course_id;
-        if (!targetCourseId) {
+        const tabCourseId = course.course_id;
+        if (!tabCourseId) {
             return { status: "error", error: "Open a Moodle course page first." };
         }
-        const courseCtx =
-            String(course.course_id) === String(targetCourseId)
-                ? course
-                : { course_id: targetCourseId, course_name: `Course ${targetCourseId}` };
+        if (courseId && String(courseId) !== String(tabCourseId)) {
+            return {
+                status: "error",
+                error:
+                    `Course mismatch: dropdown selected ${courseId} but the active Moodle tab is ` +
+                    `${tabCourseId} (${course.course_name || "unknown"}). ` +
+                    "Open the matching Moodle course page or change the dropdown course.",
+                requested_course_id: courseId,
+                tab_course_id: tabCourseId,
+                tab_course_name: course.course_name,
+                backend_endpoint: backendUploadUrl
+            };
+        }
 
-        let materials = await extractMaterialsFromCourse(courseCtx);
+        let materials = await extractMaterialsFromCourse(course);
         materials = materials.filter(isQuizUploadableMaterial);
         if (materials.length) {
             sendMessage("materials", materials);
@@ -892,11 +901,16 @@
         for (const material of materials) {
             results.push(await uploadMaterialToBackend(backendUploadUrl, material, identity));
         }
+        const uploaded = results.filter((row) => row.ok).length;
+        const ready = results.filter((row) => row.ready_for_quiz).length;
         return {
             status: "done",
-            course_id: targetCourseId,
-            uploaded: results.filter((row) => row.ok).length,
-            ready: results.filter((row) => row.ready_for_quiz).length,
+            course_id: String(tabCourseId),
+            course_name: course.course_name,
+            backend_endpoint: backendUploadUrl,
+            uploaded,
+            ready,
+            failed: results.length - uploaded,
             total: materials.length,
             results
         };

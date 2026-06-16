@@ -5,12 +5,34 @@ Handle Moodle material uploads from the Chrome extension for quiz generation.
 from __future__ import annotations
 
 import base64
+import re
 from typing import Any, Dict, Optional
 
 from app.models.material import build_material_doc, stable_material_id
 from app.repositories import material_repository, user_repository
 from app.services.material_text_extract import extract_text_from_bytes
 from app.services.student_data import MIN_QUIZ_CONTENT_CHARS
+
+
+def _material_id_from_url(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return None
+    match = re.search(r"[?&](?:id|cmid)=(\d+)", url, re.I)
+    return match.group(1) if match else None
+
+
+def _resolve_material_id(
+    course_id: str, material_id: str, source_url: Optional[str]
+) -> str:
+    """Align upload key with Moodle sync rows (cmid from URL, then URL lookup)."""
+    url_id = _material_id_from_url(source_url)
+    if url_id:
+        material_id = url_id
+    if source_url:
+        existing = material_repository.find_by_course_and_url(course_id, source_url)
+        if existing and existing.get("material_id"):
+            material_id = str(existing["material_id"])
+    return str(material_id).strip()
 
 
 def _decode_payload_bytes(payload: Dict[str, Any]) -> tuple[bytes, Optional[str]]:
@@ -30,9 +52,11 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     Accepts either content_base64 (file bytes) or content_text (pre-extracted).
     """
     course_id = str(payload.get("course_id") or "").strip()
-    material_id = str(
+    raw_material_id = str(
         payload.get("material_id") or payload.get("id") or stable_material_id(payload) or ""
     ).strip()
+    source_url = payload.get("source_url") or payload.get("url")
+    material_id = _resolve_material_id(course_id, raw_material_id, source_url)
     if not course_id or not material_id:
         raise ValueError("course_id and material_id are required")
 
@@ -40,7 +64,6 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     course_name = payload.get("course_name")
     material_type = payload.get("material_type") or payload.get("type")
     file_type = payload.get("file_type") or payload.get("fileType") or "unknown"
-    source_url = payload.get("source_url") or payload.get("url")
     content_type = payload.get("content_type") or ""
 
     user_email = (payload.get("user_email") or payload.get("email") or "").strip().lower()
@@ -138,6 +161,7 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         "status": "stored",
         "course_id": course_id,
         "material_id": material_id,
+        "resolved_from_material_id": raw_material_id if raw_material_id != material_id else None,
         "title": title,
         "chars": chars,
         "ready_for_quiz": ready_for_quiz,

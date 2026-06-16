@@ -137,6 +137,19 @@ def debug_user_data(email: str):
     return summarize_user_by_email(email)
 
 
+@app.get("/debug/quiz-materials/{email}/{course_id}")
+def debug_quiz_materials(email: str, course_id: str):
+    """
+    Safe quiz-material readiness diagnostics for a user + course.
+    No passwords, tokens, connection strings, or full content_text bodies.
+    """
+    from app.services.quiz_materials_debug import debug_quiz_materials_for_email
+
+    if not connect_database():
+        raise HTTPException(status_code=503, detail="Database unreachable")
+    return debug_quiz_materials_for_email(email, course_id)
+
+
 @app.get("/debug/synced-courses/{email}")
 def debug_synced_courses(email: str):
     """

@@ -407,7 +407,7 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             quiz_ready = False
             content_note = doc.get("extraction_error") or content_note
         out.append({
-            "id": doc.get("material_id"),
+            "id": str(doc.get("material_id") or ""),
             "title": doc.get("title", "Untitled"),
             "kind": (doc.get("file_type") or doc.get("category") or "file").upper(),
             "hasContent": quiz_ready,

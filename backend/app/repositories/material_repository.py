@@ -56,6 +56,20 @@ def get(course_id: str, material_id: str) -> Optional[Dict[str, Any]]:
     )
 
 
+def find_by_course_and_url(course_id: str, url: str) -> Optional[Dict[str, Any]]:
+    """Find an existing material row by Moodle activity or file URL."""
+    if not url:
+        return None
+    cid = str(course_id)
+    normalized = url.strip()
+    doc = course_materials_collection.find_one({"course_id": cid, "url": normalized})
+    if doc:
+        return doc
+    return course_materials_collection.find_one(
+        {"course_id": cid, "resolved_url": normalized}
+    )
+
+
 def set_content(course_id: str, material_id: str, text: str) -> bool:
     """Store extracted text for a material (used for quiz generation)."""
     result = course_materials_collection.update_one(
