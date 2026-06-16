@@ -503,16 +503,27 @@ const formatQuizUploadSummary = ({
     ready,
     failed,
     total,
+    skippedExisting = 0,
+    alreadyReady = 0,
+    alreadyClassified = 0,
     endpoint,
     extra = ""
 }) => {
     const parts = [
         `Course ${courseId}${courseName ? ` · ${courseName}` : ""}`,
-        `Uploaded ${uploaded}/${total}`,
-        `Ready ${ready}`,
-        `Failed ${failed}`,
-        `API ${endpoint || UPLOAD_QUIZ_URL}`
+        `Uploaded ${uploaded}/${total}`
     ];
+    if (skippedExisting > 0) {
+        const detail = [];
+        if (alreadyReady > 0) detail.push(`${alreadyReady} already ready`);
+        if (alreadyClassified > 0) detail.push(`${alreadyClassified} non-quiz`);
+        const rest = skippedExisting - alreadyReady - alreadyClassified;
+        if (rest > 0) detail.push(`${rest} other`);
+        parts.push(`Skipped ${skippedExisting}${detail.length ? ` (${detail.join(", ")})` : ""}`);
+    }
+    parts.push(`Ready ${ready}`);
+    if (failed > 0) parts.push(`Failed ${failed}`);
+    parts.push(`API ${endpoint || UPLOAD_QUIZ_URL}`);
     if (extra) parts.push(extra);
     parts.push("Open Quiz Generation for the same course in AcademIQ.");
     return parts.join(" · ");
@@ -573,7 +584,26 @@ const runQuizMaterialUpload = async () => {
         failed = tabResult.failed ?? Math.max(0, (tabResult.total || 0) - uploaded);
         total = tabResult.total || 0;
         endpoint = tabResult.backend_endpoint || endpoint;
+        // Caching summary fields from preflight
+        const skippedExisting = tabResult.skipped_existing || 0;
+        const alreadyReady = tabResult.already_ready || 0;
+        const alreadyClassified = tabResult.already_classified || 0;
         await refreshData();
+        btn.textContent = "Upload materials for quiz";
+        btn.disabled = false;
+        refs.uploadMeta.textContent = formatQuizUploadSummary({
+            courseId,
+            courseName: tabResult.course_name || courseName,
+            uploaded,
+            ready,
+            failed,
+            total,
+            skippedExisting,
+            alreadyReady,
+            alreadyClassified,
+            endpoint
+        });
+        return;
     } else if (tabResult.tab_course_id && String(tabResult.tab_course_id) !== String(courseId)) {
         refs.uploadMeta.textContent =
             tabResult.error ||

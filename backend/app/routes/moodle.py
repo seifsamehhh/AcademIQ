@@ -5,7 +5,7 @@ from typing import Dict, Any
 
 from app.config.database import raw_moodle_payload_collection, feature_vectors_collection
 from app.schema.schemas import list_raw_moodle_payload_serial
-from app.services.material_quiz_upload import process_material_upload_for_quiz
+from app.services.material_quiz_upload import process_material_upload_for_quiz, preflight_materials
 from app.services.preprocessing import compute_features
 from app.services.moodle_ingest import normalize_payload, slim_payload
 from app.services.user_provisioning import (
@@ -37,6 +37,36 @@ async def upload_material_for_quiz(payload: Dict[str, Any]):
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Upload failed: {exc}")
+
+
+@router.post("/materials/preflight")
+async def preflight_material_upload(payload: Dict[str, Any]):
+    """
+    Check which materials need uploading without downloading any file bytes.
+
+    The Chrome extension calls this BEFORE fetching files from Moodle.
+    Only materials where ``should_upload: true`` in the response need to be
+    downloaded and sent to /materials/upload-for-quiz.
+
+    Body:
+      {
+        course_id,
+        user_email?,            # optional, for future per-user filtering
+        force_reupload?: bool,  # re-check even extraction_failed materials
+        materials: [
+          { material_id, title, source_url?, file_type }
+        ]
+      }
+
+    Returns per material:
+      should_upload, status, reason, content_text_length
+    """
+    try:
+        return preflight_materials(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Preflight failed: {exc}")
 
 
 @router.post("/materials/content")

@@ -6,12 +6,147 @@ from __future__ import annotations
 
 import base64
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from app.models.material import build_material_doc, stable_material_id
 from app.repositories import material_repository, user_repository
 from app.services.material_text_extract import extract_text_from_bytes
 from app.services.student_data import MIN_QUIZ_CONTENT_CHARS, _classify_non_quiz_material
+
+
+def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Pre-upload check: return which materials need uploading without downloading files.
+
+    The extension calls this BEFORE fetching any file bytes.  For every item in
+    the request list we check:
+      1. Is the title/type a known non-quiz material? → skip immediately.
+      2. Does MongoDB already have enough extracted text? → skip (already ready).
+      3. Did a previous extraction fail?  → skip (don't retry unless forced).
+      4. Otherwise → should_upload: true.
+
+    Returns per-material: should_upload, status, reason, content_text_length.
+    """
+    course_id = str(payload.get("course_id") or "").strip()
+    materials_in = payload.get("materials") or []
+
+    if not course_id:
+        raise ValueError("course_id required")
+
+    results: List[Dict[str, Any]] = []
+
+    for item in materials_in:
+        title = (item.get("title") or "Untitled").strip()
+        raw_file_type = str(item.get("file_type") or item.get("fileType") or "unknown")
+        source_url = str(item.get("source_url") or item.get("url") or "").strip()
+        raw_material_id = str(
+            item.get("material_id") or item.get("id") or stable_material_id(item) or ""
+        ).strip()
+
+        # Align material_id with Moodle cmid extracted from URL
+        material_id = _resolve_material_id(course_id, raw_material_id, source_url)
+
+        # ── 1. Non-quiz classification ─────────────────────────────────────────
+        is_non_quiz, non_quiz_reason = _classify_non_quiz_material(title, raw_file_type)
+        if is_non_quiz:
+            results.append({
+                "material_id": material_id,
+                "title": title,
+                "should_upload": False,
+                "status": "not_quiz_material",
+                "reason": non_quiz_reason,
+                "content_text_length": 0,
+            })
+            continue
+
+        # ── 2. Check existing DB record (by ID, then by URL) ──────────────────
+        existing_doc = material_repository.get(course_id, material_id)
+        if not existing_doc and source_url:
+            existing_doc = material_repository.find_by_course_and_url(course_id, source_url)
+
+        if existing_doc:
+            existing_status = existing_doc.get("extraction_status") or ""
+            existing_text = (existing_doc.get("content_text") or "").strip()
+            existing_chars = (
+                len(existing_text)
+                if existing_text
+                else (existing_doc.get("content_chars") or 0)
+            )
+
+            if existing_status == "not_quiz_material":
+                results.append({
+                    "material_id": material_id,
+                    "title": title,
+                    "should_upload": False,
+                    "status": "not_quiz_material",
+                    "reason": existing_doc.get("extraction_error") or "Classified as non-quiz material",
+                    "content_text_length": 0,
+                })
+            elif existing_chars >= MIN_QUIZ_CONTENT_CHARS:
+                results.append({
+                    "material_id": material_id,
+                    "title": title,
+                    "should_upload": False,
+                    "status": "ready",
+                    "reason": f"Already has {existing_chars} characters of extracted text",
+                    "content_text_length": existing_chars,
+                })
+            elif existing_status == "extraction_failed":
+                # Don't retry a failed extraction unless force_reupload is set
+                force = bool(payload.get("force_reupload"))
+                results.append({
+                    "material_id": material_id,
+                    "title": title,
+                    "should_upload": force,
+                    "status": "extraction_failed",
+                    "reason": existing_doc.get("extraction_error") or "Extraction previously failed",
+                    "content_text_length": existing_chars,
+                })
+            elif existing_chars > 0:
+                # Some text extracted but below threshold
+                results.append({
+                    "material_id": material_id,
+                    "title": title,
+                    "should_upload": False,
+                    "status": "too_short",
+                    "reason": f"Only {existing_chars} chars extracted (need ≥{MIN_QUIZ_CONTENT_CHARS})",
+                    "content_text_length": existing_chars,
+                })
+            else:
+                # Record exists but no content — try uploading
+                results.append({
+                    "material_id": material_id,
+                    "title": title,
+                    "should_upload": True,
+                    "status": "not_uploaded",
+                    "reason": "Record exists but no extracted text yet",
+                    "content_text_length": 0,
+                })
+        else:
+            # No DB record at all — full upload needed
+            results.append({
+                "material_id": material_id,
+                "title": title,
+                "should_upload": True,
+                "status": "not_uploaded",
+                "reason": "Not yet uploaded",
+                "content_text_length": 0,
+            })
+
+    should_upload_count = sum(1 for r in results if r["should_upload"])
+    skip_count = len(results) - should_upload_count
+    status_summary: Dict[str, int] = {}
+    for r in results:
+        status_summary[r["status"]] = status_summary.get(r["status"], 0) + 1
+
+    return {
+        "course_id": course_id,
+        "total": len(results),
+        "should_upload_count": should_upload_count,
+        "skip_count": skip_count,
+        "status_summary": status_summary,
+        "materials": results,
+    }
 
 
 def _material_id_from_url(url: Optional[str]) -> Optional[str]:

@@ -870,6 +870,39 @@
         };
     };
 
+    // Build the preflight URL from the upload URL by replacing the endpoint path.
+    const buildPreflightUrl = (backendUploadUrl) =>
+        backendUploadUrl.replace(/\/materials\/upload-for-quiz\/?$/, "/materials/preflight");
+
+    // Ask the backend which materials still need uploading (no file bytes sent).
+    // Returns a Map<material_id → preflight_item> or null if the endpoint is
+    // unreachable (safe fallback: upload everything).
+    const callPreflight = async (backendUploadUrl, courseId, materials, identity) => {
+        const preflightUrl = buildPreflightUrl(backendUploadUrl);
+        const body = {
+            course_id: String(courseId),
+            user_email: identity?.email || null,
+            materials: materials.map((m) => ({
+                material_id: m.material_id || m.id,
+                title: m.title,
+                source_url: m.resolvedUrl || m.url || null,
+                file_type: m.file_type || m.fileType || "unknown"
+            }))
+        };
+        try {
+            const res = await fetch(preflightUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            });
+            if (!res.ok) return null;
+            return await res.json();
+        } catch (_err) {
+            // Preflight unavailable — safe fallback: upload everything
+            return null;
+        }
+    };
+
     const uploadMaterialsForQuiz = async (backendUploadUrl, courseId) => {
         const course = getCourseContext();
         const tabCourseId = course.course_id;
@@ -890,28 +923,85 @@
             };
         }
 
-        let materials = await extractMaterialsFromCourse(course);
-        materials = materials.filter(isQuizUploadableMaterial);
-        if (materials.length) {
-            sendMessage("materials", materials);
+        // ── 1. Detect all materials on this course page ───────────────────────
+        let allMaterials = await extractMaterialsFromCourse(course);
+        if (allMaterials.length) {
+            sendMessage("materials", allMaterials);
         }
 
+        // Filter to uploadable file types only
+        let uploadable = allMaterials.filter(isQuizUploadableMaterial);
+
         const identity = getStudentIdentity();
+        const detected = allMaterials.length;
+
+        // ── 2. Preflight: ask backend which materials need uploading ──────────
+        let skippedExisting = 0;
+        let alreadyReady = 0;
+        let alreadyClassified = 0;
+        let skippedExtractionFailed = 0;
+        let tooShort = 0;
+
+        const preflightResult = await callPreflight(
+            backendUploadUrl, tabCourseId, uploadable, identity
+        );
+
+        if (preflightResult?.materials) {
+            const shouldUploadIds = new Set();
+            for (const item of preflightResult.materials) {
+                if (item.should_upload) {
+                    shouldUploadIds.add(String(item.material_id));
+                } else {
+                    // Tally skip reasons for the summary
+                    if (item.status === "ready") {
+                        alreadyReady += 1;
+                        skippedExisting += 1;
+                    } else if (item.status === "not_quiz_material") {
+                        alreadyClassified += 1;
+                        skippedExisting += 1;
+                    } else if (item.status === "extraction_failed") {
+                        skippedExtractionFailed += 1;
+                        skippedExisting += 1;
+                    } else if (item.status === "too_short") {
+                        tooShort += 1;
+                        skippedExisting += 1;
+                    } else {
+                        skippedExisting += 1;
+                    }
+                }
+            }
+            // Only download materials that are not already processed
+            uploadable = uploadable.filter(
+                (m) => shouldUploadIds.has(String(m.material_id || m.id))
+            );
+        }
+
+        // ── 3. Download + upload only the materials that need it ──────────────
         const results = [];
-        for (const material of materials) {
+        for (const material of uploadable) {
             results.push(await uploadMaterialToBackend(backendUploadUrl, material, identity));
         }
+
         const uploaded = results.filter((row) => row.ok).length;
         const ready = results.filter((row) => row.ready_for_quiz).length;
+        const failed = results.length - uploaded;
+
         return {
             status: "done",
             course_id: String(tabCourseId),
             course_name: course.course_name,
             backend_endpoint: backendUploadUrl,
+            // Counts
+            detected,
             uploaded,
             ready,
-            failed: results.length - uploaded,
-            total: materials.length,
+            failed,
+            total: uploadable.length,
+            skipped_existing: skippedExisting,
+            already_ready: alreadyReady,
+            already_classified: alreadyClassified,
+            skipped_extraction_failed: skippedExtractionFailed,
+            too_short: tooShort,
             results
         };
     };
