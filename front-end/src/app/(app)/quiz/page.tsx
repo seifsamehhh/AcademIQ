@@ -85,11 +85,11 @@ export default function QuizPage() {
     try {
       const generated = await api.generateQuiz(selectedCourse, selectedMaterials);
       setQuiz(generated);
-    } catch {
+    } catch (err) {
       setQuiz(null);
-      setError(
-        "Quiz generation failed. Please try another material or try again later.",
-      );
+      const msg = err instanceof Error ? err.message : String(err);
+      // msg is already the backend's detail.message or detail string
+      setError(msg || "Quiz generation failed. Please try another material or try again later.");
     } finally {
       setIsGenerating(false);
     }

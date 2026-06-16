@@ -113,15 +113,27 @@ def generate_questions(text: str, num_questions: int = 8) -> Tuple[List[Dict[str
 
     Tries the heavy ai/quiz_generator-main path when available (local dev), then
     falls back to the Vercel-safe lightweight generator. Returns (questions, engine).
+    Text is normalised (remove PDF private-use chars) before processing.
     """
     if not text or not text.strip():
         logger.warning("Quiz generation skipped: no content_text")
         return [], "no_text"
 
+    # Normalise before passing to either engine — removes Unicode private-use
+    # chars (e.g. \uf0a1) that PyPDF2 produces and that break regex matching.
+    try:
+        from app.services.quiz_material_eligibility import normalize_quiz_text
+        text = normalize_quiz_text(text)
+    except Exception:
+        pass  # normalisation is best-effort
+
+    if not text.strip():
+        return [], "no_text"
+
     if available():
         try:
             heavy = generate_from_text(text, num_questions=num_questions)
-            if len(heavy) >= 5:
+            if len(heavy) >= 3:
                 logger.info("Quiz generated via heavy engine (%d questions)", len(heavy))
                 return heavy, "heavy"
             logger.warning(

@@ -149,7 +149,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     let message = `Request failed (${res.status}): ${path}`;
     try {
       const body = text ? JSON.parse(text) : null;
-      if (body?.detail) message = String(body.detail);
+      if (body?.detail) {
+        // detail may be a plain string or a structured object with a "message" key
+        const d = body.detail;
+        message = typeof d === "object" && d !== null && d.message
+          ? String(d.message)
+          : String(d);
+      }
     } catch {
       if (text) message = text;
     }

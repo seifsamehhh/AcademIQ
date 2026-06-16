@@ -92,20 +92,45 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     text = (text or "").strip()
     chars = len(text)
-    ready_for_quiz = chars >= MIN_QUIZ_CONTENT_CHARS
 
     if extraction_error and not text:
         extraction_status = "extraction_failed"
+        ready_for_quiz = False
     elif not text:
         extraction_status = "no_content"
-    elif not ready_for_quiz:
+        ready_for_quiz = False
+    elif chars < MIN_QUIZ_CONTENT_CHARS:
         extraction_status = "insufficient_text"
         extraction_error = extraction_error or (
             f"Extracted only {chars} characters; need at least {MIN_QUIZ_CONTENT_CHARS}."
         )
+        ready_for_quiz = False
     else:
-        extraction_status = "success"
-        extraction_error = None
+        # Text is long enough — probe whether it can actually produce quiz questions.
+        # Uses lightweight generator (Vercel-safe) and, if available, the heavy engine.
+        try:
+            from app.services.quiz_material_eligibility import assess_quiz_eligibility
+
+            eligible, reason_code, probe_meta = assess_quiz_eligibility(
+                text, file_type=str(file_type), probe=True
+            )
+        except Exception:
+            eligible, reason_code, probe_meta = True, None, {}  # best-effort: assume ok
+
+        if eligible:
+            ready_for_quiz = True
+            extraction_status = "success"
+            extraction_error = None
+        else:
+            ready_for_quiz = False
+            extraction_status = reason_code or "insufficient_quiz_structure"
+            pair_count = probe_meta.get("definition_pair_count", 0)
+            probe_count = probe_meta.get("probe_question_count", 0)
+            extraction_error = (
+                f"Text extracted ({chars} chars, {pair_count} definition pairs, "
+                f"{probe_count} probe questions) but not enough structure for quiz "
+                "generation. Try a PDF with clear concept definitions or descriptions."
+            )
 
     material_doc = build_material_doc(
         {
@@ -154,6 +179,8 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "Material uploaded but has limited text for quiz generation. "
                 f"({chars} chars; need {MIN_QUIZ_CONTENT_CHARS}+)."
             )
+        elif extraction_status == "insufficient_quiz_structure":
+            content_note = extraction_error
         else:
             content_note = "Content not available yet."
 

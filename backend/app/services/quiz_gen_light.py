@@ -37,7 +37,22 @@ _DEFINITION_PATTERNS = [
         r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,5})\s+(?:refers to|means)\s+([^.\n]+?)\.",
         re.IGNORECASE | re.MULTILINE,
     ),
+    re.compile(
+        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,5})\s+(?:is )?defined as\s+([^.\n]+?)\.",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,5})\s+(?:can be described as|is known as|is called)\s+([^.\n]+?)\.",
+        re.IGNORECASE | re.MULTILINE,
+    ),
 ]
+
+_COLON_PATTERN = re.compile(
+    r"(?:^|\n)\s*([A-Z][A-Za-z0-9][A-Za-z0-9 /&\-]{1,48}?)\s*:\s+([^.\n]{20,160})\.",
+    re.MULTILINE,
+)
+
+_SLIDE_TITLE_RE = re.compile(r"^[A-Z][A-Za-z0-9][\w\s/&\-]{2,55}$")
 
 _SECTION_HEADERS = (
     "Definitions",
@@ -162,11 +177,56 @@ def _valid_definition(defn: str) -> bool:
     return True
 
 
+def _normalize_source_text(text: str) -> str:
+    from app.services.quiz_material_eligibility import normalize_quiz_text
+
+    return _strip_section_headers(normalize_quiz_text(text))
+
+
+def _add_pair(
+    pairs: List[Tuple[str, str]],
+    seen: set[str],
+    concept_raw: str,
+    defn_raw: str,
+) -> None:
+    concept = _normalize_concept(concept_raw)
+    definition = _normalize_definition(defn_raw)
+    key = concept.lower()
+    if not _valid_concept(concept) or not _valid_definition(definition):
+        return
+    if key in seen:
+        return
+    seen.add(key)
+    pairs.append((concept, definition))
+
+
+def _extract_colon_pairs(text: str, seen: set[str], pairs: List[Tuple[str, str]]) -> None:
+    for concept_raw, defn_raw in _COLON_PATTERN.findall(text):
+        _add_pair(pairs, seen, concept_raw, defn_raw)
+
+
+def _extract_slide_pairs(text: str, seen: set[str], pairs: List[Tuple[str, str]]) -> None:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines[:-1]):
+        next_line = lines[index + 1]
+        if not _SLIDE_TITLE_RE.match(line):
+            continue
+        if len(next_line.split()) < 8:
+            continue
+        if len(next_line) > 220:
+            continue
+        _add_pair(pairs, seen, line, next_line)
+
+
 def extract_definitions(text: str) -> List[Tuple[str, str]]:
-    """Pull concept/definition pairs from lecture-style prose."""
+    """Pull concept/definition pairs from lecture-style prose and slide PDFs."""
     seen: set[str] = set()
     pairs: List[Tuple[str, str]] = []
-    normalized = re.sub(r"\s+", " ", _strip_section_headers(text).replace("\n", " "))
+    source = _normalize_source_text(text)
+    _extract_colon_pairs(source, seen, pairs)
+    _extract_slide_pairs(source, seen, pairs)
+
+    normalized = re.sub(r"\s+", " ", source.replace("\n", " "))
     sentences = re.split(r"(?<=[.!?])\s+", normalized)
 
     for sentence in sentences:
@@ -181,15 +241,7 @@ def extract_definitions(text: str) -> List[Tuple[str, str]]:
                     concept_raw, defn_raw = match
                 else:
                     continue
-                concept = _normalize_concept(concept_raw)
-                definition = _normalize_definition(defn_raw)
-                key = concept.lower()
-                if not _valid_concept(concept) or not _valid_definition(definition):
-                    continue
-                if key in seen:
-                    continue
-                seen.add(key)
-                pairs.append((concept, definition))
+                _add_pair(pairs, seen, concept_raw, defn_raw)
 
     return pairs
 
@@ -293,11 +345,14 @@ def generate_lightweight(text: str, num_questions: int = 8) -> List[Dict[str, An
     Build MCQ questions from content_text using definition extraction only.
     Returns [] when the text has no usable structure.
     """
-    if not text or not text.strip():
+    from app.services.quiz_material_eligibility import normalize_quiz_text
+
+    normalized = normalize_quiz_text(text)
+    if not normalized:
         logger.warning("Lightweight quiz gen: empty text")
         return []
 
-    pairs = extract_definitions(text)
+    pairs = extract_definitions(normalized)
     logger.info("Lightweight quiz gen: extracted %d definition pairs", len(pairs))
 
     if len(pairs) < 3:

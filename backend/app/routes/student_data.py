@@ -107,41 +107,59 @@ def generate_quiz(
         raise HTTPException(status_code=400, detail="materialIds required")
 
     text = material_repository.get_content(course_id, material_ids)
+    content_chars = len((text or "").strip())
     logger.info(
         "Quiz request course=%s materials=%s content_chars=%d",
         course_id,
         material_ids,
-        len(text or ""),
+        content_chars,
     )
 
-    if not (text or "").strip():
+    if not content_chars:
         raise HTTPException(
             status_code=422,
-            detail=(
-                "Selected materials have no extracted text yet. The material exists "
-                "in Moodle but quiz content was not uploaded — use the Chrome extension "
-                "→ Upload PDFs for quiz."
-            ),
+            detail={
+                "error": "missing_content_text",
+                "message": (
+                    "Selected materials have no extracted text. "
+                    "Use the Chrome extension → 'Upload materials for quiz' on "
+                    "the Moodle course page first."
+                ),
+                "material_ids": material_ids,
+            },
         )
 
-    if len(text.strip()) < student_data.MIN_QUIZ_CONTENT_CHARS:
+    if content_chars < student_data.MIN_QUIZ_CONTENT_CHARS:
         raise HTTPException(
             status_code=422,
-            detail=(
-                "Selected materials have insufficient extracted text for quiz generation. "
-                "Re-upload the PDF via the Chrome extension to extract more content."
-            ),
+            detail={
+                "error": "content_too_short",
+                "message": (
+                    f"The selected material(s) only have {content_chars} characters of text "
+                    f"(need at least {student_data.MIN_QUIZ_CONTENT_CHARS}). "
+                    "Re-upload a more content-rich PDF via the Chrome extension."
+                ),
+                "content_chars": content_chars,
+                "min_required": student_data.MIN_QUIZ_CONTENT_CHARS,
+            },
         )
 
     questions, engine = quiz_gen.generate_questions(text, num_questions=8)
 
     if not questions:
-        detail = (
-            f"Quiz generation failed for course {course_id} (engine={engine}). "
-            "Content may lack definition-style sentences — try another material "
-            "or re-upload a richer PDF."
-        )
-        logger.error(detail)
+        detail = {
+            "error": "insufficient_quiz_structure",
+            "message": (
+                f"Text was retrieved ({content_chars} chars, engine={engine}) but "
+                "does not contain enough definition-style sentences for quiz generation. "
+                "Try selecting a different material, or upload a lecture PDF that contains "
+                "clear concept explanations (e.g. 'X is a Y' sentences)."
+            ),
+            "content_chars": content_chars,
+            "engine": engine,
+            "material_ids": material_ids,
+        }
+        logger.error("Quiz gen failed: %s", detail)
         raise HTTPException(status_code=422, detail=detail)
 
     return {

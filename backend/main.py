@@ -150,6 +150,20 @@ def debug_quiz_materials(email: str, course_id: str):
     return debug_quiz_materials_for_email(email, course_id)
 
 
+@app.get("/debug/quiz-material/{material_id}")
+def debug_single_quiz_material(material_id: str):
+    """
+    Safe per-material quiz eligibility check across all courses.
+    Shows content_text_length, ready_for_quiz, quiz_generation_eligible, failure_reason.
+    Does not return content_text, passwords, tokens, or connection strings.
+    """
+    from app.services.quiz_materials_debug import debug_single_material
+
+    if not connect_database():
+        raise HTTPException(status_code=503, detail="Database unreachable")
+    return debug_single_material(material_id)
+
+
 @app.get("/debug/synced-courses/{email}")
 def debug_synced_courses(email: str):
     """
