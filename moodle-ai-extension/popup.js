@@ -708,21 +708,17 @@ const runQuizMaterialUpload = async () => {
 
         // Log full preflight response to console for debugging
         console.group(`[AcademIQ] Preflight response — course ${courseId}`);
+        console.log("checked:", pf.data.checked, "| should_upload:", pf.data.should_upload_count,
+            "| matched:", pf.data.matched_count, "| no_match:", pf.data.no_match_count);
+        console.log("already_ready:", pf.data.already_ready,
+            "| already_classified:", pf.data.already_classified,
+            "| extraction_failed:", pf.data.extraction_failed);
         console.log("DB materials found for course:", pf.data.db_materials_found_for_course);
         console.log("DB sample (first 5 stored):", pf.data.db_sample);
-        console.log("Status summary:", pf.data.status_summary);
         console.log("Match method summary:", pf.data.match_method_summary);
-        console.log("Should upload count:", pf.data.should_upload_count);
-        console.log("First 10 items (debug):", (pf.data.materials || []).slice(0, 10).map(m => ({
-            title: m.title,
-            material_id_used: m.debug?.material_id_used,
-            material_id_sent: m.debug?.material_id_sent,
-            activity_url: m.debug?.activity_url,
-            db_record_found: m.debug?.db_record_found,
-            matched_by: m.matched_by,
-            status: m.status,
-            should_upload: m.should_upload
-        })));
+        if ((pf.data.no_match_debug || []).length > 0) {
+            console.warn("[AcademIQ] NO_MATCH items (these will be re-uploaded):", pf.data.no_match_debug);
+        }
         console.groupEnd();
 
         // Show DB count in visible popup text so user can spot a course_id mismatch

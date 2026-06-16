@@ -14,10 +14,39 @@ from app.services.material_text_extract import extract_text_from_bytes
 from app.services.student_data import MIN_QUIZ_CONTENT_CHARS, _classify_non_quiz_material
 
 
+_TITLE_STOP_WORDS = {"the", "a", "an", "and", "or", "for", "of", "to", "in", "is", "on", "at", "by"}
+
+
 def _normalize_title(title: str) -> str:
-    """Stable lowercase key for title-based deduplication (strips non-alnum/space)."""
-    s = "".join(c if c.isalnum() or c.isspace() else " " for c in (title or ""))
+    """
+    Stable lowercase key for title-based deduplication.
+
+    Strips, in order:
+      1. Common file extensions (.pdf, .pptx, .docx, .txt …)
+      2. Moodle "File" display suffix  ("Lab 4 File" → "Lab 4")
+      3. One or more leading course-code prefixes ("SWE423 - Lab 4" → "Lab 4")
+      4. All non-alphanumeric chars replaced with spaces
+      5. Collapse and lowercase
+    """
+    s = (title or "").strip()
+    # 1. Strip trailing file extension
+    s = re.sub(r'\.[a-zA-Z0-9]{1,6}$', '', s)
+    # 2. Strip Moodle "File" display suffix (Moodle appends " File" to resource names)
+    s = re.sub(r'\s+[Ff]ile\s*$', '', s)
+    # 3. Strip one or more leading course-code prefixes e.g. "SWE423 ", "CSC344: "
+    s = re.sub(r'^([A-Z]{2,6}\d{3,4}\s*[-:_]?\s*)+', '', s)
+    # 4. Replace non-alphanumeric with space
+    s = "".join(c if c.isalnum() or c.isspace() else " " for c in s)
     return " ".join(s.lower().split())
+
+
+def _title_word_overlap(t1: str, t2: str) -> float:
+    """Jaccard similarity of meaningful word sets (stop-words removed)."""
+    w1 = set(t1.split()) - _TITLE_STOP_WORDS
+    w2 = set(t2.split()) - _TITLE_STOP_WORDS
+    if not w1 or not w2:
+        return 0.0
+    return len(w1 & w2) / len(w1 | w2)
 
 
 def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -80,7 +109,7 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # ── Per-material matching ─────────────────────────────────────────────────
     results: List[Dict[str, Any]] = []
-    # Import collection for Phase 2 fallback queries
+    no_match_debug: List[Dict[str, Any]] = []   # populated for first 20 no_match items
     from app.config.database import course_materials_collection
 
     for item in materials_in:
@@ -120,46 +149,69 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         existing_doc = None
         matched_by = None
 
-        # Method 1: exact material_id match (cmid string)
+        # M1: exact material_id (cmid)
         if material_id and material_id in by_material_id:
             existing_doc = by_material_id[material_id]
             matched_by = f"material_id:{material_id}"
 
-        # Method 2: raw material_id before cmid extraction
+        # M2: raw material_id sent by extension (before cmid extraction)
         if not existing_doc and raw_material_id and raw_material_id in by_material_id:
             existing_doc = by_material_id[raw_material_id]
             matched_by = f"raw_material_id:{raw_material_id}"
 
-        # Method 3: cmid extracted from incoming URL vs cmid extracted from stored URLs
+        # M3: cmid from incoming URL vs cmid extracted from stored URLs
         if not existing_doc and url_cmid and url_cmid in by_url_cmid:
             existing_doc = by_url_cmid[url_cmid]
             matched_by = f"url_cmid:{url_cmid}"
 
-        # Method 4: exact activity URL string match
+        # M4: exact activity URL string
         if not existing_doc and activity_url and activity_url in by_url:
             existing_doc = by_url[activity_url]
             matched_by = "activity_url"
 
-        # Method 5: exact resolved URL string match
+        # M5: exact resolved URL string
         if not existing_doc and resolved_url and resolved_url in by_url:
             existing_doc = by_url[resolved_url]
             matched_by = "resolved_url"
 
-        # Method 6: normalized title + file_type
+        # M6: exact normalized title + file_type (handles punctuation/space diffs)
         if not existing_doc:
             t_key = _normalize_title(title)
             ft = raw_file_type.lower()
             if t_key and (t_key, ft) in by_title_ft:
                 existing_doc = by_title_ft[(t_key, ft)]
-                matched_by = f"title+filetype:{t_key[:30]}"
+                matched_by = f"title+ft:{t_key[:25]}"
             elif t_key and (t_key, "") in by_title_ft:
                 existing_doc = by_title_ft[(t_key, "")]
-                matched_by = f"title_only:{t_key[:30]}"
+                matched_by = f"title:{t_key[:25]}"
+
+        # M7: fuzzy title match — Jaccard word-overlap against all stored titles
+        # Catches: "Lecture 1 File" ↔ "Lecture 1", "SWE423 Lab 4" ↔ "Lab 4",
+        #          titles with slight wording differences.
+        if not existing_doc and all_docs:
+            t_key = _normalize_title(title)
+            ft_lower = raw_file_type.lower()
+            best_score = 0.0
+            best_doc_fuzzy = None
+            for doc in all_docs:
+                stored_t = _normalize_title(doc.get("title") or "")
+                if not stored_t:
+                    continue
+                score = _title_word_overlap(t_key, stored_t)
+                # Prefer same file_type — slight bonus avoids cross-type false matches
+                if score > 0:
+                    stored_ft = str(doc.get("file_type") or "").lower()
+                    if stored_ft and ft_lower and stored_ft == ft_lower:
+                        score = min(1.0, score * 1.1)
+                if score > best_score:
+                    best_score = score
+                    best_doc_fuzzy = doc
+            if best_score >= 0.6:
+                existing_doc = best_doc_fuzzy
+                matched_by = f"fuzzy_title:{best_score:.2f}"
 
         # ── C: Phase 2 fallback — direct MongoDB query (no course_id filter) ──
-        # This handles course_id mismatches: materials are saved under a
-        # different course_id than what the extension sends in preflight.
-        # Moodle cmids are globally unique so querying by material_id alone is safe.
+        # Handles course_id mismatches: Moodle cmids are globally unique.
         if not existing_doc:
             fallback_clauses: List[Dict[str, Any]] = []
             if material_id:
@@ -180,11 +232,13 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                     {"$or": fallback_clauses}
                 )
                 if existing_doc:
-                    matched_by = f"fallback_db:{matched_by or 'new'}"
+                    matched_by = f"fallback_db"
 
+        # ── D: Build debug_info for this item ────────────────────────────────
         debug_info = {
             "material_id_sent": raw_material_id,
             "material_id_used": material_id,
+            "incoming_cmid": url_cmid,
             "activity_url": activity_url[:80] if activity_url else None,
             "course_id": course_id,
             "db_record_found": existing_doc is not None,
@@ -193,6 +247,38 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
         if not existing_doc:
+            # Collect no_match diagnostics (first 20) — top-3 closest stored titles
+            if len(no_match_debug) < 20:
+                t_key = _normalize_title(title)
+                closest = sorted(
+                    all_docs,
+                    key=lambda d: _title_word_overlap(t_key, _normalize_title(d.get("title") or "")),
+                    reverse=True,
+                )[:3]
+                no_match_debug.append({
+                    "incoming_title": title,
+                    "incoming_material_id": raw_material_id,
+                    "incoming_material_id_used": material_id,
+                    "incoming_source_url": activity_url[:80] if activity_url else None,
+                    "incoming_cmid": url_cmid,
+                    "incoming_file_type": raw_file_type,
+                    "normalized_title": t_key,
+                    "closest_existing_titles": [
+                        {
+                            "material_id": d.get("material_id"),
+                            "title": d.get("title"),
+                            "normalized": _normalize_title(d.get("title") or ""),
+                            "overlap_score": round(_title_word_overlap(t_key, _normalize_title(d.get("title") or "")), 3),
+                        }
+                        for d in closest
+                    ],
+                    "reason_no_match": (
+                        "No title overlap ≥0.6 and no ID/URL match"
+                        if not closest or _title_word_overlap(t_key, _normalize_title(closest[0].get("title") or "")) < 0.6
+                        else "Best fuzzy score just below threshold"
+                    ),
+                })
+
             results.append({
                 "material_id": material_id,
                 "title": title,
@@ -272,7 +358,11 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             })
 
     should_upload_count = sum(1 for r in results if r["should_upload"])
-    skip_count = len(results) - should_upload_count
+    matched_count = sum(1 for r in results if r.get("matched_by") is not None)
+    no_match_count = sum(
+        1 for r in results
+        if r.get("matched_by") is None and r["status"] != "not_quiz_material"
+    )
     status_summary: Dict[str, int] = {}
     match_method_summary: Dict[str, int] = {}
     for r in results:
@@ -282,13 +372,23 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "course_id": course_id,
-        "total": len(results),
+        # Counts the popup summary needs
+        "checked": len(results),
         "should_upload_count": should_upload_count,
-        "skip_count": skip_count,
+        "matched_count": matched_count,
+        "no_match_count": no_match_count,
+        "already_ready": status_summary.get("already_ready", 0),
+        "already_classified": status_summary.get("already_classified", 0),
+        "extraction_failed": status_summary.get("extraction_failed", 0),
+        "not_quiz_material": status_summary.get("not_quiz_material", 0),
+        # Legacy fields
+        "total": len(results),
+        "skip_count": len(results) - should_upload_count,
         "db_materials_found_for_course": len(all_docs),
         "status_summary": status_summary,
         "match_method_summary": match_method_summary,
         "db_sample": db_sample,
+        "no_match_debug": no_match_debug,
         "materials": results,
     }
 
