@@ -179,6 +179,43 @@ def debug_single_quiz_material(material_id: str):
     return debug_single_material(material_id)
 
 
+@app.get("/debug/raw-course-materials/{course_id}")
+def debug_raw_course_materials(course_id: str):
+    """
+    Show all materials stored in MongoDB for a given Moodle course_id.
+    Returns material_id, title, url, extraction_status, content_chars for each.
+    Does NOT return content_text, passwords, or tokens.
+    Use this to verify what the preflight lookup will find.
+    """
+    from app.repositories import material_repository
+
+    if not connect_database():
+        raise HTTPException(status_code=503, detail="Database unreachable")
+
+    docs = material_repository.list_by_course(course_id)
+    rows = []
+    for d in docs:
+        text = (d.get("content_text") or "").strip()
+        chars = len(text) if text else int(d.get("content_chars") or 0)
+        rows.append({
+            "material_id": d.get("material_id"),
+            "title": d.get("title"),
+            "url": d.get("url"),
+            "resolved_url": d.get("resolved_url"),
+            "file_type": d.get("file_type"),
+            "extraction_status": d.get("extraction_status"),
+            "content_chars": chars,
+            "source": d.get("source"),
+            "_id": str(d.get("_id", "")),
+        })
+    rows.sort(key=lambda r: r["title"] or "")
+    return {
+        "course_id": course_id,
+        "total": len(rows),
+        "materials": rows,
+    }
+
+
 @app.get("/debug/synced-courses/{email}")
 def debug_synced_courses(email: str):
     """

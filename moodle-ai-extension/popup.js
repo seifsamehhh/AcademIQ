@@ -581,6 +581,7 @@ const formatQuizUploadSummary = ({
     courseName,
     detected = 0,
     preflightChecked = 0,
+    dbFound = 0,
     uploaded = 0,
     ready = 0,
     failed = 0,
@@ -598,8 +599,8 @@ const formatQuizUploadSummary = ({
     ];
     if (preflightChecked > 0) {
         parts.push(`Preflight checked ${preflightChecked}`);
+        if (dbFound > 0) parts.push(`DB has ${dbFound} for course`);
     }
-    parts.push(`Uploaded ${uploaded}/${total}`);
     if (skippedExisting > 0) {
         const detail = [];
         if (alreadyReady > 0) detail.push(`${alreadyReady} already ready`);
@@ -609,7 +610,10 @@ const formatQuizUploadSummary = ({
         if (rest > 0) detail.push(`${rest} other`);
         parts.push(`Skipped ${skippedExisting}${detail.length ? ` (${detail.join(", ")})` : ""}`);
     }
-    parts.push(`Ready ${ready}`);
+    if (uploaded > 0 || total > 0) {
+        parts.push(`Uploaded ${uploaded}/${total}`);
+    }
+    if (ready > 0) parts.push(`Ready ${ready}`);
     if (failed > 0) parts.push(`Failed ${failed}`);
     parts.push(`API ${endpoint || UPLOAD_QUIZ_URL}`);
     if (extra) parts.push(extra);
@@ -677,6 +681,7 @@ const runQuizMaterialUpload = async () => {
     let alreadyClassified = 0;
     let skippedExtractionFailed = 0;
     let preflightChecked = 0;
+    let dbFound = 0;
     let onlyMaterialIds = null; // null = upload everything (fallback if preflight fails)
 
     if (uploadable.length > 0) {
@@ -699,13 +704,35 @@ const runQuizMaterialUpload = async () => {
 
         // Preflight succeeded — build the filtered upload list
         preflightChecked = (pf.data.materials || []).length;
+        dbFound = pf.data.db_materials_found_for_course || 0;
+
+        // Log full preflight response to console for debugging
+        console.group(`[AcademIQ] Preflight response — course ${courseId}`);
+        console.log("DB materials found for course:", pf.data.db_materials_found_for_course);
+        console.log("Status summary:", pf.data.status_summary);
+        console.log("Match method summary:", pf.data.match_method_summary);
+        console.log("Should upload count:", pf.data.should_upload_count);
+        console.log("First 10 items (debug):", (pf.data.materials || []).slice(0, 10).map(m => ({
+            title: m.title,
+            material_id_used: m.debug?.material_id_used,
+            material_id_sent: m.debug?.material_id_sent,
+            activity_url: m.debug?.activity_url,
+            db_record_found: m.debug?.db_record_found,
+            matched_by: m.matched_by,
+            status: m.status,
+            should_upload: m.should_upload
+        })));
+        console.groupEnd();
+
         onlyMaterialIds = [];
         for (const item of (pf.data.materials || [])) {
             if (item.should_upload) {
                 onlyMaterialIds.push(String(item.material_id));
             } else {
-                if (item.status === "ready") { alreadyReady += 1; skippedExisting += 1; }
-                else if (item.status === "not_quiz_material") { alreadyClassified += 1; skippedExisting += 1; }
+                // Backend returns: "already_ready", "already_classified", "extraction_failed",
+                // "not_quiz_material" (title-only classification), "too_short", "no_content"
+                if (item.status === "already_ready") { alreadyReady += 1; skippedExisting += 1; }
+                else if (item.status === "already_classified" || item.status === "not_quiz_material") { alreadyClassified += 1; skippedExisting += 1; }
                 else if (item.status === "extraction_failed") { skippedExtractionFailed += 1; skippedExisting += 1; }
                 else { skippedExisting += 1; }
             }
@@ -721,6 +748,7 @@ const runQuizMaterialUpload = async () => {
                 courseName,
                 detected,
                 preflightChecked,
+                dbFound,
                 uploaded: 0,
                 ready: 0,
                 failed: 0,
@@ -755,6 +783,7 @@ const runQuizMaterialUpload = async () => {
             courseName: tabResult.course_name || courseName,
             detected,
             preflightChecked,
+            dbFound,
             uploaded,
             ready,
             failed,

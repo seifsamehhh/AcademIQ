@@ -14,44 +14,75 @@ from app.services.material_text_extract import extract_text_from_bytes
 from app.services.student_data import MIN_QUIZ_CONTENT_CHARS, _classify_non_quiz_material
 
 
+def _normalize_title(title: str) -> str:
+    """Stable lowercase key for title-based deduplication (strips non-alnum/space)."""
+    s = "".join(c if c.isalnum() or c.isspace() else " " for c in (title or ""))
+    return " ".join(s.lower().split())
+
+
 def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Pre-upload check: return which materials need uploading without downloading files.
 
-    The extension calls this BEFORE fetching any file bytes.  For every item in
-    the request list we check:
-      1. Is the title/type a known non-quiz material? → skip immediately.
-      2. Does MongoDB already have enough extracted text? → skip (already ready).
-      3. Did a previous extraction fail?  → skip (don't retry unless forced).
-      4. Otherwise → should_upload: true.
+    Strategy: bulk-load ALL materials for the course once, then match each incoming
+    item using four methods in priority order:
+      A. material_id (cmid extracted from activity URL)
+      B. activity URL (stored as 'url' in DB)
+      C. resolved URL (pluginfile.php URL, stored as 'resolved_url')
+      D. normalized title + file_type (catches cmid mismatches)
 
-    Returns per-material: should_upload, status, reason, content_text_length.
+    Returns per-material: should_upload, status, reason, content_text_length,
+    matched_by, and debug fields.
     """
     course_id = str(payload.get("course_id") or "").strip()
     materials_in = payload.get("materials") or []
+    force_reupload = bool(payload.get("force_reupload"))
 
     if not course_id:
         raise ValueError("course_id required")
 
+    # ── Bulk-load all materials for this course (ONE DB query) ────────────────
+    all_docs = material_repository.list_by_course(course_id)
+
+    # Build in-memory lookup maps
+    by_material_id: Dict[str, Any] = {}
+    by_url: Dict[str, Any] = {}
+    by_title_ft: Dict[str, Any] = {}
+
+    for doc in all_docs:
+        mid = str(doc.get("material_id") or "").strip()
+        if mid:
+            by_material_id[mid] = doc
+
+        for url_field in ("url", "resolved_url", "source_url"):
+            u = str(doc.get(url_field) or "").strip()
+            if u:
+                by_url[u] = doc
+
+        t_key = _normalize_title(doc.get("title") or "")
+        ft = str(doc.get("file_type") or "").lower().strip()
+        if t_key and ft and ft != "unknown":
+            by_title_ft[(t_key, ft)] = doc
+        if t_key:
+            by_title_ft[(t_key, "")] = doc  # title-only fallback
+
+    # ── Per-material matching ─────────────────────────────────────────────────
     results: List[Dict[str, Any]] = []
 
     for item in materials_in:
         title = (item.get("title") or "Untitled").strip()
-        raw_file_type = str(item.get("file_type") or item.get("fileType") or "unknown")
-        # activity_url = Moodle activity URL (/mod/resource/view.php?id=cmid) — used for cmid extraction
-        # resolved_url = actual file URL after redirect (pluginfile.php) — used as fallback
+        raw_file_type = str(item.get("file_type") or item.get("fileType") or "unknown").strip()
         activity_url = str(item.get("source_url") or item.get("url") or "").strip()
         resolved_url = str(item.get("resolved_url") or "").strip()
         raw_material_id = str(
             item.get("material_id") or item.get("id") or stable_material_id(item) or ""
         ).strip()
 
-        # Prefer the activity URL for cmid extraction (has ?id=), fall back to resolved_url
-        material_id = _resolve_material_id(
-            course_id, raw_material_id, activity_url or resolved_url
-        )
+        # Extract cmid from activity URL if available (most stable key)
+        url_cmid = _material_id_from_url(activity_url) or _material_id_from_url(resolved_url)
+        material_id = url_cmid or raw_material_id
 
-        # ── 1. Non-quiz classification ─────────────────────────────────────────
+        # ── A: Non-quiz classification (no DB needed) ─────────────────────────
         is_non_quiz, non_quiz_reason = _classify_non_quiz_material(title, raw_file_type)
         if is_non_quiz:
             results.append({
@@ -61,97 +92,157 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "status": "not_quiz_material",
                 "reason": non_quiz_reason,
                 "content_text_length": 0,
+                "matched_by": "classification",
+                "debug": {
+                    "material_id_sent": raw_material_id,
+                    "material_id_used": material_id,
+                    "course_id": course_id,
+                    "db_record_found": False,
+                },
             })
             continue
 
-        # ── 2. Check existing DB record (by ID, then by activity URL, then resolved URL) ──
-        existing_doc = material_repository.get(course_id, material_id)
-        if not existing_doc and activity_url:
-            existing_doc = material_repository.find_by_course_and_url(course_id, activity_url)
-        if not existing_doc and resolved_url:
-            existing_doc = material_repository.find_by_course_and_url(course_id, resolved_url)
+        # ── B: DB lookup — try four methods in priority order ────────────────
+        existing_doc = None
+        matched_by = None
 
-        if existing_doc:
-            existing_status = existing_doc.get("extraction_status") or ""
-            existing_text = (existing_doc.get("content_text") or "").strip()
-            existing_chars = (
-                len(existing_text)
-                if existing_text
-                else (existing_doc.get("content_chars") or 0)
-            )
+        # Method 1: exact material_id match (cmid)
+        if material_id and material_id in by_material_id:
+            existing_doc = by_material_id[material_id]
+            matched_by = f"material_id:{material_id}"
 
-            if existing_status == "not_quiz_material":
-                results.append({
-                    "material_id": material_id,
-                    "title": title,
-                    "should_upload": False,
-                    "status": "not_quiz_material",
-                    "reason": existing_doc.get("extraction_error") or "Classified as non-quiz material",
-                    "content_text_length": 0,
-                })
-            elif existing_chars >= MIN_QUIZ_CONTENT_CHARS:
-                results.append({
-                    "material_id": material_id,
-                    "title": title,
-                    "should_upload": False,
-                    "status": "ready",
-                    "reason": f"Already has {existing_chars} characters of extracted text",
-                    "content_text_length": existing_chars,
-                })
-            elif existing_status == "extraction_failed":
-                # Don't retry a failed extraction unless force_reupload is set
-                force = bool(payload.get("force_reupload"))
-                results.append({
-                    "material_id": material_id,
-                    "title": title,
-                    "should_upload": force,
-                    "status": "extraction_failed",
-                    "reason": existing_doc.get("extraction_error") or "Extraction previously failed",
-                    "content_text_length": existing_chars,
-                })
-            elif existing_chars > 0:
-                # Some text extracted but below threshold
-                results.append({
-                    "material_id": material_id,
-                    "title": title,
-                    "should_upload": False,
-                    "status": "too_short",
-                    "reason": f"Only {existing_chars} chars extracted (need ≥{MIN_QUIZ_CONTENT_CHARS})",
-                    "content_text_length": existing_chars,
-                })
-            else:
-                # Record exists but no content — try uploading
-                results.append({
-                    "material_id": material_id,
-                    "title": title,
-                    "should_upload": True,
-                    "status": "not_uploaded",
-                    "reason": "Record exists but no extracted text yet",
-                    "content_text_length": 0,
-                })
-        else:
-            # No DB record at all — full upload needed
+        # Method 2: raw material_id from extension (before cmid extraction)
+        if not existing_doc and raw_material_id and raw_material_id in by_material_id:
+            existing_doc = by_material_id[raw_material_id]
+            matched_by = f"raw_material_id:{raw_material_id}"
+
+        # Method 3: activity URL
+        if not existing_doc and activity_url and activity_url in by_url:
+            existing_doc = by_url[activity_url]
+            matched_by = f"activity_url"
+
+        # Method 4: resolved URL (pluginfile)
+        if not existing_doc and resolved_url and resolved_url in by_url:
+            existing_doc = by_url[resolved_url]
+            matched_by = f"resolved_url"
+
+        # Method 5: normalized title + file_type
+        if not existing_doc:
+            t_key = _normalize_title(title)
+            ft = raw_file_type.lower()
+            if t_key and (t_key, ft) in by_title_ft:
+                existing_doc = by_title_ft[(t_key, ft)]
+                matched_by = f"title+filetype:{t_key[:30]}"
+            elif t_key and (t_key, "") in by_title_ft:
+                existing_doc = by_title_ft[(t_key, "")]
+                matched_by = f"title_only:{t_key[:30]}"
+
+        debug_info = {
+            "material_id_sent": raw_material_id,
+            "material_id_used": material_id,
+            "activity_url": activity_url[:80] if activity_url else None,
+            "course_id": course_id,
+            "db_record_found": existing_doc is not None,
+            "matched_by": matched_by,
+            "db_material_id": str(existing_doc.get("material_id") or "") if existing_doc else None,
+        }
+
+        if not existing_doc:
             results.append({
                 "material_id": material_id,
                 "title": title,
                 "should_upload": True,
                 "status": "not_uploaded",
-                "reason": "Not yet uploaded",
+                "reason": "No DB record found",
                 "content_text_length": 0,
+                "matched_by": None,
+                "debug": debug_info,
+            })
+            continue
+
+        # ── C: Determine skip/upload decision from existing record ───────────
+        existing_status = existing_doc.get("extraction_status") or ""
+        existing_text = (existing_doc.get("content_text") or "").strip()
+        existing_chars = (
+            len(existing_text)
+            if existing_text
+            else int(existing_doc.get("content_chars") or 0)
+        )
+
+        if existing_status == "not_quiz_material":
+            results.append({
+                "material_id": material_id,
+                "title": title,
+                "should_upload": False,
+                "status": "already_classified",
+                "reason": existing_doc.get("extraction_error") or "Classified as non-quiz material",
+                "content_text_length": 0,
+                "matched_by": matched_by,
+                "debug": debug_info,
+            })
+        elif existing_chars >= MIN_QUIZ_CONTENT_CHARS:
+            results.append({
+                "material_id": material_id,
+                "title": title,
+                "should_upload": False,
+                "status": "already_ready",
+                "reason": f"Already has {existing_chars} characters of extracted text",
+                "content_text_length": existing_chars,
+                "matched_by": matched_by,
+                "debug": debug_info,
+            })
+        elif existing_status == "extraction_failed":
+            results.append({
+                "material_id": material_id,
+                "title": title,
+                "should_upload": force_reupload,
+                "status": "extraction_failed",
+                "reason": existing_doc.get("extraction_error") or "Extraction previously failed",
+                "content_text_length": existing_chars,
+                "matched_by": matched_by,
+                "debug": debug_info,
+            })
+        elif existing_chars > 0:
+            results.append({
+                "material_id": material_id,
+                "title": title,
+                "should_upload": False,
+                "status": "too_short",
+                "reason": f"Only {existing_chars} chars (need ≥{MIN_QUIZ_CONTENT_CHARS})",
+                "content_text_length": existing_chars,
+                "matched_by": matched_by,
+                "debug": debug_info,
+            })
+        else:
+            # Record exists but no usable content yet
+            results.append({
+                "material_id": material_id,
+                "title": title,
+                "should_upload": True,
+                "status": "no_content",
+                "reason": "Record exists but no extracted text yet",
+                "content_text_length": 0,
+                "matched_by": matched_by,
+                "debug": debug_info,
             })
 
     should_upload_count = sum(1 for r in results if r["should_upload"])
     skip_count = len(results) - should_upload_count
     status_summary: Dict[str, int] = {}
+    match_method_summary: Dict[str, int] = {}
     for r in results:
         status_summary[r["status"]] = status_summary.get(r["status"], 0) + 1
+        method = (r.get("matched_by") or "not_found").split(":")[0]
+        match_method_summary[method] = match_method_summary.get(method, 0) + 1
 
     return {
         "course_id": course_id,
         "total": len(results),
         "should_upload_count": should_upload_count,
         "skip_count": skip_count,
+        "db_materials_found_for_course": len(all_docs),
         "status_summary": status_summary,
+        "match_method_summary": match_method_summary,
         "materials": results,
     }
 
