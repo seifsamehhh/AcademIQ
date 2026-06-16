@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -112,16 +112,67 @@ _INVALID_CONCEPTS = {
     "outline",
 }
 
-_GENERIC_DISTRACTORS = [
-    "A fixed hardware port used only for display output.",
-    "A manual paper form submitted outside the application.",
-    "An optional visual theme with no effect on program logic.",
-    "A deprecated protocol no longer used in modern systems.",
-    "A network cable standard unrelated to software design.",
-    "A spreadsheet macro that only formats cell colors.",
-    "A backup schedule that never interacts with source code.",
-    "A printer setting that controls page margins only.",
-]
+# Patterns that indicate slide/course headers — should not become distractors
+_SENTENCE_SKIP_RE = re.compile(
+    r"^[A-Z]{2,6}\d+[-/]\w+"   # course codes: CSC399-SWE412, CSCE-2312
+    r"|^\d+\s+of\s+\d+"         # slide numbers: "3 of 24"
+    r"|^(?:slide|page|chapter|unit|lab|part)\s*\d"  # "Slide 3", "Lab 1"
+    r"|^https?://"              # URLs
+    r"|^\w+\.(com|org|edu|io)\b",  # domain-only lines
+    re.IGNORECASE,
+)
+
+
+def _extract_material_sentences(
+    text: str,
+    min_words: int = 5,
+    max_chars: int = 130,
+) -> List[str]:
+    """
+    Extract meaningful sentence fragments from the material text to use as
+    content-grounded fallback distractors.
+
+    All returned strings come from the SAME material — no generic placeholders.
+    Filters out course codes, slide headers, and navigation noise.
+    """
+    blob = re.sub(r"\s+", " ", text.strip())
+    raw_sentences = re.split(r"(?<=[.!?])\s+", blob)
+    result: List[str] = []
+    seen: Set[str] = set()
+    for s in raw_sentences:
+        s = s.strip()
+        # Skip course codes, slide numbers, and navigation headers
+        if _SENTENCE_SKIP_RE.match(s):
+            continue
+        words = s.split()
+        if len(words) < min_words:
+            continue
+        if len(s) > max_chars:
+            s = " ".join(words[:18])
+        # Skip lines that are mostly numbers/symbols/single words
+        if re.match(r"^[\d\s\W]+$", s):
+            continue
+        # Skip if >40% of characters are uppercase (likely a heading/acronym block)
+        upper_ratio = sum(1 for c in s if c.isupper()) / max(len(s), 1)
+        if upper_ratio > 0.4:
+            continue
+        # Skip if sentence contains PDF artifact characters (private-use or geometric
+        # separators like ◊ ◆ ● that appear as section dividers in extracted PDFs)
+        if re.search(r"[\uf000-\uf8ff\ufffd\u25a0-\u25ff]", s):
+            continue
+        # Skip document-title patterns: "Subject — Topic (context) Type"
+        # (em/en dash + parenthetical = almost always a header, not a sentence)
+        if re.search(r"[\u2013\u2014]", s) and re.search(r"\(.*\)", s):
+            continue
+        option = _format_option(s)
+        if not option or len(option) < 20:
+            continue
+        key = _option_key(option)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(option)
+    return result
 
 
 def _normalize_concept(raw: str) -> str:
@@ -224,6 +275,9 @@ def _structure_normalize(text: str) -> str:
     return "\n".join(l for l in lines if l)
 
 
+_ARTIFACT_RE = re.compile(r"[\uf000-\uf8ff\ufffd\u25a0-\u25ff]")
+
+
 def _add_pair(
     pairs: List[Tuple[str, str]],
     seen: set[str],
@@ -232,6 +286,9 @@ def _add_pair(
 ) -> None:
     concept = _normalize_concept(concept_raw)
     definition = _normalize_definition(defn_raw)
+    # Reject pairs that contain PDF-extraction artifact characters
+    if _ARTIFACT_RE.search(concept) or _ARTIFACT_RE.search(definition):
+        return
     key = concept.lower()
     if not _valid_concept(concept) or not _valid_definition(definition):
         return
@@ -341,7 +398,15 @@ def extract_definitions(text: str) -> List[Tuple[str, str]]:
                     continue
                 _add_pair(pairs, seen, concept_raw, defn_raw)
 
-    return pairs
+    # Deduplicate by concept: if the same concept was extracted multiple times
+    # (different phrasings), keep the longest definition to avoid near-duplicate
+    # options appearing in the same question.
+    best: dict[str, tuple[str, str]] = {}
+    for concept, definition in pairs:
+        key = concept.lower().strip()
+        if key not in best or len(definition) > len(best[key][1]):
+            best[key] = (concept, definition)
+    return list(best.values())
 
 
 def _question_prompt(concept: str) -> str:
@@ -372,11 +437,23 @@ def _pick_distractors(
     pool: List[Tuple[str, str]],
     used_global: Set[str],
     n: int = 3,
+    material_sentences: Optional[List[str]] = None,
 ) -> List[str]:
-    """Build distinct wrong answers from other concepts' definitions."""
+    """
+    Build distinct wrong answers grounded entirely in the same material.
+
+    Priority:
+      1. Definitions from OTHER pairs in the same material.
+      2. Sentence fragments extracted from the same material text.
+
+    No generic/hardcoded distractors — every option is grounded in the
+    selected material's own content so questions stay domain-relevant
+    (electronics, hardware, biology, etc. — whatever the material covers).
+    """
     correct_key = _option_key(correct)
     candidates: List[str] = []
 
+    # Primary: other concept definitions from the same material
     for other_concept, other_def in pool:
         if other_concept.lower() == concept.lower():
             continue
@@ -386,14 +463,38 @@ def _pick_distractors(
             continue
         candidates.append(option)
 
-    for filler in _GENERIC_DISTRACTORS:
-        if len(candidates) >= n:
-            break
-        option = _format_option(filler)
-        key = _option_key(option)
-        # Generic fillers may repeat across questions; only avoid the correct answer.
-        if key != correct_key and option not in candidates:
-            candidates.append(option)
+    # Fallback: sentence fragments from the same material (content-grounded)
+    if len(candidates) < n and material_sentences:
+        concept_lower = concept.lower()
+        # Track which concept names are already represented in candidates so we
+        # don't add a sentence fragment about the same concept as an existing option.
+        _concept_prefix_re = re.compile(
+            r"^([A-Za-z][A-Za-z\s]{2,40}?)\s+(?:refers to|is a|is an|is the|are)\b",
+            re.IGNORECASE,
+        )
+        covered: Set[str] = set()
+        for cand in candidates:
+            m = _concept_prefix_re.match(cand)
+            if m:
+                covered.add(m.group(1).lower().strip())
+
+        for fragment in material_sentences:
+            if len(candidates) >= n:
+                break
+            key = _option_key(fragment)
+            if key == correct_key or fragment in candidates:
+                continue
+            # Skip fragments about the same concept as the question
+            if fragment.lower().startswith(concept_lower):
+                continue
+            # Skip fragments whose concept is already represented by a candidate
+            m = _concept_prefix_re.match(fragment)
+            if m and m.group(1).lower().strip() in covered:
+                continue
+            candidates.append(fragment)
+            # Track this newly added fragment's concept
+            if m:
+                covered.add(m.group(1).lower().strip())
 
     return candidates[:n]
 
@@ -404,12 +505,14 @@ def _build_question(
     definition: str,
     pool: List[Tuple[str, str]],
     used_global: Set[str],
+    material_sentences: Optional[List[str]] = None,
 ) -> Dict[str, Any] | None:
     correct = _definition_option(concept, definition)
     if not correct:
         return None
 
-    distractors = _pick_distractors(concept, correct, pool, used_global, n=3)
+    distractors = _pick_distractors(concept, correct, pool, used_global, n=3,
+                                    material_sentences=material_sentences)
     if len(distractors) < 3:
         return None
 
@@ -440,8 +543,11 @@ def _build_question(
 
 def generate_lightweight(text: str, num_questions: int = 8) -> List[Dict[str, Any]]:
     """
-    Build MCQ questions from content_text using definition extraction only.
-    Returns [] when the text has no usable structure.
+    Build MCQ questions from content_text using definition extraction.
+
+    All distractors are drawn from the SAME material text — either from other
+    extracted definition pairs or from sentence fragments in the same content.
+    No hardcoded or generic distractors are used.
     """
     from app.services.quiz_material_eligibility import normalize_quiz_text
 
@@ -457,6 +563,10 @@ def generate_lightweight(text: str, num_questions: int = 8) -> List[Dict[str, An
         logger.warning("Lightweight quiz gen: insufficient definitions (%d)", len(pairs))
         return []
 
+    # Extract sentence fragments from the same material for fallback distractors
+    material_sentences = _extract_material_sentences(normalized)
+    logger.debug("Lightweight quiz gen: %d material sentence fragments", len(material_sentences))
+
     target = max(_MIN_QUESTIONS, min(num_questions, len(pairs)))
     questions: List[Dict[str, Any]] = []
     used_global: Set[str] = set()
@@ -464,7 +574,8 @@ def generate_lightweight(text: str, num_questions: int = 8) -> List[Dict[str, An
     for concept, definition in pairs:
         if len(questions) >= target:
             break
-        q = _build_question(len(questions) + 1, concept, definition, pairs, used_global)
+        q = _build_question(len(questions) + 1, concept, definition, pairs,
+                            used_global, material_sentences=material_sentences)
         if q:
             questions.append(q)
 

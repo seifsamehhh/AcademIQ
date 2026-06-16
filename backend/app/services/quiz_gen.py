@@ -111,16 +111,24 @@ def generate_questions(text: str, num_questions: int = 8) -> Tuple[List[Dict[str
     """
     Generate MCQs from stored content_text.
 
-    Tries the heavy ai/quiz_generator-main path when available (local dev), then
-    falls back to the Vercel-safe lightweight generator. Returns (questions, engine).
-    Text is normalised (remove PDF private-use chars) before processing.
+    Engine priority (content-grounded first):
+      1. Lightweight (regex, definition/concept extraction) — always available,
+         all distractors come from the SAME material text.
+      2. Lecture fallback (arrow notation, heading+bullet groups) — for slide/lab PDFs.
+      3. Heavy NLTK (ai/quiz_generator-main) — local-dev only, used as last resort
+         because its question templates can sound domain-inappropriate for technical
+         content (electronics, hardware, etc.).
+
+    Keeping heavy as last resort means:
+      - Lab and lecture PDFs always get content-grounded questions first.
+      - Seeded demo content (rich prose) still works via lightweight (≥5 pairs).
     """
     if not text or not text.strip():
         logger.warning("Quiz generation skipped: no content_text")
         return [], "no_text"
 
-    # Normalise before passing to either engine — removes Unicode private-use
-    # chars (e.g. \uf0a1) that PyPDF2 produces and that break regex matching.
+    # Normalise before passing to any engine — removes Unicode private-use chars
+    # (e.g. \uf0a1) that PyPDF2 produces and that break regex matching.
     try:
         from app.services.quiz_material_eligibility import normalize_quiz_text
         text = normalize_quiz_text(text)
@@ -130,19 +138,7 @@ def generate_questions(text: str, num_questions: int = 8) -> Tuple[List[Dict[str
     if not text.strip():
         return [], "no_text"
 
-    if available():
-        try:
-            heavy = generate_from_text(text, num_questions=num_questions)
-            if len(heavy) >= 3:
-                logger.info("Quiz generated via heavy engine (%d questions)", len(heavy))
-                return heavy, "heavy"
-            logger.warning(
-                "Heavy quiz engine returned only %d questions; trying lightweight",
-                len(heavy),
-            )
-        except Exception as exc:
-            logger.warning("Heavy quiz engine failed: %s", exc, exc_info=True)
-
+    # ── 1. Lightweight (content-grounded, all distractors from the same material) ──
     try:
         from app.services.quiz_gen_light import generate_lightweight
 
@@ -154,7 +150,7 @@ def generate_questions(text: str, num_questions: int = 8) -> Tuple[List[Dict[str
     except Exception as exc:
         logger.error("Lightweight quiz engine failed: %s", exc, exc_info=True)
 
-    # Lecture fallback — works on slide/lab PDFs with bullets, arrows, headings
+    # ── 2. Lecture fallback (arrow notation, bullet/heading groups) ──────────────
     try:
         from app.services.quiz_gen_lecture import generate_lecture_quiz
 
@@ -165,5 +161,19 @@ def generate_questions(text: str, num_questions: int = 8) -> Tuple[List[Dict[str
         logger.warning("Lecture quiz engine returned no questions")
     except Exception as exc:
         logger.error("Lecture quiz engine failed: %s", exc, exc_info=True)
+
+    # ── 3. Heavy NLTK (last resort — local dev only, may use generic templates) ──
+    if available():
+        try:
+            heavy = generate_from_text(text, num_questions=num_questions)
+            if len(heavy) >= 3:
+                logger.info("Quiz generated via heavy engine (%d questions)", len(heavy))
+                return heavy, "heavy"
+            logger.warning(
+                "Heavy quiz engine returned only %d questions",
+                len(heavy),
+            )
+        except Exception as exc:
+            logger.warning("Heavy quiz engine failed: %s", exc, exc_info=True)
 
     return [], "failed"

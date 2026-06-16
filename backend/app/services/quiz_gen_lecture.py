@@ -276,14 +276,20 @@ def _build_association_question(
     correct_item: str,
     all_groups: List[Tuple[str, List[str]]],
     fallback_pool: List[Tuple[str, str]],
+    material_sentences: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """'Which of the following is associated with [topic]?' from a concept group."""
+    """'Which of the following is associated with [topic]?' from a concept group.
+
+    All distractors come from the same selected material — items from other
+    concept groups, definition descriptions, or sentence fragments extracted
+    from the same text.  No generic/hardcoded distractors.
+    """
     correct = _format_option(correct_item)
     if not correct or len(correct) < 3:
         return None
 
     distractors: List[str] = []
-    # Prefer items from OTHER groups as distractors
+    # Prefer items from OTHER groups (same material)
     for other_topic, other_items in all_groups:
         if other_topic.lower() == topic.lower():
             continue
@@ -296,14 +302,22 @@ def _build_association_question(
         if len(distractors) >= 3:
             break
 
-    # Fall back to concept names from the definition pool
+    # Fall back to definition descriptions from the same-material pair pool
     if len(distractors) < 3:
-        for concept, _desc in fallback_pool:
-            dist = _format_option(concept)
+        for _concept, desc in fallback_pool:
+            dist = _format_option(desc)
             if dist and dist.lower() != correct.lower() and dist not in distractors:
                 distractors.append(dist)
             if len(distractors) >= 3:
                 break
+
+    # Last fallback: sentence fragments from the same material
+    if len(distractors) < 3 and material_sentences:
+        for fragment in material_sentences:
+            if len(distractors) >= 3:
+                break
+            if fragment.lower() != correct.lower() and fragment not in distractors:
+                distractors.append(fragment)
 
     if len(distractors) < 3:
         return None
@@ -371,11 +385,12 @@ def generate_lecture_quiz(text: str, num_questions: int = 8) -> List[Dict[str, A
 
     # Also pull any definition pairs from the lightweight extractor
     try:
-        from app.services.quiz_gen_light import extract_definitions
+        from app.services.quiz_gen_light import extract_definitions, _extract_material_sentences
         for concept, definition in extract_definitions(text):
             _add_pair(pairs, seen, concept, definition)
+        material_sentences: List[str] = _extract_material_sentences(blob)
     except Exception:
-        pass
+        material_sentences = []
 
     # ── Extract concept groups ─────────────────────────────────────────────
     groups = extract_concept_groups(structured)
@@ -419,7 +434,8 @@ def generate_lecture_quiz(text: str, num_questions: int = 8) -> List[Dict[str, A
             if key in used:
                 continue
             q = _build_association_question(
-                len(questions) + 1, topic, item, groups, pairs
+                len(questions) + 1, topic, item, groups, pairs,
+                material_sentences=material_sentences,
             )
             if q:
                 questions.append(q)
