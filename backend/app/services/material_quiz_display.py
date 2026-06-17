@@ -476,6 +476,89 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _is_metadata_only_doc(doc: Dict[str, Any]) -> bool:
+    """True when Moodle metadata was saved but no extractable file content exists."""
+    if doc.get("metadata_only"):
+        return True
+    ft = str(doc.get("file_type") or "").lower()
+    if _material_stored_content_length(doc) > 0:
+        return False
+    status = str(doc.get("extraction_status") or "")
+    if status == "not_quiz_material":
+        return False
+    return ft in _LINK_FILE_TYPES or status == "not_uploaded"
+
+
+def _find_saved_lecture_doc_for_number(
+    materials: List[Dict[str, Any]],
+    lecture_num: int,
+) -> Optional[Dict[str, Any]]:
+    """Return a saved Mongo row for this lecture number, if any."""
+    for doc in materials:
+        title = doc.get("title") or ""
+        if not _LECTURE_TYPE_RE.search(title):
+            continue
+        m = _LECTURE_NUM_RE.search(title)
+        if m and int(m.group(1)) == lecture_num:
+            return doc
+    return None
+
+
+_METADATA_ONLY_LECTURE_REASON = (
+    "File detected from Moodle but content was not extracted yet"
+)
+
+
+def _apply_metadata_only_lecture_display(display: Dict[str, Any]) -> None:
+    display["quiz_status"] = "not_uploaded"
+    display["quiz_status_reason"] = _METADATA_ONLY_LECTURE_REASON
+    display["reason"] = _METADATA_ONLY_LECTURE_REASON
+    display["why_not_ready"] = _METADATA_ONLY_LECTURE_REASON
+    display["selectable"] = False
+    display["quiz_generation_eligible"] = False
+    display["ready_for_quiz"] = False
+    display["will_generate_successfully"] = False
+    display["visible_in_main_list"] = True
+    display["visible_in_other_items"] = False
+    display["missing_from_db"] = False
+
+
+def _reconcile_missing_lecture_numbers(
+    materials: List[Dict[str, Any]],
+    displays: List[Dict[str, Any]],
+    missing_numbers: List[int],
+) -> List[int]:
+    """
+    Replace synthetic gap placeholders with saved metadata rows when possible.
+
+    If a lecture number has a MongoDB row but was not counted in gap detection
+    (e.g. url/html metadata-only), surface that row instead of a placeholder.
+    """
+    still_missing: List[int] = []
+    by_id = {str(d.get("material_id") or ""): d for d in displays}
+
+    for lecture_num in missing_numbers:
+        doc = _find_saved_lecture_doc_for_number(materials, lecture_num)
+        if not doc:
+            still_missing.append(lecture_num)
+            continue
+
+        mid = str(doc.get("material_id") or "")
+        if mid in by_id:
+            existing = by_id[mid]
+            if _is_metadata_only_doc(doc):
+                _apply_metadata_only_lecture_display(existing)
+            continue
+
+        display = _resolve_one_material(doc)
+        if _is_metadata_only_doc(doc):
+            _apply_metadata_only_lecture_display(display)
+        displays.append(display)
+        by_id[mid] = display
+
+    return still_missing
+
+
 def _append_missing_lecture_placeholders(
     displays: List[Dict[str, Any]],
     missing_numbers: List[int],
@@ -532,7 +615,11 @@ def resolve_quiz_material_display(
 
     missing_lectures = _detect_missing_lecture_numbers(displays)
     if missing_lectures:
-        _append_missing_lecture_placeholders(displays, missing_lectures)
+        missing_lectures = _reconcile_missing_lecture_numbers(
+            materials, displays, missing_lectures,
+        )
+        if missing_lectures:
+            _append_missing_lecture_placeholders(displays, missing_lectures)
         displays.sort(key=material_display_sort_key)
     main_count = sum(1 for d in displays if d.get("visible_in_main_list"))
     other_count = sum(1 for d in displays if d.get("visible_in_other_items"))
