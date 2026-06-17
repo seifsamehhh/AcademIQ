@@ -5,6 +5,7 @@ Handle Moodle material uploads from the Chrome extension for quiz generation.
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -191,6 +192,80 @@ def _normalize_incoming_material_item(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _normalize_source_url(url: str) -> str:
+    u = (url or "").strip()
+    if not u:
+        return ""
+    return u.split("#")[0].strip().lower()
+
+
+def _stable_hash_material_id(prefix: str, key: str) -> str:
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
+    return f"{prefix}_{digest}"
+
+
+def _resolve_save_material_id(
+    course_id: str,
+    norm: Dict[str, Any],
+    batch_cmid_titles: Dict[str, str],
+) -> tuple[str, Optional[Dict[str, Any]], str]:
+    """
+    Choose a stable MongoDB material_id without collapsing different lectures.
+
+    Priority:
+      1. existing row matched by source/resolved URL
+      2. course_id + cmid when unique (batch + DB)
+      3. course_id + normalized source_url hash
+      4. course_id + normalized title + file_type hash
+    """
+    title = norm["title"]
+    raw_file_type = norm["file_type"]
+    activity_url = norm["activity_url"]
+    resolved_url = norm["resolved_url"]
+    cmid = str(norm.get("url_cmid") or "").strip()
+    norm_title = _normalize_title(title)
+    norm_url = _normalize_source_url(activity_url)
+    norm_resolved = _normalize_source_url(resolved_url)
+
+    for url in (activity_url, resolved_url):
+        if not url:
+            continue
+        existing = material_repository.find_by_course_and_url(course_id, url)
+        if existing and existing.get("material_id"):
+            return str(existing["material_id"]), existing, "existing_url"
+
+    if cmid:
+        batch_title = batch_cmid_titles.get(cmid)
+        cmid_unique_in_batch = not batch_title or batch_title == norm_title
+        if cmid_unique_in_batch:
+            existing_cmid = material_repository.get(course_id, cmid)
+            if existing_cmid:
+                existing_title = _normalize_title(existing_cmid.get("title") or "")
+                existing_url = _normalize_source_url(existing_cmid.get("url") or "")
+                same_material = (
+                    existing_title == norm_title
+                    or (norm_url and existing_url == norm_url)
+                    or (norm_resolved and existing_url == norm_resolved)
+                )
+                if same_material:
+                    if not batch_title:
+                        batch_cmid_titles[cmid] = norm_title
+                    return cmid, existing_cmid, "existing_cmid"
+            else:
+                batch_cmid_titles[cmid] = norm_title
+                return cmid, None, "new_cmid"
+
+    if norm_url:
+        mid = _stable_hash_material_id("url", f"{course_id}|{norm_url}")
+        existing = material_repository.get(course_id, mid)
+        return mid, existing, "source_url_key"
+
+    tft_key = f"{norm_title}|{raw_file_type.lower()}"
+    mid = _stable_hash_material_id("tft", f"{course_id}|{tft_key}")
+    existing = material_repository.get(course_id, mid)
+    return mid, existing, "title_file_type_key"
+
+
 def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Upsert metadata for every material detected on a Moodle course page.
@@ -206,21 +281,59 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not course_id:
         raise ValueError("course_id required")
 
+    user_email = (payload.get("user_email") or payload.get("email") or "").strip().lower()
+    academiq_user_id = payload.get("academiq_user_id")
+    if user_email and not academiq_user_id:
+        user = user_repository.find_by_email(user_email)
+        if user:
+            academiq_user_id = str(user["_id"])
+
     inserted = 0
     updated = 0
     skipped = 0
     results: List[Dict[str, Any]] = []
+    audit: List[Dict[str, Any]] = []
+    batch_cmid_titles: Dict[str, str] = {}
 
-    for item in materials_in:
+    for detected_index, item in enumerate(materials_in):
         norm = _normalize_incoming_material_item(item)
-        material_id = norm["material_id"]
         title = norm["title"]
         raw_file_type = norm["file_type"]
         activity_url = norm["activity_url"]
         resolved_url = norm["resolved_url"]
+        cmid = norm.get("url_cmid") or norm.get("material_id")
+
+        is_learning = is_educational_material(title, raw_file_type)
+        is_non_quiz, non_quiz_reason = classify_non_quiz_material(title, raw_file_type)
+        downloadable = _is_downloadable_material(raw_file_type, activity_url, resolved_url)
+
+        audit_row: Dict[str, Any] = {
+            "detected_index": detected_index,
+            "title": title,
+            "href": activity_url or None,
+            "source_url": activity_url or None,
+            "cmid": cmid or None,
+            "file_type": raw_file_type,
+            "is_learning_material": is_learning and not is_non_quiz,
+            "was_sent_to_save_detected": True,
+            "was_saved_in_db": False,
+            "saved_material_id": None,
+            "saved_title": None,
+            "saved_file_type": None,
+            "saved_status": None,
+            "reason_if_not_saved": None,
+            "key_strategy": None,
+        }
+
+        material_id, existing, key_strategy = _resolve_save_material_id(
+            course_id, norm, batch_cmid_titles,
+        )
+        audit_row["key_strategy"] = key_strategy
 
         if not material_id:
             skipped += 1
+            audit_row["reason_if_not_saved"] = "missing_material_id"
+            audit.append(audit_row)
             results.append(
                 {
                     "material_id": None,
@@ -231,10 +344,6 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 }
             )
             continue
-
-        is_non_quiz, non_quiz_reason = classify_non_quiz_material(title, raw_file_type)
-        existing = material_repository.get(course_id, material_id)
-        downloadable = _is_downloadable_material(raw_file_type, activity_url, resolved_url)
 
         scraped: Dict[str, Any] = {
             "title": title,
@@ -247,6 +356,8 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         base_doc = build_material_doc(scraped, course_id, course_name)
         if not base_doc:
             skipped += 1
+            audit_row["reason_if_not_saved"] = "could_not_build_doc"
+            audit.append(audit_row)
             results.append(
                 {
                     "material_id": material_id,
@@ -260,6 +371,14 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         base_doc["material_id"] = material_id
         base_doc["source"] = "moodle_sync"
+        if cmid:
+            base_doc["moodle_cmid"] = str(cmid)
+        if academiq_user_id:
+            base_doc["academiq_user_id"] = academiq_user_id
+        if user_email:
+            base_doc["uploaded_by_email"] = user_email
+
+        is_metadata_only = not downloadable and not is_non_quiz and is_learning
 
         _PROTECTED_ON_EXISTING = frozenset(
             {
@@ -272,6 +391,8 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "extractor_version",
                 "uploaded_by_email",
                 "uploaded_by_user_id",
+                "quiz_status",
+                "metadata_only",
             }
         )
 
@@ -292,6 +413,12 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             mat_type = item.get("material_type") or item.get("type")
             if mat_type:
                 safe_doc["material_type"] = mat_type
+            if cmid:
+                safe_doc["moodle_cmid"] = str(cmid)
+            if academiq_user_id:
+                safe_doc["academiq_user_id"] = academiq_user_id
+            if user_email:
+                safe_doc["uploaded_by_email"] = user_email
             for key, value in base_doc.items():
                 if key in _PROTECTED_ON_EXISTING:
                     continue
@@ -300,21 +427,26 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 safe_doc[key] = value
             is_new = material_repository.upsert(safe_doc)
         else:
-            existing_processed = False
             if is_non_quiz:
                 base_doc["extraction_status"] = "not_quiz_material"
                 base_doc["extraction_error"] = non_quiz_reason
                 base_doc["ready_for_quiz"] = False
+                base_doc["quiz_status"] = "not_quiz_material"
+                base_doc["metadata_only"] = False
             else:
                 base_doc["extraction_status"] = "not_uploaded"
                 if downloadable:
                     base_doc["extraction_error"] = "File detected but not downloaded yet"
+                elif resolved_url and downloadable:
+                    base_doc["extraction_error"] = "Nested download link found but not extracted yet"
                 else:
                     base_doc["extraction_error"] = (
-                        "Content not extracted yet — Moodle link or page resource"
+                        "Moodle activity detected but downloadable file was not found"
                     )
                 base_doc["ready_for_quiz"] = False
                 base_doc["content_chars"] = 0
+                base_doc["quiz_status"] = "not_uploaded"
+                base_doc["metadata_only"] = is_metadata_only
             is_new = material_repository.upsert(base_doc)
 
         if is_new:
@@ -322,15 +454,28 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         else:
             updated += 1
 
+        saved_doc = material_repository.get(course_id, material_id) or existing or base_doc
         if existing:
-            status = str(existing.get("extraction_status") or "already_saved")
-            reason = existing.get("extraction_error")
+            status = str(saved_doc.get("extraction_status") or "already_saved")
+            reason = saved_doc.get("extraction_error")
         elif is_non_quiz:
             status = "not_quiz_material"
             reason = non_quiz_reason
         else:
             status = "not_uploaded"
             reason = base_doc.get("extraction_error")
+
+        audit_row.update(
+            {
+                "was_saved_in_db": True,
+                "saved_material_id": material_id,
+                "saved_title": saved_doc.get("title") or title,
+                "saved_file_type": saved_doc.get("file_type") or raw_file_type,
+                "saved_status": status,
+            }
+        )
+        audit.append(audit_row)
+
         results.append(
             {
                 "material_id": material_id,
@@ -342,10 +487,18 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "status": status,
                 "reason": reason,
                 "downloadable": downloadable,
+                "metadata_only": bool(saved_doc.get("metadata_only")),
+                "key_strategy": key_strategy,
             }
         )
 
+    db_rows = material_repository.list_by_course(course_id)
     metadata_saved_total = inserted + updated
+    lecture_audit = [
+        row for row in audit
+        if re.search(r"(?i)\blecture\b", row.get("title") or "")
+        or re.search(r"(?i)\blecture\b", row.get("saved_title") or "")
+    ]
     return {
         "course_id": course_id,
         "detected_total": len(materials_in),
@@ -353,8 +506,15 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         "metadata_inserted": inserted,
         "metadata_updated": updated,
         "metadata_skipped": skipped,
-        "saved_total": metadata_saved_total,
+        "saved_total": len(db_rows),
+        "db_materials_found_for_course": len(db_rows),
+        "total_metadata_only_materials": sum(1 for d in db_rows if d.get("metadata_only")),
+        "total_content_materials": sum(
+            1 for d in db_rows if _content_chars_from_doc(d) > 0
+        ),
         "materials": results,
+        "audit": audit,
+        "lecture_audit": lecture_audit,
     }
 
 

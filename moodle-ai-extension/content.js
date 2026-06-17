@@ -346,10 +346,65 @@
 
     const cleanText = (value) => value?.replace(/\s+/g, " ").trim() || null;
 
+    const stableUrlHash = (seed) => {
+        const s = String(seed || "").split("#")[0].toLowerCase();
+        let hash = 0;
+        for (let i = 0; i < s.length; i += 1) {
+            hash = ((hash << 5) - hash + s.charCodeAt(i)) | 0;
+        }
+        return `url_${Math.abs(hash).toString(36)}`;
+    };
+
     const parseMaterialId = (url, activity) => {
         const fromUrl = url?.match(/[?&](?:id|cmid)=([^&#]+)/i)?.[1];
         if (fromUrl) return fromUrl;
-        return activity?.getAttribute("data-id") || activity?.id || `material_${Math.random().toString(36).slice(2, 9)}`;
+        const dataId = activity?.getAttribute("data-id") || activity?.id;
+        if (dataId && /^\d+$/.test(String(dataId))) return String(dataId);
+        if (url) return stableUrlHash(url);
+        const title = cleanText(activity?.textContent || activity?.innerText || "");
+        return stableUrlHash(title || "unknown");
+    };
+
+    const isEducationalLearningTitle = (title) =>
+        /lecture|lec\s*\d|lab|revision|rev\s*\d/i.test(title || "");
+
+    const NESTED_DOWNLOAD_RE = /\.(pdf|pptx?|docx?|txt)(\?|$)/i;
+    const PLUGINFILE_RE = /pluginfile\.php/i;
+
+    const inferFileTypeFromUrl = (url) => {
+        const path = (url || "").split("?")[0];
+        const ext = path.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+        if (!ext || ext === "php") return null;
+        if (ext === "ppt") return "pptx";
+        if (ext === "doc") return "docx";
+        return ext;
+    };
+
+    const findNestedDownloadUrl = async (activityUrl, baseHref) => {
+        if (!activityUrl) return null;
+        try {
+            const response = await fetch(activityUrl, {
+                method: "GET",
+                credentials: "include",
+                redirect: "follow"
+            });
+            if (!response.ok) return null;
+            const html = await response.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, "text/html");
+            const pageUrl = response.url || activityUrl;
+            const anchors = Array.from(doc.querySelectorAll("a[href]"));
+            for (const anchor of anchors) {
+                const href = resolveHref(anchor, pageUrl);
+                if (!href) continue;
+                if (PLUGINFILE_RE.test(href) || NESTED_DOWNLOAD_RE.test(href.split("?")[0])) {
+                    return href;
+                }
+            }
+            return null;
+        } catch (_error) {
+            return null;
+        }
     };
 
     const MIME_TYPE_MAP = [
@@ -549,8 +604,34 @@
                 fileType = pathExtension && pathExtension !== "php" ? pathExtension : "html";
             }
 
+            const isUrlLike = ["html", "link", "url", "page"].includes(String(fileType || "").toLowerCase());
+            if (
+                isEducationalLearningTitle(title) &&
+                isUrlLike &&
+                !PLUGINFILE_RE.test(url || "")
+            ) {
+                const nestedUrl = await findNestedDownloadUrl(url, baseHref);
+                if (nestedUrl) {
+                    resolvedUrl = nestedUrl;
+                    const nestedType = inferFileTypeFromUrl(nestedUrl);
+                    if (nestedType) {
+                        fileType = nestedType;
+                    } else if (needsHeadProbe(nestedUrl, null)) {
+                        const nestedHead = await fetchHeadMetadata(nestedUrl);
+                        contentType = nestedHead.contentType || contentType;
+                        contentDisposition = nestedHead.contentDisposition || contentDisposition;
+                        filename = nestedHead.filename || filename;
+                        resolvedUrl = nestedHead.finalUrl || nestedUrl;
+                        fileType =
+                            mapMimeTypeToFileType(contentType) ||
+                            inferFileTypeFromUrl(resolvedUrl) ||
+                            fileType;
+                    }
+                }
+            }
+
             const materialType = classifyMaterialType(activity, title, fileType, url);
-            const downloadable = evaluateDownloadability(activity, materialType, url, contentDisposition);
+            const downloadable = evaluateDownloadability(activity, materialType, resolvedUrl || url, contentDisposition);
             const dedupeKey = `${course.course_id || "unknown"}-${materialId}-${url}`;
 
             if (seen.has(dedupeKey)) return null;

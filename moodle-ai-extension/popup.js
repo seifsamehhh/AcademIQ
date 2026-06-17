@@ -66,6 +66,37 @@ const normalizeMaterialForApi = (m) => ({
     material_type: m.type || m.material_type || null,
 });
 
+const logSaveDetectedAudit = (saveData, courseId) => {
+    const audit = saveData?.audit || [];
+    const lectureAudit = saveData?.lecture_audit || audit.filter((row) =>
+        /lecture/i.test(row?.title || "") || /lecture/i.test(row?.saved_title || "")
+    );
+    console.group(`[AcademIQ] Save-detected audit — course ${courseId}`);
+    console.log(
+        "detected:", saveData?.detected_total,
+        "| upsert ops:", saveData?.metadata_saved_total,
+        "| unique DB rows:", saveData?.db_materials_found_for_course
+    );
+    if (lectureAudit.length) {
+        console.table(
+            lectureAudit.map((row) => ({
+                idx: row.detected_index,
+                title: row.title,
+                cmid: row.cmid,
+                file_type: row.file_type,
+                key: row.key_strategy,
+                saved: row.was_saved_in_db,
+                saved_id: row.saved_material_id,
+                status: row.saved_status,
+                reason: row.reason_if_not_saved,
+            }))
+        );
+    } else {
+        console.log("No lecture rows in audit payload.");
+    }
+    console.groupEnd();
+};
+
 /**
  * Call POST /materials/save-detected — metadata-only upsert for all detected items.
  */
@@ -681,6 +712,9 @@ const formatQuizUploadSummary = ({
     if (metadataSaved > 0 || detected > 0) {
         parts.push(`Saved metadata ${metadataSaved || detected}`);
     }
+    if (dbFound > 0) {
+        parts.push(`DB has ${dbFound} unique rows`);
+    }
     if (preflightChecked > 0) {
         parts.push(`Preflight checked ${preflightChecked}`);
         if (dbFound > 0) parts.push(`DB has ${dbFound} for course`);
@@ -767,6 +801,7 @@ const runQuizMaterialUpload = async () => {
     const excludedFromDownload = detected - downloadable.length;
 
     let metadataSaved = 0;
+    let dbFound = 0;
 
     // ── Step 2: save metadata for EVERY detected material ───────────────────
     refs.uploadMeta.textContent =
@@ -797,6 +832,8 @@ const runQuizMaterialUpload = async () => {
             saveRes.data.metadata_saved_total ||
             saveRes.data.saved_total ||
             detected;
+        logSaveDetectedAudit(saveRes.data, courseId);
+        dbFound = saveRes.data.db_materials_found_for_course || dbFound;
     }
 
     // ── Step 3: preflight — runs from popup context (chrome-extension:// origin) ──
@@ -809,7 +846,6 @@ const runQuizMaterialUpload = async () => {
     let skippedExtractionFailed = 0;
     let reprocessing = 0;
     let preflightChecked = 0;
-    let dbFound = 0;
     let onlyMaterialIds = null;
 
     const downloadableIdSet = new Set(
