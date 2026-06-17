@@ -16,7 +16,9 @@ from app.services.material_text_extract import extract_text_from_bytes
 from app.services.material_quiz_display import (
     classify_non_quiz_material,
     is_educational_material,
+    matches_educational_title,
 )
+from app.services.quiz_material_eligibility import assess_quiz_eligibility
 from app.services.student_data import (
     MIN_QUIZ_CONTENT_CHARS,
     MIN_EDUCATIONAL_REPROCESS_CHARS,
@@ -317,6 +319,212 @@ def _resolve_save_material_id(
     return mid, existing, "title_file_type_key"
 
 
+_MIN_PROBE_READY = 5
+_MIN_PROBE_LIMITED = 3
+
+
+def _derive_readiness_from_probe(
+    text: str,
+    file_type: str,
+) -> Dict[str, Any]:
+    """
+    Map stored content_text to DB readiness fields using the same probe pipeline
+    as Quiz Generation display (no course-context fallback).
+    """
+    stripped = (text or "").strip()
+    chars = len(stripped)
+    base: Dict[str, Any] = {
+        "content_chars": chars,
+        "ready_for_quiz": False,
+        "extraction_status": "not_uploaded",
+        "extraction_error": "No readable text extracted yet",
+        "probe_question_count": 0,
+        "probe_engine": None,
+        "probe_failure_reason": None,
+        "quiz_probe_status": "not_uploaded",
+    }
+    if not stripped:
+        return base
+
+    _, reason_code, meta = assess_quiz_eligibility(
+        stripped,
+        file_type=file_type,
+        probe=True,
+    )
+    probe_count = int(meta.get("probe_question_count") or 0)
+    base.update(
+        {
+            "probe_question_count": probe_count,
+            "probe_engine": meta.get("probe_engine"),
+            "probe_failure_reason": meta.get("probe_failure_reason"),
+            "cleaned_text_length": meta.get("cleaned_text_length"),
+            "concept_candidate_count": meta.get("concept_candidate_count"),
+        }
+    )
+
+    if probe_count >= _MIN_PROBE_READY:
+        base.update(
+            {
+                "ready_for_quiz": True,
+                "extraction_status": "success",
+                "extraction_error": None,
+                "quiz_probe_status": "ready",
+            }
+        )
+        return base
+
+    if probe_count >= _MIN_PROBE_LIMITED:
+        base.update(
+            {
+                "ready_for_quiz": True,
+                "extraction_status": "success",
+                "extraction_error": meta.get("probe_failure_reason"),
+                "quiz_probe_status": "limited_ready",
+            }
+        )
+        return base
+
+    if chars < MIN_QUIZ_CONTENT_CHARS:
+        base.update(
+            {
+                "ready_for_quiz": False,
+                "extraction_status": "insufficient_text",
+                "extraction_error": reason_code or (
+                    f"Only {chars} characters extracted (need at least "
+                    f"{MIN_QUIZ_CONTENT_CHARS})."
+                ),
+                "quiz_probe_status": "extraction_too_short",
+            }
+        )
+        return base
+
+    base.update(
+        {
+            "ready_for_quiz": False,
+            "extraction_status": "success",
+            "extraction_error": reason_code or meta.get("probe_failure_reason")
+            or "insufficient_quiz_structure",
+            "quiz_probe_status": "not_enough_readable_text",
+        }
+    )
+    return base
+
+
+def reassess_course_material_readiness(course_id: str) -> Dict[str, Any]:
+    """
+    Re-run slide/PDF probe on stored content_text for educational materials.
+    Does not download files or break upload caching for empty rows.
+    """
+    course_id = str(course_id or "").strip()
+    if not course_id:
+        raise ValueError("course_id required")
+
+    now = datetime.utcnow()
+    docs = material_repository.list_by_course(course_id)
+    results: List[Dict[str, Any]] = []
+    updated_count = 0
+
+    for doc in docs:
+        title = doc.get("title") or "Untitled"
+        file_type = str(doc.get("file_type") or "unknown")
+        material_id = str(doc.get("material_id") or "")
+        if not material_id:
+            continue
+
+        is_non_quiz, non_quiz_reason = classify_non_quiz_material(title, file_type)
+        if is_non_quiz or not is_educational_material(title, file_type):
+            continue
+
+        text = (doc.get("content_text") or "").strip()
+        if not text:
+            err = str(doc.get("extraction_error") or "")
+            stale_failed = doc.get("extraction_status") == "extraction_failed"
+            if stale_failed and matches_educational_title(title):
+                material_repository.upsert(
+                    {
+                        "course_id": course_id,
+                        "material_id": material_id,
+                        "extraction_status": "not_uploaded",
+                        "extraction_error": (
+                            "File detected from Moodle but content was not extracted yet"
+                        ),
+                        "ready_for_quiz": False,
+                        "content_chars": 0,
+                        "metadata_only": True,
+                    }
+                )
+                updated_count += 1
+                results.append(
+                    {
+                        "material_id": material_id,
+                        "title": title,
+                        "action": "reset_stale_failed_to_not_uploaded",
+                        "quiz_status": "not_uploaded",
+                        "chars": 0,
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "material_id": material_id,
+                        "title": title,
+                        "action": "skipped_no_content",
+                        "quiz_status": "not_uploaded",
+                        "chars": 0,
+                        "reason": err or "No content_text stored",
+                    }
+                )
+            continue
+
+        probe_fields = _derive_readiness_from_probe(text, file_type)
+        sync_doc: Dict[str, Any] = {
+            "course_id": course_id,
+            "material_id": material_id,
+            "title": title,
+            "file_type": file_type,
+            "content_text": text,
+            "content_chars": probe_fields["content_chars"],
+            "ready_for_quiz": probe_fields["ready_for_quiz"],
+            "extraction_status": probe_fields["extraction_status"],
+            "extraction_error": probe_fields["extraction_error"],
+            "metadata_only": False,
+            "processed_at": now,
+            "extractor_version": CURRENT_EXTRACTOR_VERSION,
+        }
+        material_repository.upsert(sync_doc)
+        updated_count += 1
+        results.append(
+            {
+                "material_id": material_id,
+                "title": title,
+                "action": "synced_from_probe",
+                "chars": probe_fields["content_chars"],
+                "probe_question_count": probe_fields["probe_question_count"],
+                "probe_engine": probe_fields.get("probe_engine"),
+                "quiz_status": probe_fields["quiz_probe_status"],
+                "ready_for_quiz": probe_fields["ready_for_quiz"],
+                "reason": probe_fields.get("extraction_error"),
+            }
+        )
+
+    ready = [r for r in results if r.get("quiz_status") == "ready"]
+    limited = [r for r in results if r.get("quiz_status") == "limited_ready"]
+    disabled = [r for r in results if r.get("quiz_status") not in ("ready", "limited_ready")]
+
+    return {
+        "course_id": course_id,
+        "reassessed_total": len(results),
+        "updated_count": updated_count,
+        "ready_count": len(ready),
+        "limited_ready_count": len(limited),
+        "disabled_count": len(disabled),
+        "ready_materials": ready,
+        "limited_ready_materials": limited,
+        "disabled_materials": disabled,
+        "materials": results,
+    }
+
+
 def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Upsert metadata for every material detected on a Moodle course page.
@@ -550,6 +758,7 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         if re.search(r"(?i)\blecture\b", row.get("title") or "")
         or re.search(r"(?i)\blecture\b", row.get("saved_title") or "")
     ]
+    reassess_summary = reassess_course_material_readiness(course_id)
     return {
         "course_id": course_id,
         "detected_total": len(materials_in),
@@ -566,6 +775,14 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         "materials": results,
         "audit": audit,
         "lecture_audit": lecture_audit,
+        "readiness_reassess": {
+            "ready_count": reassess_summary.get("ready_count"),
+            "limited_ready_count": reassess_summary.get("limited_ready_count"),
+            "disabled_count": reassess_summary.get("disabled_count"),
+            "ready_materials": reassess_summary.get("ready_materials"),
+            "limited_ready_materials": reassess_summary.get("limited_ready_materials"),
+            "disabled_materials": reassess_summary.get("disabled_materials"),
+        },
     }
 
 
@@ -1117,7 +1334,22 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
             }
 
         if existing_doc.get("processed_at") or existing_chars > 0:
-            already_ready = existing_chars >= MIN_QUIZ_CONTENT_CHARS
+            probe_fields = _derive_readiness_from_probe(
+                existing_doc.get("content_text") or "", str(file_type),
+            )
+            if probe_fields["content_chars"] > 0:
+                material_repository.upsert(
+                    {
+                        "course_id": course_id,
+                        "material_id": material_id,
+                        "ready_for_quiz": probe_fields["ready_for_quiz"],
+                        "extraction_status": probe_fields["extraction_status"],
+                        "extraction_error": probe_fields["extraction_error"],
+                        "content_chars": probe_fields["content_chars"],
+                        "metadata_only": False,
+                    }
+                )
+            already_ready = probe_fields["ready_for_quiz"]
             return {
                 "status": "skipped_existing",
                 "already_ready": already_ready,
@@ -1130,8 +1362,9 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "chars": existing_chars,
                 "ready_for_quiz": already_ready,
                 "hasContent": already_ready,
-                "extraction_status": existing_doc.get("extraction_status", "success"),
-                "extraction_error": existing_doc.get("extraction_error"),
+                "extraction_status": probe_fields["extraction_status"],
+                "extraction_error": probe_fields["extraction_error"],
+                "probe_question_count": probe_fields.get("probe_question_count"),
                 "content_note": "Previously processed — not re-extracted",
                 "inserted": False,
                 "ok": True,
@@ -1158,33 +1391,20 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     text = (text or "").strip()
     chars = len(text)
 
-    # ── Determine readiness (simplified — no probe, just text length check) ──
-    #
-    # The quiz generator uses a four-engine pipeline (light → lecture → heavy →
-    # fragment) that handles any educational content type.  We no longer run a
-    # per-material probe at upload time because:
-    #   1. It was rejecting valid lab/PPTX/fragmented materials.
-    #   2. The fragment fallback now covers any text with ≥4 readable sentences.
-    # Only true failures (no bytes, corrupted file, unsupported format) are
-    # marked not-ready.
     if extraction_error and not text:
         extraction_status = "extraction_failed"
         ready_for_quiz = False
+        probe_count = 0
     elif not text:
         extraction_status = "no_content"
         ready_for_quiz = False
-    elif chars < MIN_QUIZ_CONTENT_CHARS:
-        # Confirmed too-short after extraction — stored as "insufficient_text" so
-        # subsequent preflights classify it as "already_classified" and stop re-uploading.
-        extraction_status = "insufficient_text"
-        extraction_error = extraction_error or (
-            f"Extracted only {chars} characters; need at least {MIN_QUIZ_CONTENT_CHARS}."
-        )
-        ready_for_quiz = False
+        probe_count = 0
     else:
-        extraction_status = "success"
-        extraction_error = None
-        ready_for_quiz = True
+        probe_fields = _derive_readiness_from_probe(text, str(file_type))
+        extraction_status = probe_fields["extraction_status"]
+        extraction_error = probe_fields["extraction_error"]
+        ready_for_quiz = probe_fields["ready_for_quiz"]
+        probe_count = probe_fields.get("probe_question_count", 0)
 
     material_doc = build_material_doc(
         {
@@ -1249,6 +1469,7 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         "hasContent": ready_for_quiz,
         "extraction_status": extraction_status,
         "extraction_error": extraction_error,
+        "probe_question_count": probe_count,
         "content_note": content_note,
         "inserted": inserted,
     }

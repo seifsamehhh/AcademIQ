@@ -1,0 +1,45 @@
+﻿[OK] Connected to MongoDB Atlas!
+Lecture 7
+  id=url_1a53cd55d7ac3d1228ed ft=link chars=0
+  stored=not_uploaded -> not_uploaded probe=0 main=True non_quiz=False
+  reason=File detected from Moodle but content was not extracted yet
+
+Lecture 7 URL
+  id=17604 ft=link chars=0
+  stored=extraction_failed -> extraction_failed probe=0 main=True non_quiz=False
+  reason=unsupported_file_type:link
+
+Lecture 8
+  id=url_4614c491416129c7dee7 ft=link chars=0
+  stored=not_uploaded -> not_uploaded probe=0 main=True non_quiz=False
+  reason=File detected from Moodle but content was not extracted yet
+
+Lecture 8 URL
+  id=17605 ft=link chars=0
+  stored=extraction_failed -> extraction_failed probe=0 main=True non_quiz=False
+  reason=unsupported_file_type:link
+
+python : Traceback (most recent call last):
+At C:\Users\Seif Sameh\AppData\Local\Temp\ps-script-195b5d71-f26c-439f-b3aa-d3755eace545.ps1:82 char:40
++ ... Get-Location).Path; python scripts/audit_aai_lectures.py 2>&1 | Out-F ...
++                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "C:\Users\Seif Sameh\Downloads\AcademIQ-main-extracted\AcademIQ-main\backend\scripts\audit_aai_lectures.py", 
+line 35, in <module>
+    print(
+    ~~~~~^
+        f"{row['title']}\n"
+        ^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+        f"  reason={row['reason']}\n"
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Program 
+Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3824.0_x64__qbz5n2kfra8p0\Lib\encodings\cp1252.py", line 
+19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2192' in position 238: character maps to <undefined>

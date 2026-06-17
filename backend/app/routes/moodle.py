@@ -8,6 +8,7 @@ from app.schema.schemas import list_raw_moodle_payload_serial
 from app.services.material_quiz_upload import (
     process_material_upload_for_quiz,
     preflight_materials,
+    reassess_course_material_readiness,
     save_detected_materials,
 )
 from app.services.preprocessing import compute_features
@@ -57,6 +58,23 @@ async def save_detected_material_metadata(payload: Dict[str, Any]):
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Save detected failed: {exc}")
+
+
+@router.post("/materials/reassess-readiness")
+async def reassess_material_readiness(payload: Dict[str, Any]):
+    """
+    Re-run slide/PDF probe on stored content for educational materials in a course.
+    Does not download Moodle files or bypass upload caching for empty rows.
+    """
+    course_id = str(payload.get("course_id") or "").strip()
+    if not course_id:
+        raise HTTPException(status_code=400, detail="course_id required")
+    try:
+        return reassess_course_material_readiness(course_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Reassess readiness failed: {exc}")
 
 
 @router.post("/materials/preflight")
