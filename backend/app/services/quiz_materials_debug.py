@@ -134,6 +134,7 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
     materials_out: List[Dict[str, Any]] = []
     status_counts: Dict[str, int] = {
         "ready": 0,
+        "limited_ready": 0,
         "not_uploaded": 0,
         "extraction_failed": 0,
         "extraction_too_short": 0,
@@ -185,6 +186,8 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
                 "visible_in_quiz": display["visible_in_main_list"],
                 "selectable": display["selectable"],
                 "probe_question_count": display.get("probe_question_count"),
+                "question_count_possible": display.get("question_count_possible"),
+                "min_questions_required": display.get("min_questions_required"),
             }
         )
 

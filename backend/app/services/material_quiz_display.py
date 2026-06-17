@@ -20,6 +20,10 @@ from app.services.student_data import (
 )
 
 MIN_READY_QUESTIONS = 5
+MIN_LIMITED_QUESTIONS = 3
+LIMITED_QUIZ_NOTE = (
+    "Limited quiz generated because the material has limited readable content."
+)
 
 _SORT_GROUP_LABELS = [
     "Lecture",
@@ -45,21 +49,6 @@ _NOTES_TYPE_RE = re.compile(
 )
 
 
-def material_sort_number(title: str) -> int:
-    """Extract lecture/lab/revision number; ignore course-code digits."""
-    for pattern in (
-        _LECTURE_NUM_RE,
-        _LAB_NUM_RE,
-        _REVISION_NUM_RE,
-        _CHAPTER_NUM_RE,
-        _WEEK_NUM_RE,
-    ):
-        m = pattern.search(title or "")
-        if m:
-            return int(m.group(1))
-    return 9999
-
-
 def material_sort_group(title: str, is_non_quiz: bool) -> int:
     if is_non_quiz:
         return 5
@@ -75,14 +64,40 @@ def material_sort_group(title: str, is_non_quiz: bool) -> int:
     return 4
 
 
+def material_sort_number(title: str, sort_group: Optional[int] = None) -> int:
+    """Extract lecture/lab/revision number; ignore course-code digits like SWE423."""
+    t = title or ""
+    sg = sort_group if sort_group is not None else material_sort_group(t, False)
+
+    if sg == 0:
+        m = _LECTURE_NUM_RE.search(t)
+        return int(m.group(1)) if m else 9999
+    if sg == 1:
+        m = _LAB_NUM_RE.search(t)
+        return int(m.group(1)) if m else 9999
+    if sg == 2:
+        m = _REVISION_NUM_RE.search(t)
+        return int(m.group(1)) if m else 9999
+    if sg == 3:
+        for pattern in (_CHAPTER_NUM_RE, _WEEK_NUM_RE, _NOTES_TYPE_RE):
+            m = pattern.search(t)
+            if m and m.lastindex:
+                return int(m.group(1))
+        return 9999
+    return 9999
+
+
 def _map_eligibility_to_status(
     reason_code: Optional[str],
     content_len: int,
     probe_count: int,
-) -> Tuple[str, str]:
+) -> Tuple[str, Optional[str]]:
     """Map assess_quiz_eligibility output to UI quiz_status + human reason."""
     if probe_count >= MIN_READY_QUESTIONS:
         return "ready", None
+
+    if probe_count >= MIN_LIMITED_QUESTIONS:
+        return "limited_ready", LIMITED_QUIZ_NOTE
 
     if content_len < MIN_QUIZ_CONTENT_CHARS:
         return (
@@ -98,13 +113,6 @@ def _map_eligibility_to_status(
 
     if reason_code == "unsupported_material_format":
         return "unsupported", msg
-
-    if reason_code in (
-        "no_meaningful_concepts",
-        "insufficient_quiz_structure",
-        "content_mostly_noise",
-    ) or probe_count > 0:
-        return "not_enough_readable_text", msg
 
     if reason_code == "content_too_short":
         return "extraction_too_short", msg
@@ -149,11 +157,13 @@ def resolve_material_display(doc: Dict[str, Any]) -> Dict[str, Any]:
             "why_not_ready": reason,
             "sort_group": sg,
             "sort_group_label": _SORT_GROUP_LABELS[sg],
-            "sort_number": material_sort_number(title),
+            "sort_number": material_sort_number(title, sg),
             "visible_in_main_list": False,
             "visible_in_other_items": True,
             "selectable": False,
             "probe_question_count": 0,
+            "question_count_possible": 0,
+            "min_questions_required": MIN_LIMITED_QUESTIONS,
         }
 
     # ── Educational learning material ───────────────────────────────────────
@@ -161,6 +171,8 @@ def resolve_material_display(doc: Dict[str, Any]) -> Dict[str, Any]:
     why_not_ready: Optional[str] = None
     probe_count = 0
     eligibility_meta: Dict[str, Any] = {}
+    content_note: Optional[str] = None
+    quiz_status = "not_uploaded"
 
     if extraction_status == "extraction_failed":
         quiz_status = "extraction_failed"
@@ -195,10 +207,11 @@ def resolve_material_display(doc: Dict[str, Any]) -> Dict[str, Any]:
         quiz_status, content_note = _map_eligibility_to_status(
             reason_code, len(content), probe_count,
         )
-        will_generate = quiz_status == "ready"
+        will_generate = quiz_status in ("ready", "limited_ready")
         if not will_generate:
             why_not_ready = content_note
 
+    selectable = quiz_status in ("ready", "limited_ready")
     quiz_ready = quiz_status == "ready"
     sg = material_sort_group(title, False)
 
@@ -208,17 +221,19 @@ def resolve_material_display(doc: Dict[str, Any]) -> Dict[str, Any]:
         "is_educational_material": True,
         "is_non_quiz_material": False,
         "content_text_length": content_len,
-        "quiz_generation_eligible": quiz_ready,
+        "quiz_generation_eligible": selectable,
         "ready_for_quiz": quiz_ready,
         "will_generate_successfully": will_generate,
         "why_not_ready": why_not_ready,
         "sort_group": sg,
         "sort_group_label": _SORT_GROUP_LABELS[sg],
-        "sort_number": material_sort_number(title),
+        "sort_number": material_sort_number(title, sg),
         "visible_in_main_list": True,
         "visible_in_other_items": False,
-        "selectable": quiz_ready,
+        "selectable": selectable,
         "probe_question_count": probe_count,
+        "question_count_possible": probe_count,
+        "min_questions_required": MIN_LIMITED_QUESTIONS,
         "eligibility_meta": {
             k: eligibility_meta.get(k)
             for k in (

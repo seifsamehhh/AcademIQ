@@ -26,17 +26,25 @@ const REVISION_NUM_RE = /\b(?:revision|review|summary)\s*#?(\d+)/i;
 const CHAPTER_NUM_RE = /\bchapters?\s*#?(\d+)/i;
 const WEEK_NUM_RE = /\bweek\s*#?(\d+)/i;
 
-function extractMaterialNumber(title: string): number {
-  const patterns = [
-    LECTURE_NUM_RE,
-    LAB_NUM_RE,
-    REVISION_NUM_RE,
-    CHAPTER_NUM_RE,
-    WEEK_NUM_RE,
-  ];
-  for (const re of patterns) {
-    const m = title.match(re);
-    if (m?.[1]) return parseInt(m[1], 10);
+function extractMaterialNumber(title: string, sortGroup: number): number {
+  if (sortGroup === 0) {
+    const m = title.match(LECTURE_NUM_RE);
+    return m?.[1] ? parseInt(m[1], 10) : 9999;
+  }
+  if (sortGroup === 1) {
+    const m = title.match(LAB_NUM_RE);
+    return m?.[1] ? parseInt(m[1], 10) : 9999;
+  }
+  if (sortGroup === 2) {
+    const m = title.match(REVISION_NUM_RE);
+    return m?.[1] ? parseInt(m[1], 10) : 9999;
+  }
+  if (sortGroup === 3) {
+    for (const re of [CHAPTER_NUM_RE, WEEK_NUM_RE]) {
+      const m = title.match(re);
+      if (m?.[1]) return parseInt(m[1], 10);
+    }
+    return 9999;
   }
   return 9999;
 }
@@ -57,8 +65,9 @@ function sortGroup(m: LearningMaterial): number {
 }
 
 function sortNumber(m: LearningMaterial): number {
+  const sg = sortGroup(m);
   if (typeof m.sortNumber === "number" && m.sortNumber < 9999) return m.sortNumber;
-  return extractMaterialNumber(m.title);
+  return extractMaterialNumber(m.title, sg);
 }
 
 function sortMaterials(list: LearningMaterial[]): LearningMaterial[] {
@@ -69,7 +78,8 @@ function sortMaterials(list: LearningMaterial[]): LearningMaterial[] {
     const na = sortNumber(a);
     const nb = sortNumber(b);
     if (na !== nb) return na - nb;
-    return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
+    // Never use numeric localeCompare on full titles — SWE423/CSC344 digits break order.
+    return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
   });
 }
 
@@ -86,7 +96,11 @@ function isOtherMoodleItem(m: LearningMaterial): boolean {
 }
 
 function isSelectable(m: LearningMaterial): boolean {
-  return m.quizStatus === "ready" && m.quizGenerationEligible === true;
+  if (m.quizStatus === "not_quiz_material") return false;
+  if (m.quizStatus === "ready" || m.quizStatus === "limited_ready") {
+    return m.quizGenerationEligible === true;
+  }
+  return false;
 }
 
 function statusBadge(m: LearningMaterial): {
@@ -96,6 +110,8 @@ function statusBadge(m: LearningMaterial): {
   switch (m.quizStatus) {
     case "ready":
       return { label: "Ready for quiz", variant: "default" };
+    case "limited_ready":
+      return { label: "Ready, limited", variant: "warning" };
     case "extraction_too_short":
       return { label: "Extraction too short", variant: "warning" };
     case "not_enough_readable_text":
@@ -161,6 +177,11 @@ function MaterialRow({
           {material.quizStatusReason || material.contentNote}
         </p>
       ) : null}
+      {selectable && material.quizStatus === "limited_ready" && material.quizStatusReason ? (
+        <p className="w-full basis-full pl-9 text-xs text-muted-foreground">
+          {material.quizStatusReason}
+        </p>
+      ) : null}
     </label>
   );
 }
@@ -181,9 +202,9 @@ export function MaterialSelect({
       <CardHeader>
         <CardTitle>Select Learning Materials</CardTitle>
         <CardDescription>
-          Lectures, labs, and revisions appear first in order. Only materials
-          marked &ldquo;Ready for quiz&rdquo; can generate a quiz from their own
-          content. Admin and project files are listed under Other Moodle items.
+          Lectures, labs, and revisions appear first in order. Materials marked
+          &ldquo;Ready for quiz&rdquo; or &ldquo;Ready, limited&rdquo; generate
+          from their own content only. Admin files are under Other Moodle items.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">

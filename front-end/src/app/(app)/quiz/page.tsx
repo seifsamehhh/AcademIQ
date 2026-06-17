@@ -107,7 +107,7 @@ function QuizDebugPanel({
                     <td className="pr-2">{sortGroupDbg(m)}</td>
                     <td className="pr-2">{extractNumDbg(m)}</td>
                     <td className="pr-2">{m.quizStatus ?? "–"}</td>
-                    <td>{m.quizStatus === "ready" && m.quizGenerationEligible ? "✓" : "✗"}</td>
+                    <td>{m.quizStatus === "ready" || m.quizStatus === "limited_ready" ? "✓" : "✗"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -148,7 +148,10 @@ const QUIZ_DEBUG = process.env.NEXT_PUBLIC_QUIZ_DEBUG === "true";
 
 function isMaterialSelectable(m: LearningMaterial): boolean {
   if (m.quizStatus === "not_quiz_material") return false;
-  return m.quizStatus === "ready" && m.quizGenerationEligible === true;
+  if (m.quizStatus === "ready" || m.quizStatus === "limited_ready") {
+    return m.quizGenerationEligible === true;
+  }
+  return false;
 }
 
 export default function QuizPage() {

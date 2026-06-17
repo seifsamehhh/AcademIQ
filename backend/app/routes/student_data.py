@@ -10,7 +10,7 @@ Paths intentionally have NO /api prefix to match the frontend's api.ts calls
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -22,7 +22,6 @@ from app.services.student_data import (
     MIN_QUIZ_CONTENT_CHARS,
     _classify_non_quiz_material,
     _is_educational_material,
-    _is_quiz_generation_eligible,
 )
 
 logger = logging.getLogger(__name__)
@@ -155,10 +154,10 @@ def generate_quiz(
                 },
             )
 
-        if not _is_quiz_generation_eligible(title, file_type, content):
-            from app.services.material_quiz_display import resolve_material_display
+        from app.services.material_quiz_display import resolve_material_display
 
-            display = resolve_material_display(doc)
+        display = resolve_material_display(doc)
+        if not display["selectable"]:
             reason = (
                 display.get("why_not_ready")
                 or display["quiz_status_reason"]
@@ -183,6 +182,27 @@ def generate_quiz(
     primary_title: str = (mat_meta[0].get("title") or "") if mat_meta else ""
     selected_titles = [m.get("title") for m in mat_meta]
 
+    from app.services.material_quiz_display import (
+        LIMITED_QUIZ_NOTE,
+        MIN_LIMITED_QUESTIONS,
+        resolve_material_display,
+    )
+
+    material_displays = [
+        resolve_material_display(material_repository.get(course_id, str(mid)))
+        for mid in material_ids
+    ]
+    limited_note: Optional[str] = None
+    target_questions = 5
+    if len(material_ids) == 1 and material_displays[0]:
+        single = material_displays[0]
+        if single["quiz_status"] == "limited_ready":
+            possible = int(single.get("question_count_possible") or MIN_LIMITED_QUESTIONS)
+            target_questions = min(max(possible, MIN_LIMITED_QUESTIONS), 4)
+            limited_note = LIMITED_QUIZ_NOTE
+        elif single["quiz_status"] == "ready":
+            target_questions = 5
+
     logger.info(
         "Quiz request course=%s materials=%s content_chars=%d mode=selected_material_only",
         course_id, material_ids, content_chars,
@@ -203,9 +223,11 @@ def generate_quiz(
             },
         )
 
-    questions, engine = quiz_gen.generate_questions(selected_text, num_questions=5)
+    questions, engine = quiz_gen.generate_questions(
+        selected_text, num_questions=target_questions,
+    )
 
-    if not questions:
+    if not questions or len(questions) < MIN_LIMITED_QUESTIONS:
         raise HTTPException(
             status_code=422,
             detail={
@@ -238,7 +260,7 @@ def generate_quiz(
         "engine": engine,
     }
 
-    return {
+    result: Dict[str, Any] = {
         "courseId": course_id,
         "materialIds": material_ids,
         "questions": questions,
@@ -246,3 +268,7 @@ def generate_quiz(
         "generatorMode": generator_mode,
         "debug": debug,
     }
+    if limited_note:
+        result["limitedQuizNote"] = limited_note
+
+    return result

@@ -242,6 +242,7 @@ export interface LearningMaterial {
    */
   quizStatus?:
     | "ready"
+    | "limited_ready"
     | "not_uploaded"
     | "extraction_failed"
     | "too_short"
@@ -263,6 +264,8 @@ export interface LearningMaterial {
   visibleInOtherItems?: boolean;
   sortGroup?: number;
   sortNumber?: number;
+  questionCountPossible?: number;
+  minQuestionsRequired?: number;
 }
 
 export interface QuizQuestion {
@@ -278,13 +281,12 @@ export interface GeneratedQuiz {
   /** Material ids the quiz was generated from. */
   materialIds: string[];
   questions: QuizQuestion[];
+  /** Shown when a limited_ready material generated 3–4 questions. */
+  limitedQuizNote?: string;
   /**
-   * "selected_material_only"  — content came from the chosen material alone.
-   * "course_context_fallback" — selected material had sparse text; quiz was
-   *                             generated using other ready materials in the
-   *                             same course as supporting context.
+   * "selected_material_only" — content came from the chosen material alone.
    */
-  generatorMode?: "selected_material_only" | "course_context_fallback" | string;
+  generatorMode?: "selected_material_only" | string;
   engine?: string;
   debug?: {
     generator_mode?: string;

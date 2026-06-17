@@ -14,7 +14,8 @@ from app.services.student_data import MIN_QUIZ_CONTENT_CHARS
 
 logger = logging.getLogger(__name__)
 
-_MIN_PROBE_QUESTIONS = 5
+_MIN_LIMITED_QUESTIONS = 3
+_MIN_READY_QUESTIONS = 5
 
 _REASON_MESSAGES = {
     "missing_content_text": (
@@ -172,18 +173,22 @@ def reason_message(code: Optional[str]) -> Optional[str]:
 def probe_question_count(text: str, num_questions: int = 8) -> Tuple[int, str]:
     """
     Try lightweight → lecture → heavy generators. Returns (count, engine_used).
-    Does not raise — used for eligibility probes and debug endpoints.
+    Always returns the best question count found (even 1–4), not only when ≥5.
     """
     normalized = normalize_quiz_text(text)
     if not normalized:
         return 0, "none"
 
+    best_count = 0
+    best_engine = "none"
+
     try:
         from app.services.quiz_gen_light import generate_lightweight
 
         light = generate_lightweight(normalized, num_questions=num_questions)
-        if len(light) >= _MIN_PROBE_QUESTIONS:
-            return len(light), "light"
+        if len(light) > best_count:
+            best_count = len(light)
+            best_engine = "light"
     except Exception as exc:
         logger.warning("Lightweight quiz probe failed: %s", exc)
 
@@ -191,8 +196,9 @@ def probe_question_count(text: str, num_questions: int = 8) -> Tuple[int, str]:
         from app.services.quiz_gen_lecture import generate_lecture_quiz
 
         lecture = generate_lecture_quiz(normalized, num_questions=num_questions)
-        if len(lecture) >= _MIN_PROBE_QUESTIONS:
-            return len(lecture), "lecture"
+        if len(lecture) > best_count:
+            best_count = len(lecture)
+            best_engine = "lecture"
     except Exception as exc:
         logger.warning("Lecture quiz probe failed: %s", exc)
 
@@ -201,14 +207,13 @@ def probe_question_count(text: str, num_questions: int = 8) -> Tuple[int, str]:
 
         if quiz_gen.available():
             heavy = quiz_gen.generate_from_text(normalized, num_questions=num_questions)
-            if len(heavy) >= _MIN_PROBE_QUESTIONS:
-                return len(heavy), "heavy"
-            if heavy:
-                return len(heavy), "heavy_partial"
+            if len(heavy) > best_count:
+                best_count = len(heavy)
+                best_engine = "heavy" if len(heavy) >= _MIN_READY_QUESTIONS else "heavy_partial"
     except Exception as exc:
         logger.warning("Heavy quiz probe failed: %s", exc)
 
-    return 0, "none"
+    return best_count, best_engine
 
 
 def assess_quiz_eligibility(
@@ -262,7 +267,7 @@ def assess_quiz_eligibility(
         count, engine = probe_question_count(normalized)
         meta["probe_question_count"] = count
         meta["probe_engine"] = engine
-        if count >= _MIN_PROBE_QUESTIONS:
+        if count >= _MIN_LIMITED_QUESTIONS:
             meta["quiz_generation_eligible"] = True
             return True, None, meta
 
@@ -280,7 +285,7 @@ def assess_quiz_eligibility(
     total_concepts = definition_pair_count + lecture_count
     meta["total_concepts"] = total_concepts
 
-    if total_concepts >= _MIN_PROBE_QUESTIONS:
+    if total_concepts >= _MIN_LIMITED_QUESTIONS:
         meta["quiz_generation_eligible"] = True
         return True, None, meta
 

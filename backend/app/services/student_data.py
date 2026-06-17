@@ -193,7 +193,7 @@ def _is_quiz_generation_eligible(
     file_type: str,
     content_text: str,
 ) -> bool:
-    """Strict: must pass educational/non-quiz checks and generate ≥5 questions from text."""
+    """Educational/non-quiz checks + probe can produce at least 3 questions."""
     if _classify_non_quiz_material(title, file_type)[0]:
         return False
     if not _is_educational_material(title, file_type):
@@ -201,12 +201,12 @@ def _is_quiz_generation_eligible(
     text = (content_text or "").strip()
     if len(text) < MIN_QUIZ_CONTENT_CHARS:
         return False
-    from app.services.material_quiz_display import MIN_READY_QUESTIONS
+    from app.services.material_quiz_display import MIN_LIMITED_QUESTIONS
     from app.services.quiz_material_eligibility import assess_quiz_eligibility
 
     _, reason, meta = assess_quiz_eligibility(text, file_type=file_type, probe=True)
     probe_count = int(meta.get("probe_question_count") or 0)
-    return probe_count >= MIN_READY_QUESTIONS
+    return probe_count >= MIN_LIMITED_QUESTIONS
 
 
 # Minimal recommendation text per heuristic risk factor (mirrors the v4 map).
@@ -604,12 +604,13 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
         raw_file_type = (doc.get("file_type") or doc.get("category") or "file")
         display = resolve_material_display(doc)
         quiz_ready = display["quiz_status"] == "ready"
+        quiz_selectable = display["selectable"]
 
         out.append({
             "id": str(doc.get("material_id") or ""),
             "title": title,
             "kind": raw_file_type.upper(),
-            "hasContent": quiz_ready,
+            "hasContent": quiz_selectable,
             "readyForQuiz": quiz_ready,
             "source": _material_source(doc),
             "contentNote": display["quiz_status_reason"],
@@ -624,6 +625,8 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             "visibleInOtherItems": display["visible_in_other_items"],
             "sortGroup": display["sort_group"],
             "sortNumber": display["sort_number"],
+            "questionCountPossible": display.get("question_count_possible"),
+            "minQuestionsRequired": display.get("min_questions_required"),
         })
     return out
 

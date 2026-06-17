@@ -49,6 +49,9 @@ export function QuizView({ quiz }: { quiz: GeneratedQuiz }) {
                 {quiz.questions.length} questions from {quiz.materialIds.length} material
                 {quiz.materialIds.length === 1 ? "" : "s"}
               </CardDescription>
+              {quiz.limitedQuizNote ? (
+                <p className="mt-2 text-sm text-muted-foreground">{quiz.limitedQuizNote}</p>
+              ) : null}
             </div>
             {submitted && (
               <Badge
