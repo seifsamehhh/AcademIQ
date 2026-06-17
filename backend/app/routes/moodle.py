@@ -5,7 +5,11 @@ from typing import Dict, Any
 
 from app.config.database import raw_moodle_payload_collection, feature_vectors_collection
 from app.schema.schemas import list_raw_moodle_payload_serial
-from app.services.material_quiz_upload import process_material_upload_for_quiz, preflight_materials
+from app.services.material_quiz_upload import (
+    process_material_upload_for_quiz,
+    preflight_materials,
+    save_detected_materials,
+)
 from app.services.preprocessing import compute_features
 from app.services.moodle_ingest import normalize_payload, slim_payload
 from app.services.user_provisioning import (
@@ -37,6 +41,22 @@ async def upload_material_for_quiz(payload: Dict[str, Any]):
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Upload failed: {exc}")
+
+
+@router.post("/materials/save-detected")
+async def save_detected_material_metadata(payload: Dict[str, Any]):
+    """
+    Save metadata for every material detected on a Moodle course page.
+
+    Does not require file bytes. Call before preflight/upload so url/html/link
+    lectures appear in MongoDB even when no downloadable file exists yet.
+    """
+    try:
+        return save_detected_materials(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Save detected failed: {exc}")
 
 
 @router.post("/materials/preflight")

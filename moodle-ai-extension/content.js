@@ -803,14 +803,16 @@
         return btoa(binary);
     };
 
-    const QUIZ_UPLOAD_FILE_TYPES = new Set(["pdf", "pptx", "ppt", "docx", "doc", "txt", "text"]);
+    const QUIZ_DOWNLOAD_FILE_TYPES = new Set(["pdf", "pptx", "ppt", "docx", "doc", "txt", "text"]);
 
-    const isQuizUploadableMaterial = (material) => {
+    const isDownloadableMaterial = (material) => {
         const ft = (material.file_type || material.fileType || "").toLowerCase();
-        const url = material.resolvedUrl || material.url || "";
-        if (QUIZ_UPLOAD_FILE_TYPES.has(ft)) return true;
+        const url = material.resolvedUrl || material.resolved_url || material.url || "";
+        if (QUIZ_DOWNLOAD_FILE_TYPES.has(ft)) return true;
         return /\.(pdf|pptx?|docx?|txt)(\?|$)/i.test(url);
     };
+
+    const isQuizUploadableMaterial = isDownloadableMaterial;
 
     const fetchMaterialBytes = async (material) => {
         const url = material.resolvedUrl || material.url;
@@ -908,8 +910,8 @@
             sendMessage("materials", allMaterials);
         }
 
-        // Filter to uploadable types, then apply popup's preflight filter if present
-        let uploadable = allMaterials.filter(isQuizUploadableMaterial);
+        // Filter to downloadable types, then apply popup's preflight filter if present
+        let uploadable = allMaterials.filter(isDownloadableMaterial);
 
         if (Array.isArray(onlyMaterialIds)) {
             // Popup already ran preflight — only download what it approved

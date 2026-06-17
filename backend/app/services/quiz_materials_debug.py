@@ -159,11 +159,13 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
                 "status": quiz_status,
                 "reason": display.get("reason"),
                 "source": "missing_from_db",
+                "source_url": None,
                 "content_text_length": 0,
                 "extraction_status": None,
                 "is_educational_material": True,
                 "is_non_quiz_material": False,
-                "can_reprocess": False,
+                "is_placeholder": True,
+                "missing_from_db": True,
                 "quiz_generation_eligible": False,
                 "ready_for_quiz": False,
                 "will_generate_successfully": False,
@@ -211,11 +213,13 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
                 "status": quiz_status,
                 "reason": display.get("reason") or quiz_status_reason,
                 "source": doc.get("source") or doc.get("seed_source") or "unknown",
+                "source_url": doc.get("url") or doc.get("source_url") or doc.get("resolved_url"),
                 "content_text_length": display["content_text_length"],
                 "extraction_status": (doc.get("extraction_status") or None),
                 "is_educational_material": display["is_educational_material"],
                 "is_non_quiz_material": display["is_non_quiz_material"],
-                "can_reprocess": can_reprocess,
+                "is_placeholder": False,
+                "missing_from_db": display.get("missing_from_db", False),
                 "quiz_generation_eligible": display["quiz_generation_eligible"],
                 "ready_for_quiz": display["ready_for_quiz"],
                 "will_generate_successfully": display["will_generate_successfully"],
@@ -238,6 +242,7 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
                 "question_count_possible": display.get("question_count_possible"),
                 "min_questions_required": display.get("min_questions_required"),
                 "missing_from_db": display.get("missing_from_db", False),
+                "can_reprocess": can_reprocess,
             }
         )
     visible_count = sum(1 for m in materials_out if m["visible_in_main_list"])
@@ -248,6 +253,9 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
         1 for m in materials_out if m["quiz_status"] in ("ready", "extraction_too_short")
     )
 
+    saved_total = len(docs)
+    placeholder_count = sum(1 for m in materials_out if m.get("is_placeholder"))
+
     return {
         "user_exists": user_exists,
         "user_email": normalized_email or None,
@@ -256,7 +264,10 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
         "course_name": course_name,
         "course_in_visible_synced_list": course_id in visible_course_ids if course_id else False,
         "visible_synced_course_ids": visible_course_ids,
-        "total_saved_materials": course_meta.get("total_saved_materials", len(materials_out)),
+        "saved_total": saved_total,
+        "detected_total": saved_total,
+        "placeholder_count": placeholder_count,
+        "total_saved_materials": course_meta.get("total_saved_materials", saved_total),
         "main_list_count": course_meta.get("main_list_count", visible_count),
         "other_items_count": course_meta.get("other_items_count", 0),
         "missing_educational_count": course_meta.get("missing_educational_count", 0),

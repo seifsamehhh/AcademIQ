@@ -11,12 +11,16 @@ from typing import Any, Dict, List, Optional
 from app.models.material import build_material_doc, stable_material_id
 from app.repositories import material_repository, user_repository
 from app.services.material_text_extract import extract_text_from_bytes
+from app.services.material_quiz_display import (
+    classify_non_quiz_material,
+    is_educational_material,
+)
 from app.services.student_data import (
     MIN_QUIZ_CONTENT_CHARS,
     MIN_EDUCATIONAL_REPROCESS_CHARS,
-    _classify_non_quiz_material,
-    _is_educational_material,
 )
+
+_DOWNLOADABLE_FILE_TYPES = {"pdf", "pptx", "ppt", "docx", "doc", "txt", "text"}
 
 
 _TITLE_STOP_WORDS = {"the", "a", "an", "and", "or", "for", "of", "to", "in", "is", "on", "at", "by"}
@@ -52,6 +56,185 @@ def _title_word_overlap(t1: str, t2: str) -> float:
     if not w1 or not w2:
         return 0.0
     return len(w1 & w2) / len(w1 | w2)
+
+
+def _is_downloadable_material(
+    file_type: str,
+    activity_url: str = "",
+    resolved_url: str = "",
+) -> bool:
+    """True when the extension can fetch file bytes (PDF/PPTX/DOCX/TXT)."""
+    ft = (file_type or "").lower().strip()
+    if ft in _DOWNLOADABLE_FILE_TYPES:
+        return True
+    for url in (activity_url, resolved_url):
+        if url and re.search(r"\.(pdf|pptx?|docx?|txt)(\?|$)", url, re.I):
+            return True
+    return False
+
+
+def _normalize_incoming_material_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    title = (item.get("title") or "Untitled").strip()
+    raw_file_type = str(item.get("file_type") or item.get("fileType") or "unknown").strip()
+    activity_url = str(item.get("source_url") or item.get("url") or "").strip()
+    resolved_url = str(item.get("resolved_url") or item.get("resolvedUrl") or "").strip()
+    raw_material_id = str(
+        item.get("material_id") or item.get("id") or stable_material_id(item) or ""
+    ).strip()
+    url_cmid = _material_id_from_url(activity_url) or _material_id_from_url(resolved_url)
+    material_id = url_cmid or raw_material_id
+    return {
+        "title": title,
+        "file_type": raw_file_type,
+        "activity_url": activity_url,
+        "resolved_url": resolved_url,
+        "raw_material_id": raw_material_id,
+        "material_id": material_id,
+        "url_cmid": url_cmid,
+    }
+
+
+def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Upsert metadata for every material detected on a Moodle course page.
+
+    Does not require file bytes. Educational url/html/link resources are saved
+    with extraction_status=not_uploaded so the quiz UI shows real rows instead
+    of synthetic gap placeholders.
+    """
+    course_id = str(payload.get("course_id") or "").strip()
+    course_name = payload.get("course_name")
+    materials_in = payload.get("materials") or []
+
+    if not course_id:
+        raise ValueError("course_id required")
+
+    inserted = 0
+    updated = 0
+    skipped = 0
+    results: List[Dict[str, Any]] = []
+
+    for item in materials_in:
+        norm = _normalize_incoming_material_item(item)
+        material_id = norm["material_id"]
+        title = norm["title"]
+        raw_file_type = norm["file_type"]
+        activity_url = norm["activity_url"]
+        resolved_url = norm["resolved_url"]
+
+        if not material_id:
+            skipped += 1
+            results.append(
+                {
+                    "material_id": None,
+                    "title": title,
+                    "saved": False,
+                    "status": "skipped",
+                    "reason": "missing_material_id",
+                }
+            )
+            continue
+
+        is_non_quiz, non_quiz_reason = classify_non_quiz_material(title, raw_file_type)
+        existing = material_repository.get(course_id, material_id)
+        existing_text = (existing.get("content_text") or "").strip() if existing else ""
+        downloadable = _is_downloadable_material(raw_file_type, activity_url, resolved_url)
+
+        scraped: Dict[str, Any] = {
+            "title": title,
+            "url": activity_url or None,
+            "resolved_url": resolved_url or None,
+            "file_type": raw_file_type,
+            "material_type": item.get("material_type") or item.get("type"),
+            "material_id": material_id,
+        }
+        base_doc = build_material_doc(scraped, course_id, course_name)
+        if not base_doc:
+            skipped += 1
+            results.append(
+                {
+                    "material_id": material_id,
+                    "title": title,
+                    "saved": False,
+                    "status": "skipped",
+                    "reason": "could_not_build_doc",
+                }
+            )
+            continue
+
+        base_doc["material_id"] = material_id
+        base_doc["source"] = "moodle_sync"
+
+        if is_non_quiz:
+            if not existing_text:
+                base_doc["extraction_status"] = "not_quiz_material"
+                base_doc["extraction_error"] = non_quiz_reason
+                base_doc["ready_for_quiz"] = False
+        elif not existing_text:
+            base_doc["extraction_status"] = "not_uploaded"
+            if downloadable:
+                base_doc["extraction_error"] = "File detected but not downloaded yet"
+            else:
+                base_doc["extraction_error"] = (
+                    "Content not extracted yet — Moodle link or page resource"
+                )
+            base_doc["ready_for_quiz"] = False
+            base_doc["content_chars"] = 0
+        else:
+            for key in (
+                "extraction_status",
+                "extraction_error",
+                "ready_for_quiz",
+                "content_text",
+                "content_chars",
+            ):
+                base_doc.pop(key, None)
+
+        is_new = material_repository.upsert(base_doc)
+        if is_new:
+            inserted += 1
+        else:
+            updated += 1
+
+        status = (
+            "not_quiz_material"
+            if is_non_quiz
+            else ("not_uploaded" if not existing_text else "already_has_content")
+        )
+        reason = (
+            non_quiz_reason
+            if is_non_quiz
+            else (
+                base_doc.get("extraction_error")
+                or existing.get("extraction_error")
+                or None
+            )
+        )
+        results.append(
+            {
+                "material_id": material_id,
+                "title": title,
+                "file_type": raw_file_type,
+                "source_url": activity_url or None,
+                "saved": True,
+                "inserted": is_new,
+                "status": status,
+                "reason": reason,
+                "downloadable": downloadable,
+            }
+        )
+
+    metadata_saved_total = inserted + updated
+    return {
+        "course_id": course_id,
+        "detected_total": len(materials_in),
+        "metadata_saved_total": metadata_saved_total,
+        "metadata_inserted": inserted,
+        "metadata_updated": updated,
+        "metadata_skipped": skipped,
+        "saved_total": metadata_saved_total,
+        "materials": results,
+    }
 
 
 def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -118,20 +301,18 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
     from app.config.database import course_materials_collection
 
     for item in materials_in:
-        title = (item.get("title") or "Untitled").strip()
-        raw_file_type = str(item.get("file_type") or item.get("fileType") or "unknown").strip()
-        activity_url = str(item.get("source_url") or item.get("url") or "").strip()
-        resolved_url = str(item.get("resolved_url") or "").strip()
-        raw_material_id = str(
-            item.get("material_id") or item.get("id") or stable_material_id(item) or ""
-        ).strip()
-
-        # Extract cmid from the activity URL (?id=NNNN) — most stable identifier
-        url_cmid = _material_id_from_url(activity_url) or _material_id_from_url(resolved_url)
-        material_id = url_cmid or raw_material_id
+        norm = _normalize_incoming_material_item(item)
+        title = norm["title"]
+        raw_file_type = norm["file_type"]
+        activity_url = norm["activity_url"]
+        resolved_url = norm["resolved_url"]
+        raw_material_id = norm["raw_material_id"]
+        url_cmid = norm["url_cmid"]
+        material_id = norm["material_id"]
+        downloadable = _is_downloadable_material(raw_file_type, activity_url, resolved_url)
 
         # ── A: Non-quiz classification (no DB needed) ─────────────────────────
-        is_non_quiz, non_quiz_reason = _classify_non_quiz_material(title, raw_file_type)
+        is_non_quiz, non_quiz_reason = classify_non_quiz_material(title, raw_file_type)
         if is_non_quiz:
             results.append({
                 "material_id": material_id,
@@ -301,11 +482,16 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             results.append({
                 "material_id": material_id,
                 "title": title,
-                "should_upload": True,
-                "status": "not_uploaded",
-                "reason": "No DB record found",
+                "should_upload": downloadable,
+                "status": "not_uploaded" if downloadable else "metadata_only",
+                "reason": (
+                    "No DB record found — file download needed"
+                    if downloadable
+                    else "Metadata-only Moodle resource — no downloadable file"
+                ),
                 "content_text_length": 0,
                 "matched_by": None,
+                "downloadable": downloadable,
                 "debug": debug_info,
             })
             continue
@@ -333,10 +519,14 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
         # Determine whether to allow re-upload
-        is_educ = _is_educational_material(title, raw_file_type)
+        is_educ = is_educational_material(title, raw_file_type)
 
         if force_reupload:
-            should_reupload = existing_status in _CLASSIFIED_STATUSES and existing_chars == 0
+            should_reupload = (
+                existing_status in _CLASSIFIED_STATUSES
+                and existing_chars == 0
+                and downloadable
+            )
         elif existing_chars >= MIN_EDUCATIONAL_REPROCESS_CHARS:
             # Well-extracted — always skip regardless of material type
             should_reupload = False
@@ -346,15 +536,18 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         elif existing_status in _CLASSIFIED_STATUSES:
             # Definitively classified — skip (re-extraction confirmed it's too short/non-quiz)
             should_reupload = False
+        elif existing_chars == 0 and not downloadable:
+            # Moodle url/html/page — metadata saved, nothing to download
+            should_reupload = False
         elif existing_chars > 0 and existing_chars < MIN_QUIZ_CONTENT_CHARS:
             # Has content but below usable threshold — allow re-extraction
             # (catches old records that were marked "success" under the old 200-char threshold)
-            should_reupload = True
+            should_reupload = downloadable
         elif is_educ and existing_chars < MIN_EDUCATIONAL_REPROCESS_CHARS:
             # Educational material below quality threshold — offer improved re-extraction
-            should_reupload = True
+            should_reupload = downloadable
         else:
-            should_reupload = False
+            should_reupload = downloadable if existing_chars == 0 else False
 
         if existing_chars >= MIN_QUIZ_CONTENT_CHARS and existing_status in _READY_STATUSES:
             out_status = "already_ready"
@@ -368,6 +561,12 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 f"Only {existing_chars} chars (status={existing_status or 'none'}) — "
                 f"re-extraction recommended (min reliable: {MIN_EDUCATIONAL_REPROCESS_CHARS})"
             )
+        elif existing_chars == 0 and not downloadable:
+            out_status = "not_uploaded"
+            reason = (
+                existing_doc.get("extraction_error")
+                or "Content not extracted yet — Moodle link or page resource"
+            )
         else:
             out_status = "already_processed"
             reason = f"Record exists in DB (status={existing_status or 'none'})"
@@ -380,6 +579,7 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             "reason": reason,
             "content_text_length": existing_chars,
             "matched_by": matched_by,
+            "downloadable": downloadable,
             "debug": debug_info,
         })
 
@@ -396,9 +596,15 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         method = (r.get("matched_by") or "not_found").split(":")[0]
         match_method_summary[method] = match_method_summary.get(method, 0) + 1
 
+    downloadable_count = sum(1 for r in results if r.get("downloadable"))
+
     return {
         "course_id": course_id,
         "checked": len(results),
+        "preflight_checked_total": len(results),
+        "detected_total": len(materials_in),
+        "downloadable_count": downloadable_count,
+        "metadata_only_count": len(results) - downloadable_count,
         "should_upload_count": should_upload_count,
         "matched_count": matched_count,
         "no_match_count": no_match_count,

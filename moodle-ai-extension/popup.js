@@ -5,6 +5,7 @@ const SYNC_PATH = "/raw-moodle-payloads";
 const UPLOAD_QUIZ_PATH = "/materials/upload-for-quiz";
 const CONTENT_PATH = "/materials/content";
 const PREFLIGHT_PATH = "/materials/preflight";
+const SAVE_DETECTED_PATH = "/materials/save-detected";
 
 /** Strip any known API paths from the end so we always have a clean base URL. */
 const normalizeApiBase = (url) => {
@@ -13,6 +14,7 @@ const normalizeApiBase = (url) => {
         .replace(/\/raw-moodle-payloads\/?$/, "")
         .replace(/\/materials\/upload-for-quiz\/?$/, "")
         .replace(/\/materials\/preflight\/?$/, "")
+        .replace(/\/materials\/save-detected\/?$/, "")
         .replace(/\/materials\/content\/?$/, "");
 };
 
@@ -22,6 +24,7 @@ const buildBackendUrls = (apiBase) => {
         sync: `${base}${SYNC_PATH}`,
         uploadQuiz: `${base}${UPLOAD_QUIZ_PATH}`,
         preflight: `${base}${PREFLIGHT_PATH}`,
+        saveDetected: `${base}${SAVE_DETECTED_PATH}`,
         content: `${base}${CONTENT_PATH}`,
         base,
     };
@@ -30,6 +33,7 @@ const buildBackendUrls = (apiBase) => {
 let BACKEND_URL = buildBackendUrls(PRODUCTION_API_BASE).sync;
 let UPLOAD_QUIZ_URL = buildBackendUrls(PRODUCTION_API_BASE).uploadQuiz;
 let PREFLIGHT_URL = buildBackendUrls(PRODUCTION_API_BASE).preflight;
+let SAVE_DETECTED_URL = buildBackendUrls(PRODUCTION_API_BASE).saveDetected;
 let CONTENT_URL = buildBackendUrls(PRODUCTION_API_BASE).content;
 
 /** Load saved API base URL, update all globals, and fill the settings input. */
@@ -41,6 +45,7 @@ const loadBackendConfig = () =>
             BACKEND_URL = urls.sync;
             UPLOAD_QUIZ_URL = urls.uploadQuiz;
             PREFLIGHT_URL = urls.preflight;
+            SAVE_DETECTED_URL = urls.saveDetected;
             CONTENT_URL = urls.content;
             // Populate the settings input if it exists in the DOM
             const input = document.getElementById("backendUrlInput");
@@ -48,6 +53,57 @@ const loadBackendConfig = () =>
             resolve();
         });
     });
+
+/**
+ * Normalize a scraped Moodle material for backend API payloads.
+ */
+const normalizeMaterialForApi = (m) => ({
+    material_id: m.material_id || m.id,
+    title: m.title || "Untitled",
+    source_url: m.url || m.source_url || null,
+    resolved_url: m.resolvedUrl || m.resolved_url || null,
+    file_type: m.fileType || m.file_type || "unknown",
+    material_type: m.type || m.material_type || null,
+});
+
+/**
+ * Call POST /materials/save-detected — metadata-only upsert for all detected items.
+ */
+const callSaveDetectedFromPopup = async (courseId, materials, identity, courseName) => {
+    const saveUrl = SAVE_DETECTED_URL;
+    const body = {
+        course_id: String(courseId),
+        course_name: courseName || null,
+        user_email: identity?.email || null,
+        materials: materials.map(normalizeMaterialForApi),
+    };
+    try {
+        const res = await fetch(saveUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+            let errText = "";
+            try { errText = await res.text(); } catch (_) {}
+            return {
+                ok: false,
+                httpStatus: res.status,
+                error: `HTTP ${res.status}${errText ? `: ${errText.slice(0, 160)}` : ""}`,
+                saveUrl,
+            };
+        }
+        const data = await res.json();
+        return { ok: true, data, saveUrl };
+    } catch (err) {
+        return {
+            ok: false,
+            httpStatus: 0,
+            error: String(err.message || err),
+            saveUrl,
+        };
+    }
+};
 
 /**
  * Call POST /materials/preflight from the POPUP context (chrome-extension:// origin).
@@ -65,14 +121,7 @@ const callPreflightFromPopup = async (courseId, materials, identity) => {
     const body = {
         course_id: String(courseId),
         user_email: identity?.email || null,
-        materials: materials.map((m) => ({
-            material_id: m.material_id || m.id,
-            title: m.title || "Untitled",
-            // activity URL (has ?id=cmid) is most stable; resolved_url is pluginfile fallback
-            source_url: m.url || m.source_url || null,
-            resolved_url: m.resolvedUrl || m.resolved_url || null,
-            file_type: m.fileType || m.file_type || "unknown"
-        }))
+        materials: materials.map(normalizeMaterialForApi),
     };
 
     try {
@@ -436,14 +485,18 @@ const addScanAllButton = () => {
     });
 };
 
-const QUIZ_UPLOAD_FILE_TYPES = new Set(["pdf", "pptx", "ppt", "docx", "doc", "txt", "text"]);
+const QUIZ_DOWNLOAD_FILE_TYPES = new Set(["pdf", "pptx", "ppt", "docx", "doc", "txt", "text"]);
 
-const isQuizUploadableMaterial = (material) => {
-    const ft = (material.fileType || "").toLowerCase();
-    const url = material.url || "";
-    if (QUIZ_UPLOAD_FILE_TYPES.has(ft)) return true;
+/** True when the extension can download file bytes from Moodle (not url/html wrappers). */
+const isDownloadableMaterial = (material) => {
+    const ft = (material.fileType || material.file_type || "").toLowerCase();
+    const url = material.resolvedUrl || material.resolved_url || material.url || "";
+    if (QUIZ_DOWNLOAD_FILE_TYPES.has(ft)) return true;
     return /\.(pdf|pptx?|docx?|txt)(\?|$)/i.test(url);
 };
+
+/** Legacy alias — only use for download/upload filtering, not metadata save. */
+const isQuizUploadableMaterial = isDownloadableMaterial;
 
 const getActiveMoodleTab = () =>
     new Promise((resolve) => {
@@ -580,8 +633,10 @@ const formatQuizUploadSummary = ({
     courseId,
     courseName,
     detected = 0,
+    metadataSaved = 0,
     preflightChecked = 0,
     dbFound = 0,
+    uploadAttempted = 0,
     uploaded = 0,
     ready = 0,
     failed = 0,
@@ -591,16 +646,29 @@ const formatQuizUploadSummary = ({
     alreadyClassified = 0,
     skippedExtractionFailed = 0,
     reprocessing = 0,
+    excludedFromDownload = 0,
+    excludedReason = "",
     endpoint,
     extra = ""
 }) => {
     const parts = [
         `Course ${courseId}${courseName ? ` · ${courseName}` : ""}`,
-        `Detected ${detected}`
+        `Detected ${detected}`,
     ];
+    if (metadataSaved > 0 || detected > 0) {
+        parts.push(`Saved metadata ${metadataSaved || detected}`);
+    }
     if (preflightChecked > 0) {
         parts.push(`Preflight checked ${preflightChecked}`);
         if (dbFound > 0) parts.push(`DB has ${dbFound} for course`);
+    }
+    if (uploadAttempted > 0 || total > 0) {
+        parts.push(`Downloadable/upload attempted ${uploadAttempted || total}`);
+    }
+    if (excludedFromDownload > 0) {
+        parts.push(
+            `Excluded ${excludedFromDownload}${excludedReason ? ` (${excludedReason})` : " (not downloadable)"}`
+        );
     }
     if (skippedExisting > 0) {
         const detail = [];
@@ -609,7 +677,7 @@ const formatQuizUploadSummary = ({
         if (skippedExtractionFailed > 0) detail.push(`${skippedExtractionFailed} extraction failed`);
         const rest = skippedExisting - alreadyReady - alreadyClassified - skippedExtractionFailed;
         if (rest > 0) detail.push(`${rest} other`);
-        parts.push(`Skipped ${skippedExisting}${detail.length ? ` (${detail.join(", ")})` : ""}`);
+        parts.push(`Skipped existing ${skippedExisting}${detail.length ? ` (${detail.join(", ")})` : ""}`);
     }
     if (reprocessing > 0) {
         parts.push(`Re-extracting ${reprocessing} educational (too short)`);
@@ -671,14 +739,46 @@ const runQuizMaterialUpload = async () => {
 
     // All materials visible on the page (metadata only, no downloads yet)
     const scrapedMaterials = tabSync.materials || [];
-    const uploadable = scrapedMaterials.filter(isQuizUploadableMaterial);
     const detected = scrapedMaterials.length;
+    const downloadable = scrapedMaterials.filter(isDownloadableMaterial);
+    const excludedFromDownload = detected - downloadable.length;
 
-    // ── Step 2: preflight — runs from popup context (chrome-extension:// origin) ──
-    // This avoids CORS rejection that would occur if fetch ran from content.js
-    // (which carries the Moodle page's origin, not the extension origin).
+    let metadataSaved = 0;
+
+    // ── Step 2: save metadata for EVERY detected material ───────────────────
     refs.uploadMeta.textContent =
-        `Preflight check: ${PREFLIGHT_URL} (${uploadable.length} files)...`;
+        `Saving metadata for ${detected} detected materials...`;
+
+    if (detected > 0) {
+        const saveRes = await callSaveDetectedFromPopup(
+            courseId,
+            scrapedMaterials,
+            identity,
+            courseName
+        );
+        if (!saveRes.ok) {
+            const httpNote =
+                saveRes.httpStatus === 404
+                    ? " — endpoint not found (backend may need redeployment)"
+                    : saveRes.httpStatus === 0
+                        ? " — network error"
+                        : ` — HTTP ${saveRes.httpStatus}`;
+            refs.uploadMeta.textContent =
+                `Save metadata failed at ${saveRes.saveUrl}${httpNote}: ${saveRes.error}. ` +
+                `Check the backend URL in Settings below and try again.`;
+            btn.disabled = false;
+            btn.textContent = "Upload materials for quiz";
+            return;
+        }
+        metadataSaved =
+            saveRes.data.metadata_saved_total ||
+            saveRes.data.saved_total ||
+            detected;
+    }
+
+    // ── Step 3: preflight — runs from popup context (chrome-extension:// origin) ──
+    refs.uploadMeta.textContent =
+        `Preflight check: ${PREFLIGHT_URL} (${detected} materials)...`;
 
     let skippedExisting = 0;
     let alreadyReady = 0;
@@ -687,10 +787,14 @@ const runQuizMaterialUpload = async () => {
     let reprocessing = 0;
     let preflightChecked = 0;
     let dbFound = 0;
-    let onlyMaterialIds = null; // null = upload everything (fallback if preflight fails)
+    let onlyMaterialIds = null;
 
-    if (uploadable.length > 0) {
-        const pf = await callPreflightFromPopup(courseId, uploadable, identity);
+    const downloadableIdSet = new Set(
+        downloadable.map((m) => String(m.material_id || m.id))
+    );
+
+    if (detected > 0) {
+        const pf = await callPreflightFromPopup(courseId, scrapedMaterials, identity);
 
         if (!pf.ok) {
             const httpNote =
@@ -701,71 +805,56 @@ const runQuizMaterialUpload = async () => {
                         : ` — HTTP ${pf.httpStatus}`;
             refs.uploadMeta.textContent =
                 `Preflight failed at ${pf.preflightUrl}${httpNote}: ${pf.error}. ` +
-                `Check the backend URL in Settings below and try again.`;
+                `Metadata was saved (${metadataSaved}). Check backend URL and try again.`;
             btn.disabled = false;
             btn.textContent = "Upload materials for quiz";
             return;
         }
 
-        // Preflight succeeded — build the filtered upload list
         preflightChecked = (pf.data.materials || []).length;
         dbFound = pf.data.db_materials_found_for_course || 0;
 
-        // Log full preflight response to console for debugging
         console.group(`[AcademIQ] Preflight response — course ${courseId}`);
-        console.log("checked:", pf.data.checked, "| should_upload:", pf.data.should_upload_count,
-            "| matched:", pf.data.matched_count, "| no_match:", pf.data.no_match_count);
-        console.log("already_ready:", pf.data.already_ready,
-            "| already_classified:", pf.data.already_classified,
-            "| extraction_failed:", pf.data.extraction_failed);
-        console.log("DB materials found for course:", pf.data.db_materials_found_for_course);
-        console.log("DB sample (first 5 stored):", pf.data.db_sample);
-        console.log("Match method summary:", pf.data.match_method_summary);
-        if ((pf.data.no_match_debug || []).length > 0) {
-            console.warn("[AcademIQ] NO_MATCH items (these will be re-uploaded):", pf.data.no_match_debug);
-        }
+        console.log(
+            "checked:", pf.data.checked,
+            "| should_upload:", pf.data.should_upload_count,
+            "| matched:", pf.data.matched_count,
+            "| no_match:", pf.data.no_match_count
+        );
+        console.log("metadata_saved:", metadataSaved, "| downloadable:", downloadable.length);
         console.groupEnd();
-
-        // Show DB count in visible popup text so user can spot a course_id mismatch
-        // without needing DevTools open
-        if (dbFound === 0) {
-            refs.uploadMeta.textContent =
-                `WARNING: DB has 0 materials for course_id "${courseId}". ` +
-                `Make sure you are on the correct Moodle course page. ` +
-                `Expected course_id: check /debug/raw-course-materials/email/COURSE_ID.`;
-        } else {
-            refs.uploadMeta.textContent =
-                `Preflight done: DB has ${dbFound} saved · checking ${preflightChecked} materials...`;
-        }
 
         onlyMaterialIds = [];
         for (const item of (pf.data.materials || [])) {
-            if (item.should_upload) {
-                onlyMaterialIds.push(String(item.material_id));
-                // Track re-extraction of educational files that were too short
+            const mid = String(item.material_id);
+            if (item.should_upload && downloadableIdSet.has(mid)) {
+                onlyMaterialIds.push(mid);
                 if (item.status === "extraction_too_short") {
                     reprocessing += 1;
                 }
-            } else {
-                // "already_ready" — has extracted text
-                // "already_classified" / "already_processed" / "not_quiz_material" — non-quiz
-                // "extraction_failed" / "too_short" / "no_content" — also skip
+            } else if (!item.should_upload) {
                 if (item.status === "already_ready") {
-                    alreadyReady += 1; skippedExisting += 1;
-                } else if (["already_classified", "already_processed",
-                             "not_quiz_material"].includes(item.status)) {
-                    alreadyClassified += 1; skippedExisting += 1;
+                    alreadyReady += 1;
+                    skippedExisting += 1;
+                } else if (
+                    ["already_classified", "already_processed", "not_quiz_material"].includes(
+                        item.status
+                    )
+                ) {
+                    alreadyClassified += 1;
+                    skippedExisting += 1;
                 } else if (item.status === "extraction_failed") {
-                    skippedExtractionFailed += 1; skippedExisting += 1;
+                    skippedExtractionFailed += 1;
+                    skippedExisting += 1;
+                } else if (item.status === "not_uploaded" || item.status === "metadata_only") {
+                    skippedExisting += 1;
                 } else {
-                    // too_short, no_content, etc. — still skip
                     skippedExisting += 1;
                 }
             }
         }
 
         if (onlyMaterialIds.length === 0) {
-            // Everything is already processed — report immediately, no upload needed.
             await refreshData();
             btn.textContent = "Upload materials for quiz";
             btn.disabled = false;
@@ -773,8 +862,10 @@ const runQuizMaterialUpload = async () => {
                 courseId,
                 courseName,
                 detected,
+                metadataSaved,
                 preflightChecked,
                 dbFound,
+                uploadAttempted: 0,
                 uploaded: 0,
                 ready: 0,
                 failed: 0,
@@ -784,18 +875,20 @@ const runQuizMaterialUpload = async () => {
                 alreadyClassified,
                 skippedExtractionFailed,
                 reprocessing,
-                endpoint: UPLOAD_QUIZ_URL
+                excludedFromDownload,
+                excludedReason: "url/html/link — metadata saved only",
+                endpoint: UPLOAD_QUIZ_URL,
             });
             return;
         }
 
         refs.uploadMeta.textContent =
-            `DB: ${dbFound} saved · Uploading ${onlyMaterialIds.length}/${uploadable.length} ` +
-            `(${skippedExisting} already skipped` +
+            `DB: ${dbFound} saved · Uploading ${onlyMaterialIds.length}/${downloadable.length} downloadable ` +
+            `(${skippedExisting} skipped` +
             (reprocessing > 0 ? `, ${reprocessing} re-extracting` : "") + `)...`;
     }
 
-    // ── Step 3: download + upload only the filtered materials ─────────────────
+    // ── Step 4: download + upload only downloadable materials approved by preflight ──
     const tabResult = await uploadMaterialsOnActiveTab(courseId, onlyMaterialIds);
 
     if (tabResult.status === "done") {
@@ -810,8 +903,10 @@ const runQuizMaterialUpload = async () => {
             courseId,
             courseName: tabResult.course_name || courseName,
             detected,
+            metadataSaved,
             preflightChecked,
             dbFound,
+            uploadAttempted: total,
             uploaded,
             ready,
             failed,
@@ -821,7 +916,9 @@ const runQuizMaterialUpload = async () => {
             alreadyClassified,
             skippedExtractionFailed,
             reprocessing,
-            endpoint: tabResult.backend_endpoint || UPLOAD_QUIZ_URL
+            excludedFromDownload,
+            excludedReason: "url/html/link — metadata saved only",
+            endpoint: tabResult.backend_endpoint || UPLOAD_QUIZ_URL,
         });
         return;
     }
@@ -836,7 +933,7 @@ const runQuizMaterialUpload = async () => {
     }
 
     // Final fallback — content script failed; try stored materials from popup context
-    const stored = getCourseMaterials(currentData, courseId).filter(isQuizUploadableMaterial);
+    const stored = getCourseMaterials(currentData, courseId).filter(isDownloadableMaterial);
     if (stored.length) {
         refs.uploadMeta.textContent = `Falling back to ${stored.length} stored material(s)...`;
         let uploaded = 0; let ready = 0; let failed = 0;
@@ -856,18 +953,20 @@ const runQuizMaterialUpload = async () => {
             courseId,
             courseName,
             detected,
+            metadataSaved,
             preflightChecked,
             uploaded,
             ready,
             failed,
             total: stored.length,
+            uploadAttempted: stored.length,
             skippedExisting,
             alreadyReady,
             alreadyClassified,
             skippedExtractionFailed,
             reprocessing,
             endpoint: UPLOAD_QUIZ_URL,
-            extra: "Fallback: stored materials"
+            extra: "Fallback: stored materials",
         });
     } else {
         refs.uploadMeta.textContent =
@@ -963,8 +1062,8 @@ const bindSettingsControls = () => {
             BACKEND_URL = urls.sync;
             UPLOAD_QUIZ_URL = urls.uploadQuiz;
             PREFLIGHT_URL = urls.preflight;
+            SAVE_DETECTED_URL = urls.saveDetected;
             CONTENT_URL = urls.content;
-            if (refs.backendUrlInput) refs.backendUrlInput.value = normalized;
             if (refs.backendUrlStatus) {
                 refs.backendUrlStatus.textContent = `Saved. Preflight: ${urls.preflight}`;
                 setTimeout(() => { refs.backendUrlStatus.textContent = ""; }, 4000);
