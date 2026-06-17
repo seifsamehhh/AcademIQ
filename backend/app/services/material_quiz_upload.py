@@ -23,6 +23,7 @@ from app.services.student_data import (
 )
 
 _DOWNLOADABLE_FILE_TYPES = {"pdf", "pptx", "ppt", "docx", "doc", "txt", "text"}
+_LINK_LIKE_FILE_TYPES = frozenset({"link", "url", "html", "page", "book"})
 
 # Bump when extraction logic changes materially — preflight may re-offer upload once.
 CURRENT_EXTRACTOR_VERSION = "2"
@@ -129,38 +130,88 @@ def _preflight_upload_decision(
     """
     Decide whether the extension should download/upload this material.
 
-    Hard rule: any matched DB record skips upload unless force_reprocess is set.
-  Only unmatched materials may upload (first-time downloadable files).
+    Ready materials with stored content are skipped (upload caching).
+    Educational url/html/link/page rows without extracted content may upload
+    once so the extension can resolve nested files or HTML page text.
     """
     downloadable = _is_downloadable_material(raw_file_type, activity_url, resolved_url)
+    ft = (raw_file_type or "").lower().strip()
+    url_like = ft in _LINK_LIKE_FILE_TYPES
+    educational = is_educational_material(title, raw_file_type)
+    resolvable_educational = educational and (downloadable or url_like)
 
     if not existing_doc:
-        if not downloadable:
+        if downloadable:
             return (
-                False,
-                "metadata_only",
-                "Metadata-only Moodle resource — no downloadable file",
+                True,
+                "not_uploaded",
+                "No DB record found — file download needed",
+                0,
+                True,
+            )
+        if educational and url_like:
+            return (
+                True,
+                "not_uploaded",
+                "Educational Moodle page — content extraction needed",
                 0,
                 False,
             )
         return (
-            True,
-            "not_uploaded",
-            "No DB record found — file download needed",
+            False,
+            "metadata_only",
+            "Metadata-only Moodle resource — no downloadable file",
             0,
-            True,
+            False,
         )
 
     existing_chars = _content_chars_from_doc(existing_doc)
+    existing_status = str(existing_doc.get("extraction_status") or "")
 
-    if force and downloadable:
+    if force and (downloadable or (educational and url_like)):
         return (
             True,
             "force_reprocess",
             "Force reprocess requested",
             existing_chars,
-            True,
+            downloadable or url_like,
         )
+
+    if existing_chars >= MIN_QUIZ_CONTENT_CHARS:
+        return (
+            False,
+            "already_ready",
+            "Already has enough extracted content",
+            existing_chars,
+            downloadable,
+        )
+
+    if existing_status in _TERMINAL_EXTRACTION_STATUSES and not force:
+        return (
+            False,
+            "already_classified",
+            existing_doc.get("extraction_error") or f"Terminal status: {existing_status}",
+            existing_chars,
+            downloadable,
+        )
+
+    if resolvable_educational and existing_chars < MIN_QUIZ_CONTENT_CHARS:
+        if not existing_doc.get("processed_at"):
+            return (
+                True,
+                "not_uploaded",
+                "Educational material — content not extracted yet",
+                existing_chars,
+                downloadable or url_like,
+            )
+        if existing_status in ("not_uploaded", "no_content") and existing_chars == 0:
+            return (
+                True,
+                "not_uploaded",
+                "Educational material — retry content extraction",
+                existing_chars,
+                downloadable or url_like,
+            )
 
     return (
         False,
@@ -982,9 +1033,10 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     # ── Step 1: classify by title/type before any extraction work ────────────
-    # Non-quiz materials (grades, folders, admin, forums, etc.) are stored with
-    # minimal metadata but NO text extraction — fast and idempotent on re-upload.
     is_non_quiz, non_quiz_reason = classify_non_quiz_material(title, str(file_type))
+    if is_educational_material(title, str(file_type)):
+        is_non_quiz = False
+        non_quiz_reason = None
     if is_non_quiz:
         existing_doc = material_repository.get(course_id, material_id)
         if existing_doc and existing_doc.get("extraction_status") == "not_quiz_material":

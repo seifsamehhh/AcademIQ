@@ -57,6 +57,24 @@ _NON_QUIZ_ACTIVITY_TYPES = frozenset({
 })
 _NON_QUIZ_FILE_EXTENSIONS = frozenset({"xlsx", "xls", "csv", "ods"})
 
+# Hard admin phrases — educational title keywords do NOT override these.
+_HARD_ADMIN_TITLE_RE = re.compile(
+    r"(?i)\b(?:"
+    r"grades?|marks?|marking|scores?"
+    r"|attendance|absent(?:ee)?"
+    r"|submissions?|submission\s+(?:report|status|list|guide|form)"
+    r"|project\s+requirements?|final\s+project\s+criteria"
+    r"|task[_\s-]*details?"
+    r"|criteria|rubrics?|evaluation|test\s+phase"
+    r"|answer\s+keys?|model\s+answers?"
+    r"|deadlines?|marking\s+scheme"
+    r"|forums?|folders?"
+    r"|admin(?:istration)?\b"
+    r")\b",
+)
+
+# Broader non-educational patterns (course outline, syllabus, etc.) — skipped when
+# title already matches educational keywords.
 _NON_QUIZ_TITLE_RE = re.compile(
     r"\b(?:"
     r"grade[sd]?|grading|mark[sd]?|marking|score\s+sheet|grade\s+sheet"
@@ -88,31 +106,30 @@ _NON_QUIZ_TITLE_RE = re.compile(
     re.I,
 )
 
+# Matches Lecture2, Lecture 2, Lec2, Lab4, etc. (digit may follow without space).
 _EDUCATIONAL_TITLE_RE = re.compile(
-    r"\b(?:"
-    r"lecture|lec(?:\s*#?\d|\b)"
-    r"|lab(?:\s*#?\d|\b)"
+    r"(?i)\b(?:"
+    r"lecture\s*#?\d+|\blec\s*#?\d+|\blecture\b|\blec\b"
+    r"|lab\s*#?\d+|\blab\b"
     r"|tutorial|notes?|slides?|handout|revision|review|summary|chapter"
     r"|worksheet|exercise|module|session|reading|lesson|study"
-    r"|week(?:\s*#?\d|\b)|problems?\b|problems?\s+sheet"
-    r"|class\s+material|introduction|topic"
-    r"|problem\b|svm\b"
+    r"|week\s*#?\d+|\bweek\b|problems?\s+sheet|\bproblems?\b"
+    r"|class\s+material|introduction|topic|\bproblem\b|\bsvm\b"
     r")\b",
-    re.I,
 )
 
 _LAB_ASSIGNMENT_RE = re.compile(r"(?i)\blab\s+(?:assignment\s*)?#?\d+")
 
-# Numbers after lecture/lab/lec only — never SWE423/CSC344.
+# Numbers after lecture/lab/lec — Lecture2 and Lecture 2 both match.
 _LECTURE_NUM_RE = re.compile(r"(?i)\b(?:lecture|lec)\s*#?(\d+)")
 _LAB_NUM_RE = re.compile(r"(?i)\blab(?:\s+(?:assignment\s*)?)?\s*#?(\d+)")
 _REVISION_NUM_RE = re.compile(r"(?i)\b(?:revision|review|summary)\s*#?(\d+)")
 _CHAPTER_NUM_RE = re.compile(r"(?i)\bchapters?\s*#?(\d+)")
 _WEEK_NUM_RE = re.compile(r"(?i)\bweek\s*#?(\d+)")
 
-_LECTURE_TYPE_RE = re.compile(r"(?i)\b(?:lecture|lec)(?:\s*#?\d|\b)")
-_LAB_TYPE_RE = re.compile(r"(?i)\blab(?:\s*#?\d|\b)")
-_REVISION_TYPE_RE = re.compile(r"(?i)\b(?:revision|review|summary)(?:\s*#?\d|\b)")
+_LECTURE_TYPE_RE = re.compile(r"(?i)\b(?:lecture|lec)\s*#?\d+|\b(?:lecture|lec)\b")
+_LAB_TYPE_RE = re.compile(r"(?i)\blab\s*#?\d+|\blab\b")
+_REVISION_TYPE_RE = re.compile(r"(?i)\b(?:revision|review|summary)\s*#?\d+|\b(?:revision|review|summary)\b")
 _NOTES_TYPE_RE = re.compile(
     r"(?i)\b(?:notes?|tutorial|handout|slides?|worksheets?|chapters?|exercises?|modules?|week\b|problems?\b)"
 )
@@ -140,24 +157,49 @@ def detect_link_wrapper(title: str, file_type: str) -> bool:
     return False
 
 
+def _normalize_title_text(title: str) -> str:
+    return re.sub(r"[_]+", " ", (title or ""))
+
+
+def matches_educational_title(title: str) -> bool:
+    t = title or ""
+    normalized = _normalize_title_text(t)
+    return bool(
+        _EDUCATIONAL_TITLE_RE.search(t) or _EDUCATIONAL_TITLE_RE.search(normalized)
+    )
+
+
+def matches_hard_admin_title(title: str) -> bool:
+    t = title or ""
+    normalized = _normalize_title_text(t)
+    return bool(
+        _HARD_ADMIN_TITLE_RE.search(t) or _HARD_ADMIN_TITLE_RE.search(normalized)
+    )
+
+
 def classify_non_quiz_material(title: str, file_type: str) -> Tuple[bool, Optional[str]]:
     ft = (file_type or "").lower().strip()
-    normalized = re.sub(r"[_]+", " ", (title or ""))
+    t = title or ""
+    normalized = _normalize_title_text(t)
 
-    if _LAB_ASSIGNMENT_RE.search(title or "") or _LAB_ASSIGNMENT_RE.search(normalized):
+    if _LAB_ASSIGNMENT_RE.search(t) or _LAB_ASSIGNMENT_RE.search(normalized):
+        return False, None
+
+    # A: Hard admin phrases always win.
+    if matches_hard_admin_title(t):
+        return True, "Not quiz material — admin, submission, grades, or project item"
+
+    # B: Educational keywords — real lectures/labs stay in main list even for page/url/html.
+    if matches_educational_title(t):
         return False, None
 
     if ft in _NON_QUIZ_ACTIVITY_TYPES:
-        if ft in _LINK_FILE_TYPES and _EDUCATIONAL_TITLE_RE.search(title or ""):
-            if not detect_link_wrapper(title, file_type):
-                return False, None
-        else:
-            return True, f"Moodle activity: {ft}"
+        return True, f"Moodle activity: {ft}"
 
     if ft in _NON_QUIZ_FILE_EXTENSIONS:
         return True, f"Spreadsheet file (.{ft}) — likely grades or data export"
 
-    if _NON_QUIZ_TITLE_RE.search(title or "") or _NON_QUIZ_TITLE_RE.search(normalized):
+    if _NON_QUIZ_TITLE_RE.search(t) or _NON_QUIZ_TITLE_RE.search(normalized):
         return True, "Not quiz material — admin, project, grade, or non-lecture content"
 
     return False, None
@@ -165,22 +207,23 @@ def classify_non_quiz_material(title: str, file_type: str) -> Tuple[bool, Option
 
 def is_educational_material(title: str, file_type: str) -> bool:
     ft = (file_type or "").lower().strip()
-    normalized = re.sub(r"[_]+", " ", (title or ""))
+    t = title or ""
+    normalized = _normalize_title_text(t)
+
+    if matches_hard_admin_title(t):
+        return False
+
+    if matches_educational_title(t):
+        return True
 
     if ft in _NON_QUIZ_FILE_EXTENSIONS:
         return False
 
     if ft in _NON_QUIZ_ACTIVITY_TYPES:
-        if ft in _LINK_FILE_TYPES and _EDUCATIONAL_TITLE_RE.search(title or ""):
-            if not detect_link_wrapper(title, file_type):
-                return True
         return False
 
-    if _NON_QUIZ_TITLE_RE.search(title or "") or _NON_QUIZ_TITLE_RE.search(normalized):
+    if _NON_QUIZ_TITLE_RE.search(t) or _NON_QUIZ_TITLE_RE.search(normalized):
         return False
-
-    if _EDUCATIONAL_TITLE_RE.search(title or "") or _EDUCATIONAL_TITLE_RE.search(normalized):
-        return True
 
     return False
 
@@ -335,6 +378,27 @@ def _map_eligibility_to_status(
     return "not_enough_readable_text", msg
 
 
+def _classification_reason(
+    title: str,
+    file_type: str,
+    is_non_quiz: bool,
+    is_educ: bool,
+    non_quiz_reason: Optional[str],
+) -> str:
+    if is_non_quiz:
+        if matches_hard_admin_title(title):
+            return "hard_admin_phrase"
+        ft = (file_type or "").lower().strip()
+        if ft in _NON_QUIZ_ACTIVITY_TYPES:
+            return f"moodle_activity:{ft}"
+        if ft in _NON_QUIZ_FILE_EXTENSIONS:
+            return f"spreadsheet:{ft}"
+        return non_quiz_reason or "non_quiz_title_or_type"
+    if is_educ:
+        return "educational_title_keyword"
+    return "not_educational_generic"
+
+
 def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
     title = doc.get("title") or "Untitled"
     file_type = (doc.get("file_type") or doc.get("category") or "file")
@@ -347,15 +411,24 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
     is_link_wrapper = detect_link_wrapper(title, raw_file_type)
     is_non_quiz, non_quiz_reason = classify_non_quiz_material(title, raw_file_type)
 
-    if not is_non_quiz and extraction_status == "not_quiz_material":
-        is_non_quiz = True
-        non_quiz_reason = doc.get("extraction_error") or "Non-educational material"
+    if (
+        extraction_status == "not_quiz_material"
+        and not is_non_quiz
+        and matches_educational_title(title)
+    ):
+        extraction_status = "not_uploaded"
+
+    is_educ = is_educational_material(title, raw_file_type)
+    classification_reason = _classification_reason(
+        title, raw_file_type, is_non_quiz, is_educ, non_quiz_reason,
+    )
 
     material_kind = classify_material_kind(title, raw_file_type, is_non_quiz)
     material_number = extract_material_number(title, material_kind)
     sort_link_rank = 1 if is_link_wrapper else 0
     sort_group = _KIND_SORT_GROUP.get(material_kind, 5)
-    is_educ = is_educational_material(title, raw_file_type) if not is_non_quiz else False
+    if is_non_quiz:
+        is_educ = False
 
     base: Dict[str, Any] = {
         "material_id": material_id,
@@ -388,6 +461,7 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
             "quiz_status": "not_quiz_material",
             "quiz_status_reason": reason,
             "reason": reason,
+            "classification_reason": classification_reason,
             "is_educational_material": False,
             "is_non_quiz_material": True,
             "quiz_generation_eligible": False,
@@ -416,10 +490,13 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
         )
     elif content_len == 0 and extraction_status not in _PROCESSED_EXTRACTION_STATUSES:
         quiz_status = "not_uploaded"
-        content_note = (
-            "No readable text extracted yet. "
-            "Use the Chrome extension → 'Upload materials for quiz' on the Moodle course page."
-        )
+        if raw_file_type in _LINK_FILE_TYPES or raw_file_type in ("page", "book"):
+            content_note = "File detected from Moodle but content was not extracted yet"
+        else:
+            content_note = (
+                "No readable text extracted yet. "
+                "Use the Chrome extension → 'Upload materials for quiz' on the Moodle course page."
+            )
     elif content_len == 0 and extraction_status in _PROCESSED_EXTRACTION_STATUSES:
         quiz_status = "extraction_failed"
         content_note = (
@@ -452,6 +529,7 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
         "quiz_status": quiz_status,
         "quiz_status_reason": content_note,
         "reason": content_note,
+        "classification_reason": classification_reason,
         "is_educational_material": True,
         "is_non_quiz_material": False,
         "quiz_generation_eligible": selectable,

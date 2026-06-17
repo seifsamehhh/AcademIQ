@@ -366,10 +366,75 @@
     };
 
     const isEducationalLearningTitle = (title) =>
-        /lecture|lec\s*\d|lab|revision|rev\s*\d/i.test(title || "");
+        /lecture|lec\s*#?\d|\blab\b|revision|review|summary|notes?|tutorial|handout|slides?|chapter|worksheet|problem\s*sheet|exercise\s*sheet/i.test(
+            title || ""
+        );
 
     const NESTED_DOWNLOAD_RE = /\.(pdf|pptx?|docx?|txt)(\?|$)/i;
     const PLUGINFILE_RE = /pluginfile\.php/i;
+
+    const isUrlLikeFileType = (fileType) =>
+        ["html", "link", "url", "page", "book"].includes(String(fileType || "").toLowerCase());
+
+    const isDirectDownloadUrl = (url) =>
+        Boolean(
+            url &&
+                (/\.(pdf|pptx?|docx?|txt)(\?|$)/i.test(url.split("?")[0]) || PLUGINFILE_RE.test(url))
+        );
+
+    const extractReadablePageText = (doc) => {
+        const root =
+            doc.querySelector("#region-main") ||
+            doc.querySelector("[role='main']") ||
+            doc.querySelector("#page-content") ||
+            doc.querySelector(".no-overflow");
+        if (!root) return null;
+        const clone = root.cloneNode(true);
+        clone
+            .querySelectorAll("script, style, nav, .breadcrumb, .activity-header, .navbar, footer")
+            .forEach((node) => node.remove());
+        const text = cleanText(clone.textContent);
+        return text && text.length >= 80 ? text : null;
+    };
+
+    const resolveEducationalActivityContent = async (activityUrl) => {
+        if (!activityUrl) return { downloadUrl: null, pageText: null, pageUrl: null };
+        try {
+            const response = await fetch(activityUrl, {
+                method: "GET",
+                credentials: "include",
+                redirect: "follow"
+            });
+            if (!response.ok) return { downloadUrl: null, pageText: null, pageUrl: null };
+            const html = await response.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, "text/html");
+            const pageUrl = response.url || activityUrl;
+            const anchors = Array.from(doc.querySelectorAll("a[href]"));
+            let downloadUrl = null;
+            for (const anchor of anchors) {
+                const href = resolveHref(anchor, pageUrl);
+                if (!href) continue;
+                if (PLUGINFILE_RE.test(href) || NESTED_DOWNLOAD_RE.test(href.split("?")[0])) {
+                    downloadUrl = href;
+                    break;
+                }
+                if (/\/mod\/resource\//i.test(href) && !/\/mod\/resource\/view\.php/i.test(href)) {
+                    downloadUrl = href;
+                    break;
+                }
+            }
+            const pageText = extractReadablePageText(doc);
+            return { downloadUrl, pageText, pageUrl };
+        } catch (_error) {
+            return { downloadUrl: null, pageText: null, pageUrl: null };
+        }
+    };
+
+    const findNestedDownloadUrl = async (activityUrl, baseHref) => {
+        const resolved = await resolveEducationalActivityContent(activityUrl);
+        return resolved.downloadUrl;
+    };
 
     const inferFileTypeFromUrl = (url) => {
         const path = (url || "").split("?")[0];
@@ -378,33 +443,6 @@
         if (ext === "ppt") return "pptx";
         if (ext === "doc") return "docx";
         return ext;
-    };
-
-    const findNestedDownloadUrl = async (activityUrl, baseHref) => {
-        if (!activityUrl) return null;
-        try {
-            const response = await fetch(activityUrl, {
-                method: "GET",
-                credentials: "include",
-                redirect: "follow"
-            });
-            if (!response.ok) return null;
-            const html = await response.text();
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(html, "text/html");
-            const pageUrl = response.url || activityUrl;
-            const anchors = Array.from(doc.querySelectorAll("a[href]"));
-            for (const anchor of anchors) {
-                const href = resolveHref(anchor, pageUrl);
-                if (!href) continue;
-                if (PLUGINFILE_RE.test(href) || NESTED_DOWNLOAD_RE.test(href.split("?")[0])) {
-                    return href;
-                }
-            }
-            return null;
-        } catch (_error) {
-            return null;
-        }
     };
 
     const MIME_TYPE_MAP = [
@@ -604,29 +642,33 @@
                 fileType = pathExtension && pathExtension !== "php" ? pathExtension : "html";
             }
 
-            const isUrlLike = ["html", "link", "url", "page"].includes(String(fileType || "").toLowerCase());
+            const isUrlLike = isUrlLikeFileType(fileType);
+            let pageText = null;
             if (
                 isEducationalLearningTitle(title) &&
                 isUrlLike &&
                 !PLUGINFILE_RE.test(url || "")
             ) {
-                const nestedUrl = await findNestedDownloadUrl(url, baseHref);
-                if (nestedUrl) {
-                    resolvedUrl = nestedUrl;
-                    const nestedType = inferFileTypeFromUrl(nestedUrl);
+                const resolved = await resolveEducationalActivityContent(url);
+                if (resolved.downloadUrl) {
+                    resolvedUrl = resolved.downloadUrl;
+                    const nestedType = inferFileTypeFromUrl(resolved.downloadUrl);
                     if (nestedType) {
                         fileType = nestedType;
-                    } else if (needsHeadProbe(nestedUrl, null)) {
-                        const nestedHead = await fetchHeadMetadata(nestedUrl);
+                    } else if (needsHeadProbe(resolved.downloadUrl, null)) {
+                        const nestedHead = await fetchHeadMetadata(resolved.downloadUrl);
                         contentType = nestedHead.contentType || contentType;
                         contentDisposition = nestedHead.contentDisposition || contentDisposition;
                         filename = nestedHead.filename || filename;
-                        resolvedUrl = nestedHead.finalUrl || nestedUrl;
+                        resolvedUrl = nestedHead.finalUrl || resolved.downloadUrl;
                         fileType =
                             mapMimeTypeToFileType(contentType) ||
                             inferFileTypeFromUrl(resolvedUrl) ||
                             fileType;
                     }
+                }
+                if (resolved.pageText) {
+                    pageText = resolved.pageText;
                 }
             }
 
@@ -656,6 +698,8 @@
                 original_filename: filename,
                 content_type: contentType,
                 resolvedUrl,
+                pageText,
+                page_text: pageText,
                 due_date: parseDueDate(activity),
                 availability_status: parseAvailabilityStatus(activity),
                 semantic_tags: inferSemanticTags({ title, sectionName: parseSectionName(activity), materialType }),
@@ -890,7 +934,12 @@
         const ft = (material.file_type || material.fileType || "").toLowerCase();
         const url = material.resolvedUrl || material.resolved_url || material.url || "";
         if (QUIZ_DOWNLOAD_FILE_TYPES.has(ft)) return true;
-        return /\.(pdf|pptx?|docx?|txt)(\?|$)/i.test(url);
+        if (isDirectDownloadUrl(url)) return true;
+        if (isEducationalLearningTitle(material.title || "")) {
+            if (isUrlLikeFileType(ft) && (material.url || url)) return true;
+            if ((material.pageText || material.page_text || "").length >= 80) return true;
+        }
+        return false;
     };
 
     const isQuizUploadableMaterial = isDownloadableMaterial;
@@ -921,6 +970,7 @@
             material_type: material.material_type || material.type,
             file_type: material.file_type || material.fileType,
             source_url: material.url,
+            resolved_url: material.resolvedUrl || material.resolved_url || null,
             user_email: identity?.email || null
         };
 
@@ -939,32 +989,85 @@
             return { res, data };
         };
 
-        const fetched = await fetchMaterialBytes(material);
-        if (!fetched.ok) {
+        let workingMaterial = { ...material };
+        const ft = String(workingMaterial.file_type || workingMaterial.fileType || "").toLowerCase();
+        const educational = isEducationalLearningTitle(workingMaterial.title || "");
+        const urlLike = isUrlLikeFileType(ft);
+
+        if (educational && urlLike && workingMaterial.url) {
+            const hasPageText = (workingMaterial.pageText || workingMaterial.page_text || "").length >= 80;
+            if (!hasPageText || !isDirectDownloadUrl(workingMaterial.resolvedUrl || workingMaterial.url)) {
+                const resolved = await resolveEducationalActivityContent(workingMaterial.url);
+                if (resolved.downloadUrl) {
+                    workingMaterial.resolvedUrl = resolved.downloadUrl;
+                    const nestedType = inferFileTypeFromUrl(resolved.downloadUrl);
+                    if (nestedType) {
+                        workingMaterial.file_type = nestedType;
+                        workingMaterial.fileType = nestedType;
+                    }
+                }
+                if (resolved.pageText) {
+                    workingMaterial.pageText = resolved.pageText;
+                    workingMaterial.page_text = resolved.pageText;
+                }
+            }
+        }
+
+        const downloadUrl =
+            workingMaterial.resolvedUrl || workingMaterial.resolved_url || workingMaterial.url || "";
+        const effectiveFt = String(
+            workingMaterial.file_type || workingMaterial.fileType || ft
+        ).toLowerCase();
+        const canFetchFile =
+            QUIZ_DOWNLOAD_FILE_TYPES.has(effectiveFt) || isDirectDownloadUrl(downloadUrl);
+
+        if (canFetchFile && downloadUrl) {
+            const fetched = await fetchMaterialBytes(workingMaterial);
+            if (fetched.ok) {
+                const { res, data } = await postUploadPayload({
+                    ...basePayload,
+                    file_type: effectiveFt,
+                    resolved_url: workingMaterial.resolvedUrl || workingMaterial.resolved_url || null,
+                    content_base64: fetched.base64,
+                    content_type: fetched.contentType
+                });
+                return {
+                    material_id: basePayload.material_id,
+                    title: basePayload.title,
+                    ok: res.ok,
+                    ...data
+                };
+            }
+        }
+
+        const pageText = String(workingMaterial.pageText || workingMaterial.page_text || "").trim();
+        if (pageText.length >= 80) {
             const { res, data } = await postUploadPayload({
                 ...basePayload,
-                upload_attempt_failed: true,
-                extraction_error: fetched.error
+                file_type: urlLike ? "html" : effectiveFt,
+                content_text: pageText,
+                content_type: "text/html"
             });
             return {
                 material_id: basePayload.material_id,
                 title: basePayload.title,
-                ok: false,
-                recorded_on_backend: res.ok,
-                error: fetched.error,
+                ok: res.ok,
+                ready_for_quiz: data.ready_for_quiz,
                 ...data
             };
         }
 
         const { res, data } = await postUploadPayload({
             ...basePayload,
-            content_base64: fetched.base64,
-            content_type: fetched.contentType
+            upload_attempt_failed: true,
+            extraction_error: canFetchFile ? "download_or_page_text_failed" : "no_downloadable_file_or_page_text"
         });
         return {
             material_id: basePayload.material_id,
             title: basePayload.title,
-            ok: res.ok,
+            ok: false,
+            recorded_on_backend: res.ok,
+            error: "no_downloadable_file_or_page_text",
             ...data
         };
     };

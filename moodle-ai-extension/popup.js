@@ -517,13 +517,31 @@ const addScanAllButton = () => {
 };
 
 const QUIZ_DOWNLOAD_FILE_TYPES = new Set(["pdf", "pptx", "ppt", "docx", "doc", "txt", "text"]);
+const URL_LIKE_FILE_TYPES = new Set(["html", "link", "url", "page", "book"]);
+const PLUGINFILE_RE = /pluginfile\.php/i;
 
-/** True when the extension can download file bytes from Moodle (not url/html wrappers). */
+const isEducationalLearningTitle = (title) =>
+    /lecture|lec\s*#?\d|\blab\b|revision|review|summary|notes?|tutorial|handout|slides?|chapter|worksheet|problem\s*sheet|exercise\s*sheet/i.test(
+        title || ""
+    );
+
+const isDirectDownloadUrl = (url) =>
+    Boolean(
+        url &&
+            (/\.(pdf|pptx?|docx?|txt)(\?|$)/i.test(url.split("?")[0]) || PLUGINFILE_RE.test(url))
+    );
+
+/** True when the extension can download bytes or upload HTML page text for quiz extraction. */
 const isDownloadableMaterial = (material) => {
     const ft = (material.fileType || material.file_type || "").toLowerCase();
     const url = material.resolvedUrl || material.resolved_url || material.url || "";
     if (QUIZ_DOWNLOAD_FILE_TYPES.has(ft)) return true;
-    return /\.(pdf|pptx?|docx?|txt)(\?|$)/i.test(url);
+    if (isDirectDownloadUrl(url)) return true;
+    if (isEducationalLearningTitle(material.title || "")) {
+        if (URL_LIKE_FILE_TYPES.has(ft) && (material.url || url)) return true;
+        if ((material.pageText || material.page_text || "").length >= 80) return true;
+    }
+    return false;
 };
 
 /** Legacy alias — only use for download/upload filtering, not metadata save. */
@@ -547,8 +565,6 @@ const PREFLIGHT_SKIP_STATUSES = new Set([
 const isPreflightUploadAllowed = (item) => {
     if (!item || item.should_upload !== true) return false;
     if (PREFLIGHT_SKIP_STATUSES.has(item.status)) return false;
-    // Matched an existing DB row — hard skip (backend should also set should_upload:false).
-    if (item.matched_by) return false;
     return true;
 };
 
@@ -848,10 +864,6 @@ const runQuizMaterialUpload = async () => {
     let preflightChecked = 0;
     let onlyMaterialIds = null;
 
-    const downloadableIdSet = new Set(
-        downloadable.map((m) => String(m.material_id || m.id))
-    );
-
     if (detected > 0) {
         const pf = await callPreflightFromPopup(courseId, scrapedMaterials, identity);
 
@@ -886,7 +898,7 @@ const runQuizMaterialUpload = async () => {
         onlyMaterialIds = [];
         for (const item of (pf.data.materials || [])) {
             const mid = String(item.material_id);
-            if (isPreflightUploadAllowed(item) && downloadableIdSet.has(mid)) {
+            if (isPreflightUploadAllowed(item)) {
                 onlyMaterialIds.push(mid);
             } else {
                 if (item.status === "already_ready") {

@@ -212,6 +212,7 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
                 "file_type": file_type,
                 "status": quiz_status,
                 "reason": display.get("reason") or quiz_status_reason,
+                "classification_reason": display.get("classification_reason"),
                 "source": doc.get("source") or doc.get("seed_source") or "unknown",
                 "source_url": doc.get("url") or doc.get("source_url") or doc.get("resolved_url"),
                 "content_text_length": display["content_text_length"],
@@ -338,52 +339,64 @@ def debug_course_material_coverage(email: str) -> Dict[str, Any]:
 
         status_counts: Dict[str, int] = {
             "ready": 0,
+            "limited_ready": 0,
             "not_uploaded": 0,
             "extraction_failed": 0,
             "extraction_too_short": 0,
+            "not_enough_readable_text": 0,
+            "unsupported": 0,
             "too_short": 0,
             "not_quiz_material": 0,
         }
         materials_list: List[Dict[str, Any]] = []
 
-        for doc in docs:
-            mid = str(doc.get("material_id") or "")
-            length = _content_length(doc)
+        displays, _ = resolve_quiz_material_display(docs)
+        doc_by_id = {str(doc.get("material_id") or ""): doc for doc in docs}
+
+        for display in displays:
+            mid = str(display.get("material_id") or "")
+            doc = doc_by_id.get(mid)
+            if not doc:
+                continue
+            _title = doc.get("title") or display.get("title") or "Untitled"
             _ft = (doc.get("file_type") or "unknown").lower()
-            _title = doc.get("title") or "Untitled"
-            quiz_status, quiz_status_reason = _material_quiz_status(doc)
+            quiz_status = display["quiz_status"]
+            quiz_status_reason = display.get("quiz_status_reason")
             status_counts[quiz_status] = status_counts.get(quiz_status, 0) + 1
-            is_educ = _is_educational_material(_title, _ft)
-            is_non_quiz, non_quiz_reason = _classify_non_quiz_material(_title, _ft)
+            is_educ = display["is_educational_material"]
+            is_non_quiz = display["is_non_quiz_material"]
+            non_quiz_reason = display.get("reason") if is_non_quiz else None
             can_reprocess = (
                 is_educ
-                and quiz_status in ("extraction_too_short", "too_short", "not_uploaded")
+                and quiz_status in (
+                    "extraction_too_short",
+                    "not_enough_readable_text",
+                    "not_uploaded",
+                )
                 and doc.get("extraction_status") not in ("extraction_failed", "insufficient_text")
             )
-            sg = _sort_group(_title, is_non_quiz)
-            sn = _sort_number(_title)
-            visible = not is_non_quiz
-            selectable = quiz_status in ("ready", "extraction_too_short") and not is_non_quiz
 
             materials_list.append({
                 "material_id": mid,
                 "title": _title,
                 "file_type": _ft,
-                "content_text_length": length,
+                "content_text_length": display["content_text_length"],
                 "extraction_status": (doc.get("extraction_status") or None),
                 "is_educational_material": is_educ,
                 "is_non_quiz_material": is_non_quiz,
                 "non_quiz_reason": non_quiz_reason,
+                "classification_reason": display.get("classification_reason"),
                 "can_reprocess": can_reprocess,
                 "quiz_status": quiz_status,
                 "quiz_status_reason": quiz_status_reason,
-                "sort_group": sg,
-                "sort_group_label": [
-                    "Lecture", "Lab", "Revision", "Notes/Tutorial/Slides", "Other Educational", "Non-quiz / Admin"
-                ][sg],
-                "sort_number": sn,
-                "visible_in_quiz": visible,
-                "selectable": selectable,
+                "reason": display.get("reason") or quiz_status_reason,
+                "sort_group": display["sort_group"],
+                "sort_group_label": display.get("sort_group_label"),
+                "sort_number": display["sort_number"],
+                "visible_in_main_list": display["visible_in_main_list"],
+                "visible_in_other_items": display["visible_in_other_items"],
+                "visible_in_quiz": display["visible_in_main_list"],
+                "selectable": display["selectable"],
             })
 
         materials_list.sort(
@@ -394,7 +407,7 @@ def debug_course_material_coverage(email: str) -> Dict[str, Any]:
             )
         )
 
-        c_visible = sum(1 for m in materials_list if m["visible_in_quiz"])
+        c_visible = sum(1 for m in materials_list if m["visible_in_main_list"])
         c_educ = sum(1 for m in materials_list if m["is_educational_material"])
         c_non_quiz = sum(1 for m in materials_list if m["is_non_quiz_material"])
         c_ctx_ready = sum(

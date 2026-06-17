@@ -39,153 +39,21 @@ MIN_QUIZ_CONTENT_CHARS = 600
 # Educational files below this threshold are offered for re-extraction.
 MIN_EDUCATIONAL_REPROCESS_CHARS = 1500
 
-# ── Non-quiz material detection ──────────────────────────────────────────────
-# Moodle activity types that are never educational reading content.
-_NON_QUIZ_ACTIVITY_TYPES: frozenset[str] = frozenset({
-    "folder", "assign", "forum", "quiz", "url", "choice",
-    "feedback", "survey", "chat", "glossary", "wiki", "workshop",
-    "scorm", "lti", "attendance", "book",
-    # Moodle label/page types are HTML widgets, not downloadable lecture content
-    "label", "page",
-})
-
-# Spreadsheet/data-export extensions that are almost always grades or admin data.
-_NON_QUIZ_FILE_EXTENSIONS: frozenset[str] = frozenset({
-    "xlsx", "xls", "csv", "ods",
-})
-
-# Title keywords that clearly indicate administrative / non-lecture content.
-# The goal is to catch files a student would never revise from — grade sheets,
-# submission forms, project briefs, admin announcements — while keeping actual
-# lecture, lab, revision, handout, notes, and chapter documents selectable.
-_NON_QUIZ_TITLE_RE = re.compile(
-    r"\b(?:"
-    # Grades / marks / scores
-    r"grade[sd]?|grading|mark[sd]?|marking|score\s+sheet|grade\s+sheet"
-    r"|mark\s+sheet|grade\s+book|mark\s+book|final\s+(?:mark[sd]?|grade[sd]?|score[sd]?)"
-    r"|student\s+scores?|scores?\s+(?:sheet|list|record|file)"
-    r"|grading\s+criteria"
-    # Attendance / roster
-    r"|attendance|absent(?:ee)?|student\s+(?:list|roster|record[sd]?)"
-    # Submission / status reports
-    r"|submission\s+(?:report|status|list|guide|form)"
-    r"|assignment\s+(?:submission|status|report|list)"
-    r"|submissions?"
-    # Project / task admin (requirements, criteria, task details)
-    r"|project\s+(?:requirements?|criteria|rubric|description|brief|plan|outline|guide|specs?)"
-    r"|final\s+project(?:\s+(?:criteria|requirements?|brief|description))?"
-    r"|task[_\s-]*details?"
-    r"|requirements?\s+file"
-    r"|assignment\s+(?:instructions?|brief|description|rubric|criteria|requirements?)"
-    # Standalone admin forms / evaluation sheets (no bare "assignments" — catches Lab Assignment)
-    r"|rubric[sd]?|criteria\s+(?:sheet|form|file)"
-    r"|evaluation\s+(?:form|sheet|rubric|criteria)"
-    r"|evaluation\b"
-    r"|marking\s+(?:scheme|guide|rubric|sheet)"
-    r"|answer\s+(?:key|sheet|model)|model\s+answer[sd]?"
-    r"|lab\s+report\s+(?:template|form|sheet)"
-  # Test / phase admin
-    r"|test(?:ing)?\s+phase"
-    # Course admin documents
-    r"|course\s+(?:outline|plan|schedule|syllabus|calendar|timetable|guide)"
-    r"|semester\s+(?:plan|schedule|calendar|timetable)"
-    r"|exam\s+(?:schedule|timetable|calendar)"
-    r"|due\s+dates?|deadline[sd]?"
-    # Admin / navigation pages
-    r"|announcements?|course\s+contents?|table\s+of\s+contents?"
-    r"|admin(?:istration)?\s+(?:file[sd]?|doc(?:ument)?[sd]?)"
-    r")\b",
-    re.I,
-)
-
-# Mapping of activity type → human-readable reason
-_ACTIVITY_TYPE_REASON: Dict[str, str] = {
-    "folder": "Moodle folder (container, not readable content)",
-    "assign": "Assignment activity (task, not lecture material)",
-    "forum": "Discussion forum",
-    "quiz": "Moodle quiz activity",
-    "url": "External URL link",
-    "choice": "Poll / choice activity",
-    "feedback": "Feedback activity",
-    "survey": "Survey activity",
-    "chat": "Chat activity",
-    "glossary": "Glossary activity",
-    "wiki": "Wiki activity",
-    "workshop": "Workshop activity",
-    "scorm": "SCORM package",
-    "lti": "External tool (LTI)",
-    "attendance": "Attendance activity",
-    "book": "Moodle Book (HTML activity, use PDF upload instead)",
-    "label": "Moodle label (inline text widget, not a document)",
-    "page": "Moodle page (HTML page widget, not a document)",
-}
+# Classification delegates to material_quiz_display (single source of truth).
 
 
 def _classify_non_quiz_material(
     title: str, file_type: str
 ) -> tuple[bool, str | None]:
-    """
-    Return (is_non_quiz_material, reason_string).
+    from app.services.material_quiz_display import classify_non_quiz_material
 
-    Checks Moodle activity types, spreadsheet extensions, and title keywords
-    that indicate grades, marks, attendance, or admin-only content.
-    """
-    ft = (file_type or "").lower().strip()
-
-    if ft in _NON_QUIZ_ACTIVITY_TYPES:
-        reason = _ACTIVITY_TYPE_REASON.get(ft, f"Moodle activity: {ft}")
-        return True, reason
-
-    if ft in _NON_QUIZ_FILE_EXTENSIONS:
-        return True, f"Spreadsheet file (.{ft}) — likely grades or data export"
-
-    normalized = re.sub(r"[_]+", " ", (title or ""))
-    if _NON_QUIZ_TITLE_RE.search(title or "") or _NON_QUIZ_TITLE_RE.search(normalized):
-        return True, "Not quiz material — admin, project, grade, or non-lecture content"
-
-    return False, None
-
-
-# Title keywords that positively identify educational learning content (whitelist).
-_EDUCATIONAL_TITLE_RE = re.compile(
-    r"\b(?:"
-    r"lecture|lec(?:\s*#?\d|\b)"
-    r"|lab(?:\s*#?\d|\b)"
-    r"|tutorial|notes?|slides?|handout|revision|review|summary|chapter"
-    r"|worksheet|exercise|module|session|reading|lesson|study"
-    r"|week(?:\s*#?\d|\b)|problems?\b|problems?\s+sheet"
-    r"|class\s+material|introduction|topic"
-    r"|problem\b|svm\b"
-    r")\b",
-    re.I,
-)
-
-# File types that can contain educational text content.
-_EDUCATIONAL_FILE_TYPES: frozenset[str] = frozenset({
-    "pdf", "pptx", "ppt", "docx", "doc", "txt", "text",
-})
+    return classify_non_quiz_material(title, file_type)
 
 
 def _is_educational_material(title: str, file_type: str) -> bool:
-    """
-    Return True only when the title matches educational whitelist keywords.
+    from app.services.material_quiz_display import is_educational_material
 
-    Generic PDF/PPTX files without lecture/lab/revision signals are NOT
-    educational — project requirements and admin PDFs must not become Ready.
-    """
-    ft = (file_type or "").lower().strip()
-
-    if ft in _NON_QUIZ_ACTIVITY_TYPES or ft in _NON_QUIZ_FILE_EXTENSIONS:
-        return False
-
-    normalized = re.sub(r"[_]+", " ", (title or ""))
-    if _NON_QUIZ_TITLE_RE.search(title or "") or _NON_QUIZ_TITLE_RE.search(normalized):
-        return False
-
-    if _EDUCATIONAL_TITLE_RE.search(title or "") or _EDUCATIONAL_TITLE_RE.search(normalized):
-        return True
-
-    return False
+    return is_educational_material(title, file_type)
 
 
 def _is_quiz_generation_eligible(
