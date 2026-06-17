@@ -12,23 +12,65 @@ interface MaterialSelectProps {
   onToggle: (id: string) => void;
 }
 
+// ── Sorting helpers ────────────────────────────────────────────────────────────
+
 /**
- * A material is selectable when it either has enough content on its own
- * ("ready") OR is educational with limited text that can use course-context
- * fallback ("extraction_too_short").
+ * Extract the first integer from a string for natural ordering.
+ * "Lecture 10" → 10, "Lab 2" → 2, "Revision" → Infinity
  */
+function extractNum(s: string): number {
+  const m = s.match(/\d+/);
+  return m ? parseInt(m[0], 10) : Infinity;
+}
+
+/**
+ * Map a material title to a sort-group number (lower = shown earlier).
+ *
+ *   0  Lectures
+ *   1  Labs
+ *   2  Revision / Review / Summary
+ *   3  Notes / Tutorial / Handout / Slides / Worksheet / Chapter / Exercise
+ *   4  Other educational (not_quiz_material === false, but no type keyword)
+ *  99  Non-quiz / admin
+ */
+function sortGroup(m: LearningMaterial): number {
+  if (m.quizStatus === "not_quiz_material") return 99;
+  const t = m.title.toLowerCase();
+  if (/\blecture\b/.test(t)) return 0;
+  if (/\blab\b/.test(t)) return 1;
+  if (/\b(revision|review|summary)\b/.test(t)) return 2;
+  if (/\b(notes|tutorial|handout|slides|worksheet|chapter|exercise|module)\b/.test(t)) return 3;
+  return 4;
+}
+
+function sortMaterials(list: LearningMaterial[]): LearningMaterial[] {
+  return [...list].sort((a, b) => {
+    const ga = sortGroup(a);
+    const gb = sortGroup(b);
+    if (ga !== gb) return ga - gb;
+    // Within the same group use natural numeric ordering
+    const na = extractNum(a.title);
+    const nb = extractNum(b.title);
+    if (na !== nb) return na - nb;
+    // Alphabetical fallback
+    return a.title.localeCompare(b.title, undefined, { numeric: true });
+  });
+}
+
+// ── A material is selectable when it is ready OR can use context-fallback ─────
+
 function isSelectable(m: LearningMaterial): boolean {
   if (m.quizStatus === "ready") return true;
   if (m.quizStatus === "extraction_too_short") return true;
-  // Older API responses that don't include quizStatus
   if (!m.quizStatus && m.hasContent) return true;
   return false;
 }
 
-/** Badge label + color variant for each quiz status */
+// ── Badge label + variant per status ─────────────────────────────────────────
+
 function statusBadge(m: LearningMaterial): {
   label: string;
-  variant: "default" | "muted" | "destructive" | "warning" | "success";
+  variant: "default" | "muted" | "destructive" | "warning";
 } {
   switch (m.quizStatus) {
     case "ready":
@@ -50,6 +92,8 @@ function statusBadge(m: LearningMaterial): {
       return { label: "Content unavailable", variant: "muted" };
   }
 }
+
+// ── Single material row ───────────────────────────────────────────────────────
 
 function MaterialRow({
   material,
@@ -95,8 +139,8 @@ function MaterialRow({
       {/* Hint text under the row */}
       {material.quizStatus === "extraction_too_short" ? (
         <p className="w-full basis-full pl-9 text-xs text-muted-foreground">
-          Extracted text is limited — quiz will be generated using other ready
-          materials from this course as supporting context.
+          Extracted text is limited — quiz will use other ready materials from
+          this course as supporting context.
         </p>
       ) : !selectable && (material.contentNote || material.quizStatusReason) ? (
         <p className="w-full basis-full pl-9 text-xs text-muted-foreground">
@@ -107,6 +151,8 @@ function MaterialRow({
   );
 }
 
+// ── Main component ────────────────────────────────────────────────────────────
+
 export function MaterialSelect({
   materials,
   selectedIds,
@@ -114,24 +160,20 @@ export function MaterialSelect({
 }: MaterialSelectProps) {
   const [showOther, setShowOther] = useState(false);
 
-  // Split into educational (selectable or nearly-selectable) vs admin/non-quiz
-  const educational = materials.filter(
-    (m) => m.quizStatus !== "not_quiz_material",
-  );
-  const nonQuiz = materials.filter(
-    (m) => m.quizStatus === "not_quiz_material",
-  );
+  const sorted = sortMaterials(materials);
+  const educational = sorted.filter((m) => m.quizStatus !== "not_quiz_material");
+  const nonQuiz = sorted.filter((m) => m.quizStatus === "not_quiz_material");
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Select Learning Materials</CardTitle>
         <CardDescription>
-          Lectures, labs, revisions, slides, and notes are selectable once
-          uploaded. Materials marked &ldquo;Ready (uses context)&rdquo; will
-          generate a quiz using other ready materials from this course when
-          their own extracted text is limited. Grades files and Moodle activity
-          types cannot be used for quiz generation.
+          Lectures, labs, revisions, notes, and slides are sorted in order.
+          Materials marked &ldquo;Ready (uses context)&rdquo; will generate a
+          quiz using other ready materials from this course when their own
+          extracted text is limited. Grades files and Moodle activity types
+          cannot be used for quiz generation.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
@@ -145,8 +187,8 @@ export function MaterialSelect({
           </p>
         ) : (
           <>
-            {/* ── Educational materials ── */}
-            {educational.length > 0 ? (
+            {/* ── Educational materials, sorted ── */}
+            {educational.length > 0 && (
               <div className="space-y-2">
                 {educational.map((m) => (
                   <MaterialRow
@@ -157,10 +199,10 @@ export function MaterialSelect({
                   />
                 ))}
               </div>
-            ) : null}
+            )}
 
-            {/* ── Non-quiz materials (collapsed) ── */}
-            {nonQuiz.length > 0 ? (
+            {/* ── Non-quiz materials (collapsed by default) ── */}
+            {nonQuiz.length > 0 && (
               <div className="mt-4">
                 <button
                   type="button"
@@ -173,9 +215,10 @@ export function MaterialSelect({
                     <ChevronRight className="h-3 w-3" />
                   )}
                   {showOther ? "Hide" : "Show"} {nonQuiz.length} non-quiz
-                  item{nonQuiz.length === 1 ? "" : "s"} (grades, admin, forums…)
+                  item{nonQuiz.length === 1 ? "" : "s"} (grades, admin,
+                  forums…)
                 </button>
-                {showOther ? (
+                {showOther && (
                   <div className="mt-2 space-y-2">
                     {nonQuiz.map((m) => (
                       <MaterialRow
@@ -186,9 +229,9 @@ export function MaterialSelect({
                       />
                     ))}
                   </div>
-                ) : null}
+                )}
               </div>
-            ) : null}
+            )}
           </>
         )}
       </CardContent>

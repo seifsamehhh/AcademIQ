@@ -130,7 +130,7 @@ def get_ready_context_materials(
     course_id: str,
     exclude_ids: List[str],
     min_chars: int = 600,
-    max_results: int = 8,
+    max_results: int = 20,
 ) -> List[Dict[str, Any]]:
     """
     Return educational materials in a course that have sufficient extracted text,

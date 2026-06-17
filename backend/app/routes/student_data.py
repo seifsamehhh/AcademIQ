@@ -10,7 +10,8 @@ Paths intentionally have NO /api prefix to match the frontend's api.ts calls
 """
 
 import logging
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -28,6 +29,143 @@ from app.services.student_data import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Student data"])
+
+# ── Context-relevance helpers ─────────────────────────────────────────────────
+
+_CTX_STOP: Set[str] = {
+    "the", "a", "an", "and", "or", "of", "to", "in", "is", "at", "by",
+    "for", "with", "on", "as", "this", "that", "from", "are", "was",
+    "were", "be", "been", "have", "has", "had", "do", "does", "did",
+    "will", "would", "could", "should", "may", "might",
+    # generic material-name words — not discriminative
+    "lecture", "lab", "notes", "slides", "file", "material", "chapter",
+    "handout", "tutorial", "worksheet", "revision", "review",
+}
+
+
+def _tok(text: str) -> Set[str]:
+    """Lowercase, strip punctuation, return significant word set."""
+    words = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower()).split()
+    return {w for w in words if len(w) > 2 and w not in _CTX_STOP}
+
+
+def _extract_num(title: str) -> Optional[int]:
+    """Return the first integer in a title string (e.g. 'Lecture 3' → 3)."""
+    m = re.search(r"\b(\d+)\b", title or "")
+    return int(m.group(1)) if m else None
+
+
+def _type_tag(title: str) -> Optional[str]:
+    t = (title or "").lower()
+    if "lecture" in t:
+        return "lecture"
+    if re.search(r"\blab\b", t):
+        return "lab"
+    if any(w in t for w in ("revision", "review", "summary")):
+        return "revision"
+    if any(w in t for w in ("notes", "handout", "tutorial", "slides")):
+        return "notes"
+    return None
+
+
+def _relevance_score(
+    sel_title: str,
+    sel_snippet: str,
+    ctx_doc: Dict[str, Any],
+) -> float:
+    """
+    Score 0.0–1.0 how relevant a context document is to the selected material.
+
+    Signals (weighted):
+      1. Title Jaccard overlap (0.40)
+      2. Number proximity — adjacent lectures = related topics (0.25)
+      3. Keyword overlap between selected text snippet and ctx text (0.25)
+      4. Same material type bonus (0.10)
+    """
+    ctx_title = ctx_doc.get("title") or ""
+    ctx_snippet = (ctx_doc.get("content_text") or "")[:400]
+
+    sel_tw = _tok(sel_title)
+    ctx_tw = _tok(ctx_title)
+
+    score = 0.0
+
+    # 1. Title Jaccard
+    if sel_tw and ctx_tw:
+        score += len(sel_tw & ctx_tw) / len(sel_tw | ctx_tw) * 0.40
+
+    # 2. Number proximity
+    sel_n = _extract_num(sel_title)
+    ctx_n = _extract_num(ctx_title)
+    if sel_n is not None and ctx_n is not None:
+        d = abs(sel_n - ctx_n)
+        score += 0.25 if d <= 1 else 0.15 if d == 2 else 0.07 if d <= 4 else 0.0
+
+    # 3. Keyword overlap with selected content snippet
+    sw = _tok(sel_snippet)
+    cw = _tok(ctx_snippet)
+    if sw and cw:
+        score += min(len(sw & cw) / max(len(sw), 1), 1.0) * 0.25
+
+    # 4. Same material type
+    if _type_tag(sel_title) and _type_tag(sel_title) == _type_tag(ctx_title):
+        score += 0.10
+
+    return min(score, 1.0)
+
+
+def _select_relevant_context(
+    sel_title: str,
+    sel_text: str,
+    all_ctx: List[Dict[str, Any]],
+    max_ctx: int = 3,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Rank candidate context documents by relevance and return the top max_ctx.
+
+    Returns (ranked_docs, selection_reason).
+    """
+    if not all_ctx:
+        return [], "no_context_candidates"
+
+    scored = [
+        (doc, _relevance_score(sel_title, sel_text[:400], doc))
+        for doc in all_ctx
+    ]
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # Always take at least the top-1; drop documents that score 0 unless we
+    # have fewer candidates than max_ctx
+    top = [doc for doc, s in scored[:max_ctx] if s > 0 or len(all_ctx) <= max_ctx]
+    if not top:
+        top = [scored[0][0]]  # at least one, even with zero score
+
+    reasons = ", ".join(
+        f"{d.get('title', 'ctx')[:30]}(score={s:.2f})"
+        for d, s in scored[:max_ctx]
+    )
+    return top, reasons
+
+
+def _groundedness_check(
+    questions: List[Dict[str, Any]],
+    title_kws: Set[str],
+) -> bool:
+    """
+    Return True if at least one generated question references a keyword
+    from the selected material title.  Generic fallback questions that
+    mention no topic from the title fail this check.
+    """
+    if not title_kws or not questions:
+        return True
+    meaningful = {k for k in title_kws if len(k) > 3}
+    if not meaningful:
+        return True
+    for q in questions:
+        body = (q.get("question", "") + " " + " ".join(q.get("options", []))).lower()
+        if any(kw in body for kw in meaningful):
+            return True
+    return False
 
 
 def _student_id_from_user(user: Dict[str, Any]) -> str | None:
@@ -122,6 +260,10 @@ def generate_quiz(
     selected_text = (text or "").strip()
     content_chars = len(selected_text)
 
+    # Primary title used for topic-anchoring and relevance scoring
+    primary_title: str = (
+        (mat_meta[0].get("title") or "") if mat_meta else ""
+    )
     selected_titles = [m.get("title") for m in mat_meta]
     selected_is_educational = all(
         _is_educational_material(m.get("title") or "", "")
@@ -141,59 +283,81 @@ def generate_quiz(
     context_material_ids: List[str] = []
     context_material_titles: List[str] = []
     context_reason: str | None = None
+    context_selection_reason: str | None = None
+    duplicate_guard_triggered = False
 
     if content_chars >= MIN_QUIZ_CONTENT_CHARS:
         questions, engine = quiz_gen.generate_questions(selected_text, num_questions=5)
 
     # ── 3. Course-context fallback ────────────────────────────────────────────
-    # Triggered when:
-    #   a) Selected material has no/insufficient text, OR
-    #   b) Generator produced 0 questions from the selected text.
-    # Only applies when the selected material is educational.
-    # Context is drawn ONLY from the same course and ONLY from ready educational
-    # materials (grades/admin/forum files are excluded both by classification
-    # and by requiring a minimum extracted text length).
+    # Triggered when selected material produced 0 questions AND it is educational.
+    #
+    # Key principle: context is RANKED BY RELEVANCE to the selected material,
+    # not just grabbed by content length.  This ensures Lecture 1 and Lecture 2
+    # use different context documents and thus produce different questions.
+    #
+    # Safeguards:
+    #   - Same course only
+    #   - Max 3 context materials (not 5 generic ones)
+    #   - Selected material title injected as a "Topic Focus" anchor
+    #   - Duplicate guard: checks that at least one question references a
+    #     keyword from the selected material title
     if not questions and selected_is_educational:
-        context_docs = material_repository.get_ready_context_materials(
+        # Fetch all ready educational candidates (up to 20 for ranking)
+        all_ctx_docs = material_repository.get_ready_context_materials(
             course_id,
             exclude_ids=material_ids,
             min_chars=MIN_QUIZ_CONTENT_CHARS,
         )
 
-        # Keep only genuinely educational context documents
-        edu_context: List[Dict[str, Any]] = []
-        for doc in context_docs:
-            title = doc.get("title") or ""
-            ft = (doc.get("file_type") or "").lower()
-            is_non_quiz, _ = _classify_non_quiz_material(title, ft)
-            if not is_non_quiz:
-                edu_context.append(doc)
+        # Remove non-educational documents
+        edu_candidates: List[Dict[str, Any]] = [
+            doc for doc in all_ctx_docs
+            if not _classify_non_quiz_material(
+                doc.get("title") or "", (doc.get("file_type") or "").lower()
+            )[0]
+        ]
 
-        if edu_context:
-            # Build combined text: selected first (even if short), then context
+        if edu_candidates:
+            # Rank candidates by relevance to the selected material
+            ranked, ctx_sel_reason = _select_relevant_context(
+                primary_title, selected_text, edu_candidates, max_ctx=3
+            )
+            context_selection_reason = ctx_sel_reason
+
+            # Build combined text with strong topic anchor
             combined_parts: List[str] = []
 
-            # Selected material (may be short — keep for topic grounding)
-            if selected_text:
-                header = selected_titles[0] if selected_titles else "Selected material"
-                combined_parts.append(f"[{header}]\n{selected_text}")
+            # Topic anchor: tells the generator what topic to focus on
+            if primary_title:
+                combined_parts.append(
+                    f"Topic: {primary_title}\n"
+                    f"The following material is from {primary_title}. "
+                    f"Generate questions specifically about {primary_title}."
+                )
 
-            # Context materials (up to 5; cap total context chars at 15 000)
+            # Selected material text (even if short — topic grounding)
+            if selected_text:
+                combined_parts.append(
+                    f"[{primary_title or 'Selected Material'}]\n{selected_text}"
+                )
+
+            # Top-ranked context materials (max 3, cap at 12 000 total chars)
             ctx_chars = 0
-            ctx_cap = 15_000
-            for doc in edu_context[:5]:
+            ctx_cap = 12_000
+            for doc in ranked:
                 ctx_text = (doc.get("content_text") or "").strip()
                 if not ctx_text:
                     continue
+                if ctx_chars >= ctx_cap:
+                    break
                 if ctx_chars + len(ctx_text) > ctx_cap:
                     ctx_text = ctx_text[: ctx_cap - ctx_chars]
                 ctx_title = doc.get("title") or "Course material"
-                combined_parts.append(f"[{ctx_title}]\n{ctx_text}")
+                combined_parts.append(f"[Related: {ctx_title}]\n{ctx_text}")
                 context_material_ids.append(str(doc.get("material_id") or ""))
                 context_material_titles.append(ctx_title)
                 ctx_chars += len(ctx_text)
-                if ctx_chars >= ctx_cap:
-                    break
 
             combined_text = "\n\n".join(combined_parts)
 
@@ -202,18 +366,44 @@ def generate_quiz(
                     combined_text, num_questions=5
                 )
                 if ctx_questions:
+                    # Duplicate guard: verify questions are grounded in the
+                    # selected material's topic, not just generic context questions
+                    title_kws = _tok(primary_title)
+                    grounded = _groundedness_check(ctx_questions, title_kws)
+                    if not grounded:
+                        duplicate_guard_triggered = True
+                        logger.warning(
+                            "Fallback questions not grounded in '%s' — "
+                            "retrying with stronger title anchor",
+                            primary_title,
+                        )
+                        # Retry with a stronger, more specific anchor
+                        strong_anchor = (
+                            f"TOPIC: {primary_title}\n"
+                            f"ALL QUESTIONS must be about {primary_title}.\n"
+                            f"Use only concepts from {primary_title}.\n\n"
+                        )
+                        retry_text = strong_anchor + combined_text
+                        retry_qs, retry_engine = quiz_gen.generate_questions(
+                            retry_text, num_questions=5
+                        )
+                        if retry_qs:
+                            ctx_questions = retry_qs
+                            ctx_engine = retry_engine
+
                     questions = ctx_questions
                     engine = ctx_engine
                     generator_mode = "course_context_fallback"
                     context_reason = (
-                        f"Selected material had only {content_chars} chars of extracted text; "
-                        f"supplemented with {len(context_material_ids)} other educational "
-                        f"material(s) from course {course_id}."
+                        f"Selected material '{primary_title}' had only {content_chars} chars; "
+                        f"supplemented with {len(context_material_ids)} related educational "
+                        f"material(s) from the same course."
                     )
                     logger.info(
-                        "Course-context fallback succeeded: course=%s selected=%s "
-                        "context=%s questions=%d",
-                        course_id, material_ids, context_material_ids, len(questions),
+                        "Context fallback succeeded: course=%s selected=%s "
+                        "context=%s questions=%d grounded=%s",
+                        course_id, material_ids, context_material_ids,
+                        len(questions), not duplicate_guard_triggered,
                     )
 
     # ── 4. Final error gates ──────────────────────────────────────────────────
@@ -254,11 +444,10 @@ def generate_quiz(
             detail={
                 "error": "quiz_generation_failed",
                 "message": (
-                    f"Could not generate quiz questions from the selected material "
+                    f"Could not generate quiz questions from '{primary_title or 'selected material'}' "
                     f"({content_chars} chars) even with course-context support. "
                     "The content may be image-only, too fragmented, or have no teachable "
-                    "concepts. Try re-uploading a text-based PDF or selecting a "
-                    "different material."
+                    "concepts. Try re-uploading a text-based PDF or selecting a different material."
                 ),
                 "content_chars": content_chars,
                 "engine": engine,
@@ -271,18 +460,22 @@ def generate_quiz(
     # ── 5. Success response ───────────────────────────────────────────────────
     debug: Dict[str, Any] = {
         "generator_mode": generator_mode,
+        "selected_material_id": material_ids[0] if len(material_ids) == 1 else material_ids,
+        "selected_material_title": primary_title,
         "selected_material_ids": material_ids,
         "selected_material_titles": selected_titles,
+        "selected_material_content_length": content_chars,
         "content_text_length_per_material": {
             m["material_id"]: m["raw_chars"] for m in mat_meta
         },
-        "total_content_chars": content_chars,
         "question_count": len(questions),
         "engine": engine,
+        "duplicate_guard_triggered": duplicate_guard_triggered,
     }
     if generator_mode == "course_context_fallback":
         debug["context_material_ids_used"] = context_material_ids
         debug["context_material_titles_used"] = context_material_titles
+        debug["context_selection_reason"] = context_selection_reason
         debug["reason"] = context_reason
 
     return {
