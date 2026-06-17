@@ -7,8 +7,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
+from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.models.material import build_material_doc, stable_material_id
 from app.repositories import material_repository, user_repository
@@ -357,8 +358,12 @@ def _canonical_learning_row_score(doc: Dict[str, Any]) -> int:
         score -= 40
     if ft in ("pdf", "pptx", "ppt"):
         score += 30
-    if re.search(r"(?i)\bfile\s*$", title.strip()) or " File" in title:
-        score += 20
+    if re.search(r"(?i)\blab\s*#?\d+\s*-?\s*file\s*$", title.strip()):
+        score += 25
+    if re.search(r"(?i)\blecture\s*#?\d+.*\bfile\s*$", title.strip()):
+        score += 22
+    if re.search(r"(?i)\b(code|notebook|building\s+cnn)\b", title):
+        score -= 12
     if doc.get("metadata_only"):
         score -= 20
     chars = int(doc.get("content_chars") or len((doc.get("content_text") or "").strip()))
@@ -401,6 +406,127 @@ def _find_canonical_learning_row(
         return None
     candidates.sort(key=_canonical_learning_row_score, reverse=True)
     return candidates[0]
+
+
+def _content_fields_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract quiz-relevant content fields for canonical merge."""
+    text = (doc.get("content_text") or "").strip()
+    return {
+        "content_text": text,
+        "content_chars": int(doc.get("content_chars") or len(text)),
+        "ready_for_quiz": bool(doc.get("ready_for_quiz")),
+        "extraction_status": doc.get("extraction_status"),
+        "extraction_error": doc.get("extraction_error"),
+        "processed_at": doc.get("processed_at"),
+        "last_attempted_at": doc.get("last_attempted_at"),
+        "metadata_only": False,
+        "extractor_version": doc.get("extractor_version") or CURRENT_EXTRACTOR_VERSION,
+        "resolved_url": doc.get("resolved_url"),
+        "last_upload_audit": doc.get("last_upload_audit"),
+        "last_upload_audit_at": doc.get("last_upload_audit_at"),
+    }
+
+
+def merge_duplicate_content_in_course(course_id: str) -> Dict[str, Any]:
+    """
+    Move extracted content from duplicate URL/link/page rows onto canonical
+    file rows shown in Quiz Generation (same lecture/lab/revision number).
+    """
+    course_id = str(course_id or "").strip()
+    docs = material_repository.list_by_course(course_id)
+    groups: Dict[Tuple[str, int], List[Dict[str, Any]]] = defaultdict(list)
+
+    for doc in docs:
+        title = doc.get("title") or ""
+        ft = str(doc.get("file_type") or "")
+        if not is_educational_material(title, ft) and not matches_educational_title(title):
+            continue
+        lecture_m = _LECTURE_NUM_RE.search(title)
+        lab_m = _LAB_NUM_RE.search(title)
+        if lecture_m:
+            groups[("lecture", int(lecture_m.group(1)))].append(doc)
+        elif lab_m:
+            groups[("lab", int(lab_m.group(1)))].append(doc)
+
+    merged_actions: List[Dict[str, Any]] = []
+
+    for (kind, num), group in groups.items():
+        if len(group) < 2:
+            continue
+        canonical = max(group, key=_canonical_learning_row_score)
+        canonical_id = str(canonical.get("material_id") or "")
+        canonical_chars = _content_chars_from_doc(canonical)
+        for doc in group:
+            donor_id = str(doc.get("material_id") or "")
+            if not donor_id or donor_id == canonical_id:
+                continue
+            donor_chars = _content_chars_from_doc(doc)
+            if donor_chars <= 0:
+                continue
+            if donor_chars <= canonical_chars:
+                continue
+            content_fields = _content_fields_from_doc(doc)
+            if canonical_chars == 0 or _canonical_learning_row_score(canonical) >= _canonical_learning_row_score(doc):
+                material_repository.upsert(
+                    {
+                        "course_id": course_id,
+                        "material_id": canonical_id,
+                        "title": canonical.get("title"),
+                        "file_type": canonical.get("file_type"),
+                        **content_fields,
+                        "hidden_duplicate": False,
+                        "duplicate_of": None,
+                    }
+                )
+                merged_text = (content_fields.get("content_text") or "").strip()
+                if merged_text:
+                    probe_fields = _derive_readiness_from_probe(
+                        merged_text,
+                        str(canonical.get("file_type") or doc.get("file_type") or ""),
+                    )
+                    material_repository.upsert(
+                        {
+                            "course_id": course_id,
+                            "material_id": canonical_id,
+                            "ready_for_quiz": probe_fields["ready_for_quiz"],
+                            "extraction_status": probe_fields["extraction_status"],
+                            "extraction_error": probe_fields["extraction_error"],
+                            "content_chars": probe_fields["content_chars"],
+                            "probe_question_count": probe_fields.get("probe_question_count"),
+                            "probe_engine": probe_fields.get("probe_engine"),
+                        }
+                    )
+                material_repository.upsert(
+                    {
+                        "course_id": course_id,
+                        "material_id": donor_id,
+                        "duplicate_of": canonical_id,
+                        "hidden_duplicate": True,
+                        "content_text": "",
+                        "content_chars": 0,
+                        "metadata_only": True,
+                        "ready_for_quiz": False,
+                        "extraction_status": "not_uploaded",
+                        "extraction_error": f"Content merged to canonical row {canonical_id}",
+                    }
+                )
+                merged_actions.append(
+                    {
+                        "action": "merged_to_canonical",
+                        "from_material_id": donor_id,
+                        "from_title": doc.get("title"),
+                        "to_material_id": canonical_id,
+                        "to_title": canonical.get("title"),
+                        "chars_moved": donor_chars,
+                    }
+                )
+                canonical_chars = donor_chars
+
+    return {
+        "course_id": course_id,
+        "merged_count": len(merged_actions),
+        "actions": merged_actions,
+    }
 
 
 def _identity_result(
@@ -659,6 +785,18 @@ def reassess_course_material_readiness(course_id: str) -> Dict[str, Any]:
         if not text:
             err = str(doc.get("extraction_error") or "")
             stale_failed = doc.get("extraction_status") == "extraction_failed"
+            if doc.get("last_attempted_at") or doc.get("processed_at"):
+                results.append(
+                    {
+                        "material_id": material_id,
+                        "title": title,
+                        "action": "skipped_no_content_after_attempt",
+                        "quiz_status": doc.get("extraction_status") or "not_uploaded",
+                        "chars": 0,
+                        "reason": err or "Upload attempted but no content stored",
+                    }
+                )
+                continue
             if stale_failed and matches_educational_title(title):
                 material_repository.upsert(
                     {
@@ -731,6 +869,8 @@ def reassess_course_material_readiness(course_id: str) -> Dict[str, Any]:
     limited = [r for r in results if r.get("quiz_status") == "limited_ready"]
     disabled = [r for r in results if r.get("quiz_status") not in ("ready", "limited_ready")]
 
+    merge_summary = merge_duplicate_content_in_course(course_id)
+
     return {
         "course_id": course_id,
         "reassessed_total": len(results),
@@ -742,6 +882,7 @@ def reassess_course_material_readiness(course_id: str) -> Dict[str, Any]:
         "limited_ready_materials": limited,
         "disabled_materials": disabled,
         "materials": results,
+        "duplicate_merge": merge_summary,
     }
 
 
@@ -1525,9 +1666,31 @@ def _sync_extracted_content_to_canonical_row(
         "hidden_duplicate": False,
         "duplicate_of": None,
     }
+    if content_fields.get("resolved_url"):
+        merge_doc["resolved_url"] = content_fields["resolved_url"]
+    elif norm.get("resolved_url"):
+        merge_doc["resolved_url"] = norm.get("resolved_url")
     if norm.get("activity_url"):
         merge_doc.setdefault("url", norm.get("activity_url"))
     material_repository.upsert(merge_doc)
+
+    # Re-probe canonical row after merge
+    merged_doc = material_repository.get(course_id, canonical_id) or merge_doc
+    merged_text = (merged_doc.get("content_text") or content_fields.get("content_text") or "").strip()
+    if merged_text:
+        probe_fields = _derive_readiness_from_probe(
+            merged_text, str(merged_doc.get("file_type") or canonical.get("file_type") or "")
+        )
+        material_repository.upsert(
+            {
+                "course_id": course_id,
+                "material_id": canonical_id,
+                "ready_for_quiz": probe_fields["ready_for_quiz"],
+                "extraction_status": probe_fields["extraction_status"],
+                "extraction_error": probe_fields["extraction_error"],
+                "content_chars": probe_fields["content_chars"],
+            }
+        )
 
     material_repository.upsert(
         {
@@ -1629,6 +1792,14 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Extension could not download bytes — record terminal failure so preflight skips retry.
     if payload.get("upload_attempt_failed"):
         extraction_error = str(payload.get("extraction_error") or "download_failed")
+        if extraction_error == "no_download_link_on_page":
+            extraction_error = "no_download_link_found_on_resource_page"
+        stored_error = (
+            extraction_error
+            if extraction_error.startswith("download_failed:")
+            or extraction_error == "no_download_link_found_on_resource_page"
+            else f"download_failed:{extraction_error}"
+        )
         existing_doc = material_repository.get(course_id, material_id)
         if existing_doc and not force:
             if existing_doc.get("processed_at") or (
@@ -1660,9 +1831,10 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
             "source": "moodle_sync",
             "ready_for_quiz": False,
             "extraction_status": "extraction_failed",
-            "extraction_error": f"download_failed:{extraction_error}",
+            "extraction_error": stored_error,
             "processed_at": now,
             "last_attempted_at": now,
+            "metadata_only": False,
             "extractor_version": CURRENT_EXTRACTOR_VERSION,
         }
         if course_name:
@@ -1671,6 +1843,30 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
             fail_doc["url"] = source_url
         if resolved_url_payload:
             fail_doc["resolved_url"] = resolved_url_payload
+        fail_audit = _build_upload_identity_audit(
+            norm,
+            identity_before,
+            identity_before,
+            payload,
+            0,
+            "extraction_failed",
+        )
+        upload_audit_payload = payload.get("upload_audit") or {}
+        if isinstance(upload_audit_payload, dict):
+            fail_audit.update(
+                {k: v for k, v in upload_audit_payload.items() if v is not None}
+            )
+        fail_audit.update(
+            {
+                "backend_upload_called": True,
+                "backend_response_status": "stored_failed",
+                "failure_reason": extraction_error,
+                "final_content_text_length": 0,
+                "final_quiz_status": "extraction_failed",
+            }
+        )
+        fail_doc["last_upload_audit"] = fail_audit
+        fail_doc["last_upload_audit_at"] = now
         inserted = material_repository.upsert(fail_doc)
         return {
             "status": "stored_failed",
@@ -1933,6 +2129,19 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         chars,
         quiz_status_out,
     )
+    upload_audit_payload = payload.get("upload_audit") or {}
+    if isinstance(upload_audit_payload, dict):
+        identity_audit.update(
+            {k: v for k, v in upload_audit_payload.items() if v is not None}
+        )
+    identity_audit["backend_upload_called"] = True
+    identity_audit["backend_response_status"] = "stored"
+    identity_audit["final_content_text_length"] = chars
+    identity_audit["final_quiz_status"] = quiz_status_out
+    material_doc["last_upload_audit"] = identity_audit
+    material_doc["last_upload_audit_at"] = now
+
+    merge_duplicate_content_in_course(course_id)
 
     content_note = None
     if not ready_for_quiz:

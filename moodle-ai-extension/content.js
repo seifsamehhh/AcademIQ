@@ -397,6 +397,48 @@
         return text && text.length >= 80 ? text : null;
     };
 
+    const extractDownloadUrlFromHtml = (html, pageUrl, doc) => {
+        const candidates = [];
+        const pushCandidate = (raw) => {
+            if (!raw) return;
+            const href = resolveHref({ getAttribute: () => raw }, pageUrl) || raw;
+            if (!href || /^javascript:/i.test(href) || /^#/i.test(href)) return;
+            const path = href.split("?")[0];
+            if (
+                PLUGINFILE_RE.test(href) ||
+                NESTED_DOWNLOAD_RE.test(path) ||
+                /forcedownload=1/i.test(href)
+            ) {
+                candidates.push(href);
+            }
+        };
+
+        const urlPatterns = [
+            /https?:\/\/[^\s"'<>]+pluginfile\.php[^\s"'<>]*/gi,
+            /\/pluginfile\.php[^\s"'<>]*/gi,
+            /https?:\/\/[^\s"'<>]+\.(pdf|pptx?|docx?|txt)(?:\?[^\s"'<>]*)?/gi,
+        ];
+        for (const pattern of urlPatterns) {
+            const matches = html.match(pattern) || [];
+            for (const match of matches) {
+                pushCandidate(match.replace(/&amp;/g, "&"));
+            }
+        }
+
+        if (doc) {
+            doc
+                .querySelectorAll(
+                    "iframe[src], embed[src], object[data], a[href*='pluginfile.php'], a[href*='forcedownload=1']"
+                )
+                .forEach((node) => {
+                    const src = node.getAttribute("src") || node.getAttribute("data") || node.getAttribute("href");
+                    pushCandidate(src);
+                });
+        }
+
+        return candidates[0] || null;
+    };
+
     const resolveEducationalActivityContent = async (activityUrl) => {
         if (!activityUrl) return { downloadUrl: null, pageText: null, pageUrl: null };
         try {
@@ -432,21 +474,28 @@
             if (!anchors.length) {
                 anchors.push(...Array.from(doc.querySelectorAll("a[href]")));
             }
-            let downloadUrl = null;
-            for (const anchor of anchors) {
-                const href = resolveHref(anchor, pageUrl);
-                if (!href) continue;
-                if (PLUGINFILE_RE.test(href) || NESTED_DOWNLOAD_RE.test(href.split("?")[0])) {
-                    downloadUrl = href;
-                    break;
-                }
-                if (/\/mod\/resource\//i.test(href) && !/\/mod\/resource\/view\.php/i.test(href)) {
-                    downloadUrl = href;
-                    break;
+            let downloadUrl = extractDownloadUrlFromHtml(html, pageUrl, doc);
+            if (!downloadUrl) {
+                for (const anchor of anchors) {
+                    const href = resolveHref(anchor, pageUrl);
+                    if (!href) continue;
+                    if (PLUGINFILE_RE.test(href) || NESTED_DOWNLOAD_RE.test(href.split("?")[0])) {
+                        downloadUrl = href;
+                        break;
+                    }
+                    if (/\/mod\/resource\//i.test(href) && !/\/mod\/resource\/view\.php/i.test(href)) {
+                        downloadUrl = href;
+                        break;
+                    }
                 }
             }
             const pageText = extractReadablePageText(doc);
-            return { downloadUrl, pageText, pageUrl, error: downloadUrl ? null : "no_download_link_on_page" };
+            return {
+                downloadUrl,
+                pageText,
+                pageUrl,
+                error: downloadUrl ? null : "no_download_link_found_on_resource_page"
+            };
         } catch (error) {
             return { downloadUrl: null, pageText: null, pageUrl: null, error: String(error) };
         }
@@ -462,8 +511,9 @@
         let resolveError = null;
 
         const needsResolve =
-            !downloadUrl ||
+            isMoodleActivityPageUrl(activityUrl) ||
             isMoodleActivityPageUrl(downloadUrl) ||
+            !downloadUrl ||
             (!isDirectDownloadUrl(downloadUrl) && !PLUGINFILE_RE.test(downloadUrl));
 
         if (needsResolve && activityUrl) {
@@ -1093,6 +1143,14 @@
         };
     };
 
+    const normalizeUploadFailureReason = (reason) => {
+        const value = String(reason || "").trim();
+        if (value === "no_download_link_on_page") {
+            return "no_download_link_found_on_resource_page";
+        }
+        return value;
+    };
+
     const uploadMaterialToBackend = async (backendUploadUrl, material, identity) => {
         const basePayload = {
             course_id: material.course_id || material.courseId,
@@ -1159,7 +1217,13 @@
                     file_type: effectiveFt,
                     resolved_url: workingMaterial.resolvedUrl || workingMaterial.resolved_url || downloadUrl,
                     content_base64: fetched.base64,
-                    content_type: fetched.contentType
+                    content_type: fetched.contentType,
+                    upload_audit: {
+                        download_url_used: downloadUrl,
+                        download_status: "ok",
+                        was_attempted_by_extension: true,
+                        was_in_extension_upload_queue: true,
+                    },
                 });
                 const result = {
                     material_id: basePayload.material_id,
@@ -1167,7 +1231,7 @@
                     ok: res.ok,
                     ...data,
                     audit: buildUploadAuditRow(workingMaterial, fetched, data),
-            identity_audit: data.identity_audit || null,
+                    identity_audit: data.identity_audit || null,
                 };
                 return result;
             }
@@ -1179,7 +1243,13 @@
                 ...basePayload,
                 file_type: urlLike ? "html" : effectiveFt,
                 content_text: pageText,
-                content_type: "text/html"
+                content_type: "text/html",
+                upload_audit: {
+                    download_url_used: downloadUrl || null,
+                    download_status: "page_text",
+                    was_attempted_by_extension: true,
+                    was_in_extension_upload_queue: true,
+                },
             });
             return {
                 material_id: basePayload.material_id,
@@ -1191,14 +1261,21 @@
             };
         }
 
-        const failureReason =
+        const failureReason = normalizeUploadFailureReason(
             fetched.error ||
-            resolveError ||
-            (canFetchFile ? "download_or_page_text_failed" : "no_downloadable_file_or_page_text");
+                resolveError ||
+                (canFetchFile ? "download_or_page_text_failed" : "no_downloadable_file_or_page_text")
+        );
         const { res, data } = await postUploadPayload({
             ...basePayload,
             upload_attempt_failed: true,
-            extraction_error: failureReason
+            extraction_error: failureReason,
+            upload_audit: {
+                download_url_used: downloadUrl || null,
+                download_status: fetched?.error || resolveError || failureReason,
+                was_attempted_by_extension: true,
+                was_in_extension_upload_queue: true,
+            },
         });
         return {
             material_id: basePayload.material_id,
@@ -1256,8 +1333,34 @@
             sendMessage("materials", allMaterials);
         }
 
-        // Filter to downloadable types, then apply popup's preflight filter if present
-        let uploadable = allMaterials.filter(isDownloadableMaterial);
+        // ── Build upload queue (preflight-first when popup sent preflight rows) ──
+        const cmidFromUrl = (url) => {
+            const match = String(url || "").match(/[?&](?:id|cmid)=([^&#]+)/i);
+            return match ? String(match[1]) : null;
+        };
+
+        const enrichFromPreflight = (material, pf) => {
+            if (!pf) return material;
+            return {
+                ...material,
+                material_id: pf.matched_db_material_id || pf.material_id || material.material_id,
+                id: pf.matched_db_material_id || pf.material_id || material.id,
+                db_id: pf.db_id || pf.matched_db_id || material.db_id,
+                matched_material_id:
+                    pf.matched_db_material_id || pf.material_id || material.matched_material_id,
+                stable_material_key: pf.stable_material_key || material.stable_material_key,
+                title: pf.title || pf.matched_db_title || material.title,
+                url: pf.db_source_url || material.url,
+                source_url: pf.db_source_url || material.source_url || material.url,
+                resolvedUrl: pf.db_resolved_url || material.resolvedUrl,
+                resolved_url: pf.db_resolved_url || material.resolved_url,
+                file_type: pf.file_type || material.file_type || material.fileType,
+                fileType: pf.file_type || material.fileType || material.file_type,
+            };
+        };
+
+        let uploadable = [];
+        const pfItems = Array.isArray(preflightItems) ? preflightItems : [];
 
         if (Array.isArray(onlyMaterialIds)) {
             if (onlyMaterialIds.length === 0) {
@@ -1275,75 +1378,68 @@
                     retry_audit: [],
                 };
             }
+
             const allowed = new Set(onlyMaterialIds.map(String));
-            const cmidFromUrl = (url) => {
-                const match = String(url || "").match(/[?&](?:id|cmid)=([^&#]+)/i);
-                return match ? String(match[1]) : null;
-            };
-            const materialAllowed = (m) => {
-                const mid = String(m.material_id || m.id || "");
-                if (allowed.has(mid)) return true;
-                const cmid = cmidFromUrl(m.url);
-                return cmid && allowed.has(cmid);
-            };
-            const pfMap = new Map(
-                (Array.isArray(preflightItems) ? preflightItems : []).map((item) => [
-                    String(item.material_id || ""),
-                    item,
-                ])
-            );
-            uploadable = uploadable.filter(materialAllowed);
-
-            const enrichFromPreflight = (material) => {
+            const scrapeByMid = new Map();
+            const scrapeByCmid = new Map();
+            for (const material of allMaterials) {
                 const mid = String(material.material_id || material.id || "");
-                const pf = pfMap.get(mid);
-                if (!pf) return material;
-                return {
-                    ...material,
-                    db_id: pf.db_id || pf.matched_db_id || material.db_id,
-                    matched_material_id:
-                        pf.matched_db_material_id || pf.material_id || material.matched_material_id,
-                    stable_material_key: pf.stable_material_key || material.stable_material_key,
-                    title: pf.title || material.title,
-                    url: pf.db_source_url || material.url,
-                    source_url: pf.db_source_url || material.source_url || material.url,
-                    resolvedUrl: pf.db_resolved_url || material.resolvedUrl,
-                    resolved_url: pf.db_resolved_url || material.resolved_url,
-                };
-            };
-            uploadable = uploadable.map(enrichFromPreflight);
+                if (mid) scrapeByMid.set(mid, material);
+                const cmid = cmidFromUrl(material.url);
+                if (cmid) scrapeByCmid.set(cmid, material);
+            }
 
-            const scrapeIds = new Set(
-                uploadable.map((m) => String(m.material_id || m.id || ""))
-            );
-            const pfItems = Array.isArray(preflightItems) ? preflightItems : [];
-            for (const item of pfItems) {
-                const mid = String(item.material_id || "");
-                if (!mid || !allowed.has(mid) || scrapeIds.has(mid)) continue;
-                const sourceUrl = item.db_source_url || item.source_url || null;
-                if (!sourceUrl) continue;
-                uploadable.push({
-                    material_id: mid,
-                    id: mid,
-                    title: item.title || "Untitled",
-                    url: sourceUrl,
-                    source_url: sourceUrl,
-                    resolvedUrl: item.db_resolved_url || item.resolved_url || null,
-                    resolved_url: item.db_resolved_url || item.resolved_url || null,
-                    file_type: item.file_type || "unknown",
-                    fileType: item.file_type || "unknown",
-                    db_id: item.db_id || item.matched_db_id || null,
-                    matched_material_id: item.matched_db_material_id || item.material_id || mid,
-                    stable_material_key: item.stable_material_key || null,
-                    course_id: tabCourseId,
-                    courseId: tabCourseId,
-                    course_name: course.course_name,
-                });
-                scrapeIds.add(mid);
+            const queuedIds = new Set();
+            const addToQueue = (material) => {
+                const mid = String(material.material_id || material.id || "");
+                if (!mid || queuedIds.has(mid)) return;
+                queuedIds.add(mid);
+                uploadable.push(material);
+            };
+
+            if (pfItems.length > 0) {
+                for (const item of pfItems) {
+                    const mid = String(item.material_id || "");
+                    if (!mid || !allowed.has(mid)) continue;
+                    const scraped = scrapeByMid.get(mid) || scrapeByCmid.get(mid);
+                    if (scraped) {
+                        addToQueue(enrichFromPreflight(scraped, item));
+                        continue;
+                    }
+                    const sourceUrl = item.db_source_url || item.source_url || null;
+                    if (!sourceUrl) continue;
+                    addToQueue({
+                        material_id: item.matched_db_material_id || mid,
+                        id: item.matched_db_material_id || mid,
+                        title: item.title || "Untitled",
+                        url: sourceUrl,
+                        source_url: sourceUrl,
+                        resolvedUrl: item.db_resolved_url || item.resolved_url || null,
+                        resolved_url: item.db_resolved_url || item.resolved_url || null,
+                        file_type: item.file_type || "unknown",
+                        fileType: item.file_type || "unknown",
+                        db_id: item.db_id || item.matched_db_id || null,
+                        matched_material_id: item.matched_db_material_id || item.material_id || mid,
+                        stable_material_key: item.stable_material_key || null,
+                        course_id: tabCourseId,
+                        courseId: tabCourseId,
+                        course_name: course.course_name,
+                    });
+                }
+            } else {
+                const materialAllowed = (m) => {
+                    const mid = String(m.material_id || m.id || "");
+                    if (allowed.has(mid)) return true;
+                    const cmid = cmidFromUrl(m.url);
+                    return cmid && allowed.has(cmid);
+                };
+                uploadable = allMaterials.filter(isDownloadableMaterial).filter(materialAllowed);
             }
             console.log(
                 `[AcademIQ] Upload: ${uploadable.length}/${allMaterials.length} materials after preflight filter`
             );
+        } else {
+            uploadable = allMaterials.filter(isDownloadableMaterial);
         }
 
         const identity = getStudentIdentity();

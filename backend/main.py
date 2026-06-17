@@ -240,6 +240,20 @@ def debug_raw_course_materials(email: str, course_id: str):
     }
 
 
+@app.get("/debug/material-processing-audit/{email}")
+def debug_material_processing_audit(email: str):
+    """
+    Full educational material processing audit across all synced courses.
+    Shows quiz readiness, suspicious flags, upload identity, and grouped root causes.
+    No content_text, passwords, tokens, or connection strings.
+    """
+    from app.services.material_processing_audit import debug_material_processing_audit as _audit
+
+    if not connect_database():
+        raise HTTPException(status_code=503, detail="Database unreachable")
+    return _audit(email)
+
+
 @app.get("/debug/synced-courses/{email}")
 def debug_synced_courses(email: str):
     """
