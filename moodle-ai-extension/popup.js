@@ -64,6 +64,10 @@ const normalizeMaterialForApi = (m) => ({
     resolved_url: m.resolvedUrl || m.resolved_url || null,
     file_type: m.fileType || m.file_type || "unknown",
     material_type: m.type || m.material_type || null,
+    db_id: m.db_id || m.dbId || m.matched_db_id || null,
+    matched_material_id:
+        m.matched_material_id || m.matchedMaterialId || m.matched_db_material_id || null,
+    stable_material_key: m.stable_material_key || null,
 });
 
 const logSaveDetectedAudit = (saveData, courseId) => {
@@ -790,6 +794,14 @@ const syncPopupCourseToTab = async () => {
 };
 
 const logRetryExtractionAudit = (tabResult, courseId) => {
+    const identityRows = (tabResult?.results || [])
+        .map((row) => row.identity_audit)
+        .filter(Boolean);
+    if (identityRows.length) {
+        console.group(`[AcademIQ] Upload identity audit — course ${courseId}`);
+        console.table(identityRows);
+        console.groupEnd();
+    }
     const audit =
         tabResult?.targeted_retry_audit ||
         tabResult?.retry_audit ||

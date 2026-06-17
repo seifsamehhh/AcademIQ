@@ -8,6 +8,8 @@ re-synced material updates the existing record instead of inserting a duplicate.
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from bson import ObjectId
+
 from app.config.database import course_materials_collection
 
 
@@ -62,11 +64,51 @@ def find_by_course_and_url(course_id: str, url: str) -> Optional[Dict[str, Any]]
         return None
     cid = str(course_id)
     normalized = url.strip()
+    norm_key = _normalize_url_key(normalized)
     doc = course_materials_collection.find_one({"course_id": cid, "url": normalized})
     if doc:
         return doc
-    return course_materials_collection.find_one(
+    doc = course_materials_collection.find_one(
         {"course_id": cid, "resolved_url": normalized}
+    )
+    if doc:
+        return doc
+    if norm_key:
+        doc = course_materials_collection.find_one(
+            {"course_id": cid, "normalized_source_url": norm_key}
+        )
+        if doc:
+            return doc
+        doc = course_materials_collection.find_one(
+            {"course_id": cid, "normalized_resolved_url": norm_key}
+        )
+        if doc:
+            return doc
+    return None
+
+
+def _normalize_url_key(url: str) -> str:
+    u = (url or "").strip().lower().split("#")[0].rstrip("/")
+    return u
+
+
+def get_by_object_id(object_id: str) -> Optional[Dict[str, Any]]:
+    if not object_id:
+        return None
+    try:
+        return course_materials_collection.find_one({"_id": ObjectId(str(object_id))})
+    except Exception:
+        return None
+
+
+def get_by_stable_key(course_id: str, stable_key: str) -> Optional[Dict[str, Any]]:
+    if not stable_key:
+        return None
+    return course_materials_collection.find_one(
+        {
+            "course_id": str(course_id),
+            "stable_material_key": str(stable_key),
+        }
     )
 
 

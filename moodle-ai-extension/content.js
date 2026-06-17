@@ -1098,6 +1098,14 @@
             course_id: material.course_id || material.courseId,
             course_name: material.course_name,
             material_id: material.material_id || material.id,
+            matched_material_id:
+                material.matched_material_id ||
+                material.matchedMaterialId ||
+                material.matched_db_material_id ||
+                material.material_id ||
+                material.id,
+            db_id: material.db_id || material.dbId || material.matched_db_id || null,
+            stable_material_key: material.stable_material_key || null,
             title: material.title,
             material_type: material.material_type || material.type,
             file_type: material.file_type || material.fileType,
@@ -1158,7 +1166,8 @@
                     title: basePayload.title,
                     ok: res.ok,
                     ...data,
-                    audit: buildUploadAuditRow(workingMaterial, fetched, data)
+                    audit: buildUploadAuditRow(workingMaterial, fetched, data),
+            identity_audit: data.identity_audit || null,
                 };
                 return result;
             }
@@ -1198,7 +1207,8 @@
             recorded_on_backend: res.ok,
             error: failureReason,
             ...data,
-            audit: buildUploadAuditRow(workingMaterial, fetched, data)
+            audit: buildUploadAuditRow(workingMaterial, fetched, data),
+            identity_audit: data.identity_audit || null,
         };
     };
 
@@ -1276,7 +1286,32 @@
                 const cmid = cmidFromUrl(m.url);
                 return cmid && allowed.has(cmid);
             };
+            const pfMap = new Map(
+                (Array.isArray(preflightItems) ? preflightItems : []).map((item) => [
+                    String(item.material_id || ""),
+                    item,
+                ])
+            );
             uploadable = uploadable.filter(materialAllowed);
+
+            const enrichFromPreflight = (material) => {
+                const mid = String(material.material_id || material.id || "");
+                const pf = pfMap.get(mid);
+                if (!pf) return material;
+                return {
+                    ...material,
+                    db_id: pf.db_id || pf.matched_db_id || material.db_id,
+                    matched_material_id:
+                        pf.matched_db_material_id || pf.material_id || material.matched_material_id,
+                    stable_material_key: pf.stable_material_key || material.stable_material_key,
+                    title: pf.title || material.title,
+                    url: pf.db_source_url || material.url,
+                    source_url: pf.db_source_url || material.source_url || material.url,
+                    resolvedUrl: pf.db_resolved_url || material.resolvedUrl,
+                    resolved_url: pf.db_resolved_url || material.resolved_url,
+                };
+            };
+            uploadable = uploadable.map(enrichFromPreflight);
 
             const scrapeIds = new Set(
                 uploadable.map((m) => String(m.material_id || m.id || ""))
@@ -1297,6 +1332,9 @@
                     resolved_url: item.db_resolved_url || item.resolved_url || null,
                     file_type: item.file_type || "unknown",
                     fileType: item.file_type || "unknown",
+                    db_id: item.db_id || item.matched_db_id || null,
+                    matched_material_id: item.matched_db_material_id || item.material_id || mid,
+                    stable_material_key: item.stable_material_key || null,
                     course_id: tabCourseId,
                     courseId: tabCourseId,
                     course_name: course.course_name,

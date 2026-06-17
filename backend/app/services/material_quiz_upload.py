@@ -15,8 +15,11 @@ from app.repositories import material_repository, user_repository
 from app.services.material_text_extract import extract_text_from_bytes
 from app.services.material_quiz_display import (
     classify_non_quiz_material,
+    detect_link_wrapper,
     is_educational_material,
     matches_educational_title,
+    _LAB_NUM_RE,
+    _LECTURE_NUM_RE,
 )
 from app.services.quiz_material_eligibility import assess_quiz_eligibility
 from app.services.student_data import (
@@ -321,20 +324,173 @@ def _stable_hash_material_id(prefix: str, key: str) -> str:
     return f"{prefix}_{digest}"
 
 
-def _resolve_save_material_id(
+def _compute_stable_material_key(course_id: str, norm: Dict[str, Any]) -> str:
+    activity_url = norm.get("activity_url") or ""
+    resolved_url = norm.get("resolved_url") or ""
+    cmid = str(norm.get("url_cmid") or "").strip()
+    norm_url = _normalize_source_url(activity_url)
+    norm_resolved = _normalize_source_url(resolved_url)
+    if norm_url:
+        return f"url:{norm_url}"
+    if norm_resolved:
+        return f"resolved:{norm_resolved}"
+    if cmid:
+        return f"cmid:{course_id}:{cmid}"
+    tft_key = f"{_normalize_title(norm.get('title') or '')}|{(norm.get('file_type') or '').lower()}"
+    return f"tft:{course_id}:{tft_key}"
+
+
+def _mongo_id_str(doc: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not doc or not doc.get("_id"):
+        return None
+    return str(doc["_id"])
+
+
+def _canonical_learning_row_score(doc: Dict[str, Any]) -> int:
+    """Higher = preferred main-list file row for quiz content."""
+    title = str(doc.get("title") or "")
+    ft = str(doc.get("file_type") or "").lower()
+    score = 0
+    if detect_link_wrapper(title, ft):
+        score -= 50
+    if str(doc.get("material_id") or "").startswith("url_"):
+        score -= 40
+    if ft in ("pdf", "pptx", "ppt"):
+        score += 30
+    if re.search(r"(?i)\bfile\s*$", title.strip()) or " File" in title:
+        score += 20
+    if doc.get("metadata_only"):
+        score -= 20
+    chars = int(doc.get("content_chars") or len((doc.get("content_text") or "").strip()))
+    if chars > 0:
+        score += min(10, chars // 500)
+    return score
+
+
+def _find_canonical_learning_row(
+    course_id: str,
+    title: str,
+    file_type: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    When several DB rows share a lecture/lab number, prefer the file row shown
+    in Quiz Generation (PDF/PPTX File), not URL/page wrapper duplicates.
+    """
+    t = title or ""
+    lecture_m = _LECTURE_NUM_RE.search(t)
+    lab_m = _LAB_NUM_RE.search(t)
+    if not lecture_m and not lab_m:
+        return None
+    num = lecture_m.group(1) if lecture_m else lab_m.group(1)
+    kind = "lecture" if lecture_m else "lab"
+
+    candidates: List[Dict[str, Any]] = []
+    for doc in material_repository.list_by_course(course_id):
+        dt = doc.get("title") or ""
+        if kind == "lecture":
+            m = _LECTURE_NUM_RE.search(dt)
+            if not m or m.group(1) != num:
+                continue
+        else:
+            m = _LAB_NUM_RE.search(dt)
+            if not m or m.group(1) != num:
+                continue
+        candidates.append(doc)
+
+    if not candidates:
+        return None
+    candidates.sort(key=_canonical_learning_row_score, reverse=True)
+    return candidates[0]
+
+
+def _identity_result(
+    doc: Optional[Dict[str, Any]],
+    match_strategy: str,
+    stable_key: Optional[str] = None,
+    allocated_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    if doc:
+        return {
+            "material_id": str(doc.get("material_id") or ""),
+            "existing_doc": doc,
+            "stable_material_key": doc.get("stable_material_key") or stable_key,
+            "match_strategy": match_strategy,
+            "db_id": _mongo_id_str(doc),
+            "matched_db_title": doc.get("title"),
+        }
+    return {
+        "material_id": allocated_id or "",
+        "existing_doc": None,
+        "stable_material_key": stable_key,
+        "match_strategy": match_strategy,
+        "db_id": None,
+        "matched_db_title": None,
+    }
+
+
+def resolve_material_identity(
+    course_id: str,
+    norm: Dict[str, Any],
+    batch_cmid_titles: Optional[Dict[str, str]] = None,
+    db_id: Optional[str] = None,
+    stable_material_key: Optional[str] = None,
+    matched_material_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Single identity resolver for save-detected, preflight, and upload-for-quiz.
+    Always returns the MongoDB material_id that Quiz Generation should display.
+    """
+    batch_cmid_titles = batch_cmid_titles or {}
+    stable_key = stable_material_key or _compute_stable_material_key(course_id, norm)
+
+    # 1. Exact Mongo _id from preflight
+    if db_id:
+        doc = material_repository.get_by_object_id(db_id)
+        if doc and str(doc.get("course_id")) == str(course_id):
+            canonical = _find_canonical_learning_row(
+                course_id, norm.get("title") or "", norm.get("file_type") or ""
+            )
+            if canonical and _canonical_learning_row_score(canonical) > _canonical_learning_row_score(doc):
+                return _identity_result(canonical, "canonical_over_db_id", stable_key)
+            return _identity_result(doc, "mongo_id", stable_key)
+
+    # 2. Explicit matched material_id from preflight
+    if matched_material_id:
+        doc = material_repository.get(course_id, str(matched_material_id))
+        if doc:
+            canonical = _find_canonical_learning_row(
+                course_id, norm.get("title") or "", norm.get("file_type") or ""
+            )
+            if canonical and canonical.get("material_id") != doc.get("material_id"):
+                if _canonical_learning_row_score(canonical) > _canonical_learning_row_score(doc):
+                    return _identity_result(canonical, "canonical_over_matched_id", stable_key)
+            return _identity_result(doc, "matched_material_id", stable_key)
+
+    # 3. stable_material_key
+    doc = material_repository.get_by_stable_key(course_id, stable_key)
+    if doc:
+        return _identity_result(doc, "stable_material_key", stable_key)
+
+    # 4–6. URL / cmid / hash allocation (same as save-detected)
+    allocated_id, existing, strategy = _allocate_material_id(course_id, norm, batch_cmid_titles)
+    if existing:
+        canonical = _find_canonical_learning_row(
+            course_id, norm.get("title") or "", norm.get("file_type") or ""
+        )
+        if canonical and canonical.get("material_id") != existing.get("material_id"):
+            if _canonical_learning_row_score(canonical) >= _canonical_learning_row_score(existing):
+                return _identity_result(canonical, "canonical_over_existing", stable_key)
+        return _identity_result(existing, strategy, stable_key)
+
+    return _identity_result(None, strategy, stable_key, allocated_id)
+
+
+def _allocate_material_id(
     course_id: str,
     norm: Dict[str, Any],
     batch_cmid_titles: Dict[str, str],
 ) -> tuple[str, Optional[Dict[str, Any]], str]:
-    """
-    Choose a stable MongoDB material_id without collapsing different lectures.
-
-    Priority:
-      1. existing row matched by source/resolved URL
-      2. course_id + cmid when unique (batch + DB)
-      3. course_id + normalized source_url hash
-      4. course_id + normalized title + file_type hash
-    """
+    """Choose material_id for upsert; mirrors save-detected key priority."""
     title = norm["title"]
     raw_file_type = norm["file_type"]
     activity_url = norm["activity_url"]
@@ -648,9 +804,11 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             "key_strategy": None,
         }
 
-        material_id, existing, key_strategy = _resolve_save_material_id(
-            course_id, norm, batch_cmid_titles,
-        )
+        identity = resolve_material_identity(course_id, norm, batch_cmid_titles)
+        material_id = identity["material_id"]
+        existing = identity["existing_doc"]
+        key_strategy = identity["match_strategy"]
+        stable_key = identity["stable_material_key"]
         audit_row["key_strategy"] = key_strategy
 
         if not material_id:
@@ -694,6 +852,11 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         base_doc["material_id"] = material_id
         base_doc["source"] = "moodle_sync"
+        base_doc["stable_material_key"] = stable_key
+        if activity_url:
+            base_doc["normalized_source_url"] = _normalize_source_url(activity_url)
+        if resolved_url:
+            base_doc["normalized_resolved_url"] = _normalize_source_url(resolved_url)
         if cmid:
             base_doc["moodle_cmid"] = str(cmid)
         if academiq_user_id:
@@ -726,7 +889,12 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "title": title,
                 "file_type": raw_file_type,
                 "source": "moodle_sync",
+                "stable_material_key": stable_key,
             }
+            if activity_url:
+                safe_doc["normalized_source_url"] = _normalize_source_url(activity_url)
+            if resolved_url:
+                safe_doc["normalized_resolved_url"] = _normalize_source_url(resolved_url)
             if course_name:
                 safe_doc["course_name"] = course_name
             if activity_url:
@@ -889,10 +1057,23 @@ def _append_db_not_uploaded_retry_rows(
             force_reupload,
         )
         url_fields = _preflight_row_urls(doc, activity_url, resolved_url)
+        identity = resolve_material_identity(
+            course_id,
+            {
+                "title": title,
+                "file_type": raw_file_type,
+                "activity_url": activity_url,
+                "resolved_url": resolved_url,
+                "raw_material_id": material_id,
+                "material_id": material_id,
+                "url_cmid": url_cmid,
+            },
+            matched_material_id=material_id,
+        )
         results.append(
             {
-                "material_id": material_id,
-                "title": title,
+                "material_id": identity["material_id"],
+                "title": identity.get("matched_db_title") or title,
                 "file_type": raw_file_type,
                 "should_upload": should_reupload,
                 "status": out_status,
@@ -901,6 +1082,11 @@ def _append_db_not_uploaded_retry_rows(
                 "matched_by": "db_not_uploaded_retry",
                 "downloadable": downloadable,
                 "targeted_retry": True,
+                "db_id": identity.get("db_id"),
+                "stable_material_key": identity.get("stable_material_key"),
+                "matched_db_id": identity.get("db_id"),
+                "matched_db_title": identity.get("matched_db_title"),
+                "matched_db_material_id": identity.get("material_id"),
                 **url_fields,
                 "debug": {
                     "material_id_sent": material_id,
@@ -1187,9 +1373,18 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             force_reupload,
         )
 
+        identity = resolve_material_identity(
+            course_id,
+            norm,
+            matched_material_id=str(existing_doc.get("material_id")) if existing_doc else None,
+        )
+        if identity.get("material_id"):
+            material_id = identity["material_id"]
+            existing_doc = identity.get("existing_doc") or existing_doc
+
         results.append({
             "material_id": material_id,
-            "title": title,
+            "title": title if not identity.get("matched_db_title") else identity.get("matched_db_title"),
             "file_type": raw_file_type,
             "should_upload": should_reupload,
             "status": out_status,
@@ -1200,6 +1395,11 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             "targeted_retry": _is_targeted_not_uploaded_learning_material(
                 title, raw_file_type, existing_doc
             ),
+            "db_id": identity.get("db_id"),
+            "stable_material_key": identity.get("stable_material_key"),
+            "matched_db_id": identity.get("db_id"),
+            "matched_db_title": identity.get("matched_db_title"),
+            "matched_db_material_id": identity.get("material_id"),
             **_preflight_row_urls(existing_doc, activity_url, resolved_url),
             "debug": debug_info,
         })
@@ -1259,18 +1459,91 @@ def _material_id_from_url(url: Optional[str]) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def _resolve_material_id(
-    course_id: str, material_id: str, source_url: Optional[str]
+def _build_upload_identity_audit(
+    norm: Dict[str, Any],
+    identity_before: Dict[str, Any],
+    identity_after: Dict[str, Any],
+    payload: Dict[str, Any],
+    content_text_length: int,
+    quiz_status: Optional[str],
+) -> Dict[str, Any]:
+    return {
+        "incoming_title": norm.get("title"),
+        "incoming_material_id": norm.get("raw_material_id"),
+        "incoming_cmid": norm.get("url_cmid"),
+        "incoming_source_url": norm.get("activity_url"),
+        "incoming_resolved_url": norm.get("resolved_url"),
+        "matched_db_id_before_upload": identity_before.get("db_id"),
+        "matched_db_title_before_upload": identity_before.get("matched_db_title"),
+        "matched_db_material_id_before_upload": identity_before.get("material_id"),
+        "final_saved_db_id": identity_after.get("db_id"),
+        "final_saved_title": identity_after.get("matched_db_title"),
+        "final_saved_material_id": identity_after.get("material_id"),
+        "content_text_length": content_text_length,
+        "quiz_status": quiz_status,
+        "match_strategy": identity_after.get("match_strategy"),
+        "payload_db_id": payload.get("db_id") or payload.get("matched_db_id"),
+        "payload_matched_material_id": payload.get("matched_material_id"),
+    }
+
+
+def _sync_extracted_content_to_canonical_row(
+    course_id: str,
+    written_material_id: str,
+    norm: Dict[str, Any],
+    content_fields: Dict[str, Any],
 ) -> str:
-    """Align upload key with Moodle sync rows (cmid from URL, then URL lookup)."""
-    url_id = _material_id_from_url(source_url)
-    if url_id:
-        material_id = url_id
-    if source_url:
-        existing = material_repository.find_by_course_and_url(course_id, source_url)
-        if existing and existing.get("material_id"):
-            material_id = str(existing["material_id"])
-    return str(material_id).strip()
+    """
+    If content was written to a duplicate URL/page row, copy it to the canonical
+  file row shown in Quiz Generation and mark the duplicate as hidden.
+    """
+    written = material_repository.get(course_id, written_material_id)
+    if not written:
+        return written_material_id
+    text = (content_fields.get("content_text") or written.get("content_text") or "").strip()
+    if not text:
+        return written_material_id
+
+    canonical = _find_canonical_learning_row(
+        course_id, norm.get("title") or written.get("title") or "", norm.get("file_type") or ""
+    )
+    if not canonical:
+        return written_material_id
+    canonical_id = str(canonical.get("material_id") or "")
+    if not canonical_id or canonical_id == written_material_id:
+        return written_material_id
+    if _canonical_learning_row_score(canonical) <= _canonical_learning_row_score(written):
+        return written_material_id
+
+    merge_doc: Dict[str, Any] = {
+        "course_id": course_id,
+        "material_id": canonical_id,
+        "title": canonical.get("title"),
+        "file_type": canonical.get("file_type"),
+        **content_fields,
+        "metadata_only": False,
+        "hidden_duplicate": False,
+        "duplicate_of": None,
+    }
+    if norm.get("activity_url"):
+        merge_doc.setdefault("url", norm.get("activity_url"))
+    material_repository.upsert(merge_doc)
+
+    material_repository.upsert(
+        {
+            "course_id": course_id,
+            "material_id": written_material_id,
+            "duplicate_of": canonical_id,
+            "hidden_duplicate": True,
+            "content_text": "",
+            "content_chars": 0,
+            "metadata_only": True,
+            "extraction_status": "not_uploaded",
+            "extraction_error": f"Content moved to canonical row {canonical_id}",
+            "ready_for_quiz": False,
+        }
+    )
+    return canonical_id
 
 
 def _decode_payload_bytes(payload: Dict[str, Any]) -> tuple[bytes, Optional[str]]:
@@ -1309,14 +1582,38 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     resolved_url_payload = str(
         payload.get("resolved_url") or payload.get("resolvedUrl") or ""
     ).strip() or None
-    material_id = _resolve_material_id(course_id, raw_material_id, source_url)
+    title = (payload.get("title") or "Untitled Material").strip()
+    file_type = payload.get("file_type") or payload.get("fileType") or "unknown"
+
+    norm = _normalize_incoming_material_item(
+        {
+            "title": title,
+            "file_type": file_type,
+            "url": source_url,
+            "source_url": source_url,
+            "resolved_url": resolved_url_payload,
+            "material_id": raw_material_id,
+            "id": raw_material_id,
+        }
+    )
+    identity_before = resolve_material_identity(
+        course_id,
+        norm,
+        db_id=str(payload.get("db_id") or payload.get("matched_db_id") or "").strip() or None,
+        stable_material_key=str(payload.get("stable_material_key") or "").strip() or None,
+        matched_material_id=str(
+            payload.get("matched_material_id")
+            or payload.get("db_material_id")
+            or raw_material_id
+        ).strip()
+        or None,
+    )
+    material_id = identity_before["material_id"]
     if not course_id or not material_id:
         raise ValueError("course_id and material_id are required")
 
-    title = (payload.get("title") or "Untitled Material").strip()
     course_name = payload.get("course_name")
     material_type = payload.get("material_type") or payload.get("type")
-    file_type = payload.get("file_type") or payload.get("fileType") or "unknown"
     content_type = payload.get("content_type") or ""
 
     user_email = (payload.get("user_email") or payload.get("email") or "").strip().lower()
@@ -1592,8 +1889,50 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         material_doc["url"] = source_url
     if resolved_url_payload:
         material_doc["resolved_url"] = resolved_url_payload
+    stable_key = identity_before.get("stable_material_key") or _compute_stable_material_key(
+        course_id, norm
+    )
+    material_doc["stable_material_key"] = stable_key
+    if source_url:
+        material_doc["normalized_source_url"] = _normalize_source_url(str(source_url))
+    if resolved_url_payload:
+        material_doc["normalized_resolved_url"] = _normalize_source_url(resolved_url_payload)
 
     inserted = material_repository.upsert(material_doc)
+
+    if chars > 0:
+        sync_fields = {
+            "content_text": text,
+            "content_chars": chars,
+            "ready_for_quiz": ready_for_quiz,
+            "extraction_status": extraction_status,
+            "extraction_error": extraction_error,
+            "processed_at": now,
+            "last_attempted_at": now,
+            "metadata_only": False,
+            "extractor_version": CURRENT_EXTRACTOR_VERSION,
+        }
+        synced_id = _sync_extracted_content_to_canonical_row(
+            course_id, material_id, norm, sync_fields
+        )
+        if synced_id != material_id:
+            material_id = synced_id
+            title = (material_repository.get(course_id, material_id) or {}).get("title", title)
+
+    identity_after = resolve_material_identity(
+        course_id, norm, matched_material_id=material_id
+    )
+    quiz_status_out = (
+        probe_fields.get("quiz_probe_status") if chars > 0 else extraction_status
+    )
+    identity_audit = _build_upload_identity_audit(
+        norm,
+        identity_before,
+        identity_after,
+        payload,
+        chars,
+        quiz_status_out,
+    )
 
     content_note = None
     if not ready_for_quiz:
@@ -1628,4 +1967,5 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         "content_note": content_note,
         "inserted": inserted,
         "ok": True,
+        "identity_audit": identity_audit,
     }

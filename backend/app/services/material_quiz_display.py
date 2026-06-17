@@ -582,7 +582,11 @@ def resolve_quiz_material_display(
     Returns (displays sorted for UI, course_meta with gap diagnostics).
     Only real MongoDB rows are shown — no synthetic missing-lecture placeholders.
     """
-    displays = [_resolve_one_material(doc) for doc in materials]
+    displays = [
+        _resolve_one_material(doc)
+        for doc in materials
+        if not doc.get("hidden_duplicate")
+    ]
     _apply_link_wrapper_visibility(displays)
     displays.sort(key=material_display_sort_key)
 
