@@ -77,8 +77,7 @@ _NON_QUIZ_TITLE_RE = re.compile(
     r"|task[_\s-]*details?"
     r"|requirements?\s+file"
     r"|assignment\s+(?:instructions?|brief|description|rubric|criteria|requirements?)"
-    r"|assignments?"
-    # Standalone admin forms / evaluation sheets
+    # Standalone admin forms / evaluation sheets (no bare "assignments" — catches Lab Assignment)
     r"|rubric[sd]?|criteria\s+(?:sheet|form|file)"
     r"|evaluation\s+(?:form|sheet|rubric|criteria)"
     r"|evaluation\b"
@@ -154,7 +153,8 @@ _EDUCATIONAL_TITLE_RE = re.compile(
     r"|lab(?:\s*#?\d|\b)"
     r"|tutorial|notes?|slides?|handout|revision|review|summary|chapter"
     r"|worksheet|exercise|module|session|reading|lesson|study"
-    r"|week\s*#?\d+|class\s+material|introduction|topic"
+    r"|week(?:\s*#?\d|\b)|problems?\b|problems?\s+sheet"
+    r"|class\s+material|introduction|topic"
     r"|problem\b|svm\b"
     r")\b",
     re.I,
@@ -193,13 +193,20 @@ def _is_quiz_generation_eligible(
     file_type: str,
     content_text: str,
 ) -> bool:
-    """Strict: educational, non-quiz, and enough stored text for selected-material-only quiz."""
+    """Strict: must pass educational/non-quiz checks and generate ≥5 questions from text."""
     if _classify_non_quiz_material(title, file_type)[0]:
         return False
     if not _is_educational_material(title, file_type):
         return False
     text = (content_text or "").strip()
-    return len(text) >= MIN_QUIZ_CONTENT_CHARS
+    if len(text) < MIN_QUIZ_CONTENT_CHARS:
+        return False
+    from app.services.material_quiz_display import MIN_READY_QUESTIONS
+    from app.services.quiz_material_eligibility import assess_quiz_eligibility
+
+    _, reason, meta = assess_quiz_eligibility(text, file_type=file_type, probe=True)
+    probe_count = int(meta.get("probe_question_count") or 0)
+    return probe_count >= MIN_READY_QUESTIONS
 
 
 # Minimal recommendation text per heuristic risk factor (mirrors the v4 map).
@@ -586,6 +593,8 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
         ) and not has_synced_moodle_data(user_id)
 
     out = []
+    from app.services.material_quiz_display import resolve_material_display
+
     for doc in material_repository.list_by_course(str(course_id)):
         doc_name = _clean_course_name(doc.get("course_name"))
         if apply_demo_name_filter and enrolled_name and doc_name and doc_name != enrolled_name:
@@ -593,99 +602,8 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
 
         title = doc.get("title") or "Untitled"
         raw_file_type = (doc.get("file_type") or doc.get("category") or "file")
-        content = (doc.get("content_text") or "").strip()
-        content_len = len(content) if content else _material_stored_content_length(doc)
-        extraction_status = (doc.get("extraction_status") or "").strip()
-
-        # ── Step 1: check if this is non-educational material ──────────────
-        # Honour classification stored at upload time, then re-check by title/type.
-        is_non_quiz, non_quiz_reason = _classify_non_quiz_material(title, raw_file_type)
-        if not is_non_quiz and extraction_status == "not_quiz_material":
-            is_non_quiz = True
-            non_quiz_reason = doc.get("extraction_error") or "Non-educational material"
-        if is_non_quiz:
-            out.append({
-                "id": str(doc.get("material_id") or ""),
-                "title": title,
-                "kind": raw_file_type.upper(),
-                "hasContent": False,
-                "readyForQuiz": False,
-                "source": _material_source(doc),
-                "contentNote": non_quiz_reason,
-                "extractionStatus": extraction_status or None,
-                "quizStatus": "not_quiz_material",
-                "quizStatusReason": non_quiz_reason,
-                "isEducational": False,
-                "isNonQuizMaterial": True,
-                "contentTextLength": content_len,
-                "quizGenerationEligible": False,
-            })
-            continue
-
-        is_educ = _is_educational_material(title, raw_file_type)
-
-        # Whitelist: generic uploaded files without lecture/lab/revision signals
-        if not is_educ:
-            reason = (
-                "Not quiz material — only lectures, labs, revisions, notes, "
-                "and similar learning materials can generate quizzes."
-            )
-            out.append({
-                "id": str(doc.get("material_id") or ""),
-                "title": title,
-                "kind": raw_file_type.upper(),
-                "hasContent": False,
-                "readyForQuiz": False,
-                "source": _material_source(doc),
-                "contentNote": reason,
-                "extractionStatus": extraction_status or None,
-                "quizStatus": "not_quiz_material",
-                "quizStatusReason": reason,
-                "isEducational": False,
-                "isNonQuizMaterial": True,
-                "contentTextLength": content_len,
-                "quizGenerationEligible": False,
-            })
-            continue
-
-        # ── Educational materials: strict readiness (selected material only) ──
-        eligible = _is_quiz_generation_eligible(title, raw_file_type, content)
-
-        if extraction_status == "extraction_failed":
-            quiz_ready = False
-            quiz_status = "extraction_failed"
-            content_note = (
-                doc.get("extraction_error")
-                or "No readable text could be extracted. Try re-uploading a text-based PDF."
-            )
-        elif content_len == 0 and extraction_status not in _PROCESSED_EXTRACTION_STATUSES:
-            quiz_ready = False
-            quiz_status = "not_uploaded"
-            content_note = (
-                "No readable text extracted yet. "
-                "Use the Chrome extension → 'Upload materials for quiz' on the Moodle course page."
-            )
-        elif content_len == 0 and extraction_status in _PROCESSED_EXTRACTION_STATUSES:
-            quiz_ready = False
-            quiz_status = "extraction_failed"
-            content_note = (
-                doc.get("extraction_error")
-                or "Material was processed but no readable text was stored. "
-                "Re-upload a text-based PDF or PPTX via the Chrome extension."
-            )
-        elif not eligible:
-            quiz_ready = False
-            quiz_status = "extraction_too_short"
-            content_note = (
-                "Not enough readable educational text to generate a reliable quiz "
-                f"from this material alone ({content_len} characters; "
-                f"need at least {MIN_QUIZ_CONTENT_CHARS}). "
-                "Re-upload a text-based PDF or PPTX via the Chrome extension."
-            )
-        else:
-            quiz_ready = True
-            quiz_status = "ready"
-            content_note = None
+        display = resolve_material_display(doc)
+        quiz_ready = display["quiz_status"] == "ready"
 
         out.append({
             "id": str(doc.get("material_id") or ""),
@@ -694,14 +612,18 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             "hasContent": quiz_ready,
             "readyForQuiz": quiz_ready,
             "source": _material_source(doc),
-            "contentNote": content_note,
-            "extractionStatus": extraction_status or None,
-            "quizStatus": quiz_status,
-            "quizStatusReason": content_note,
-            "isEducational": True,
-            "isNonQuizMaterial": False,
-            "contentTextLength": content_len,
-            "quizGenerationEligible": quiz_ready,
+            "contentNote": display["quiz_status_reason"],
+            "extractionStatus": (doc.get("extraction_status") or None),
+            "quizStatus": display["quiz_status"],
+            "quizStatusReason": display["quiz_status_reason"],
+            "isEducational": display["is_educational_material"],
+            "isNonQuizMaterial": display["is_non_quiz_material"],
+            "contentTextLength": display["content_text_length"],
+            "quizGenerationEligible": display["quiz_generation_eligible"],
+            "visibleInMainList": display["visible_in_main_list"],
+            "visibleInOtherItems": display["visible_in_other_items"],
+            "sortGroup": display["sort_group"],
+            "sortNumber": display["sort_number"],
         })
     return out
 

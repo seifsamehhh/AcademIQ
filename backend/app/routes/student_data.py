@@ -156,17 +156,20 @@ def generate_quiz(
             )
 
         if not _is_quiz_generation_eligible(title, file_type, content):
-            chars = len(content)
+            from app.services.material_quiz_display import resolve_material_display
+
+            display = resolve_material_display(doc)
+            reason = (
+                display.get("why_not_ready")
+                or display["quiz_status_reason"]
+                or "insufficient content"
+            )
             raise HTTPException(
                 status_code=422,
                 detail={
-                    "error": "content_too_short",
-                    "message": (
-                        f"Not enough readable educational text in '{title}' "
-                        f"({chars} characters; need at least {MIN_QUIZ_CONTENT_CHARS}). "
-                        "Re-upload a text-based PDF or PPTX via the Chrome extension."
-                    ),
-                    "content_chars": chars,
+                    "error": display["quiz_status"],
+                    "message": f"This material is not eligible for quiz generation: {reason}",
+                    "content_chars": len(content),
                     "min_required": MIN_QUIZ_CONTENT_CHARS,
                     "material_ids": material_ids,
                     "material_title": title,

@@ -12,51 +12,53 @@ interface MaterialSelectProps {
   onToggle: (id: string) => void;
 }
 
-// ── Sorting helpers ────────────────────────────────────────────────────────────
+// ── Sorting (mirrors backend material_quiz_display.py) ───────────────────────
 
-const LECTURE_RE = /\blecture(?:\s*#?(\d+)|\b)/i;
-const LEC_RE = /\blec(?:\s*#?(\d+)|\b)/i;
-const LAB_RE = /\blab(?:\s*#?(\d+)|\b)/i;
-const REVISION_RE = /\b(revision|review|summary)(?:\s*#?(\d+)|\b)/i;
-const NOTES_RE =
-  /\b(notes?|tutorial|handout|slides?|worksheet|chapters?|exercise|module)\b/i;
+const LECTURE_TYPE_RE = /\b(?:lecture|lec)(?:\s*#?\d|\b)/i;
+const LAB_TYPE_RE = /\blab(?:\s*#?\d|\b)/i;
+const REVISION_TYPE_RE = /\b(?:revision|review|summary)(?:\s*#?\d|\b)/i;
+const NOTES_TYPE_RE =
+  /\b(?:notes?|tutorials?|handouts?|slides?|worksheets?|chapters?|exercises?|modules?|week\b|problems?\b)/i;
 
-/**
- * Extract lecture/lab/revision number from title.
- * Ignores course codes (e.g. SWE423) by preferring numbers after type keywords.
- */
+const LECTURE_NUM_RE = /\b(?:lecture|lec)\s*#?(\d+)/i;
+const LAB_NUM_RE = /\blab(?:\s+(?:assignment\s*)?)?\s*#?(\d+)/i;
+const REVISION_NUM_RE = /\b(?:revision|review|summary)\s*#?(\d+)/i;
+const CHAPTER_NUM_RE = /\bchapters?\s*#?(\d+)/i;
+const WEEK_NUM_RE = /\bweek\s*#?(\d+)/i;
+
 function extractMaterialNumber(title: string): number {
   const patterns = [
-    /\blecture\s*#?(\d+)/i,
-    /\blec\s*#?(\d+)/i,
-    /\blab\s*#?(\d+)/i,
-    /\b(?:revision|review|summary)\s*#?(\d+)/i,
-    /\bchapter\s*#?(\d+)/i,
+    LECTURE_NUM_RE,
+    LAB_NUM_RE,
+    REVISION_NUM_RE,
+    CHAPTER_NUM_RE,
+    WEEK_NUM_RE,
   ];
   for (const re of patterns) {
     const m = title.match(re);
     if (m?.[1]) return parseInt(m[1], 10);
   }
-  const all = title.match(/\d+/g);
-  if (all && all.length > 1) {
-    return parseInt(all[all.length - 1], 10);
-  }
-  if (all?.length === 1) return parseInt(all[0], 10);
-  return Infinity;
+  return 9999;
 }
 
-/**
- * Sort group (lower = shown earlier):
- *   0 Lectures · 1 Labs · 2 Revision · 3 Notes/slides · 4 Other educational · 5 Non-quiz
- */
-function sortGroup(m: LearningMaterial): number {
-  if (m.quizStatus === "not_quiz_material") return 5;
+function sortGroupLocal(m: LearningMaterial): number {
+  if (m.isNonQuizMaterial || m.quizStatus === "not_quiz_material") return 5;
   const t = m.title;
-  if (LECTURE_RE.test(t) || LEC_RE.test(t)) return 0;
-  if (LAB_RE.test(t)) return 1;
-  if (REVISION_RE.test(t)) return 2;
-  if (NOTES_RE.test(t)) return 3;
+  if (LECTURE_TYPE_RE.test(t)) return 0;
+  if (LAB_TYPE_RE.test(t)) return 1;
+  if (REVISION_TYPE_RE.test(t)) return 2;
+  if (NOTES_TYPE_RE.test(t)) return 3;
   return 4;
+}
+
+function sortGroup(m: LearningMaterial): number {
+  if (typeof m.sortGroup === "number") return m.sortGroup;
+  return sortGroupLocal(m);
+}
+
+function sortNumber(m: LearningMaterial): number {
+  if (typeof m.sortNumber === "number" && m.sortNumber < 9999) return m.sortNumber;
+  return extractMaterialNumber(m.title);
 }
 
 function sortMaterials(list: LearningMaterial[]): LearningMaterial[] {
@@ -64,17 +66,26 @@ function sortMaterials(list: LearningMaterial[]): LearningMaterial[] {
     const ga = sortGroup(a);
     const gb = sortGroup(b);
     if (ga !== gb) return ga - gb;
-    const na = extractMaterialNumber(a.title);
-    const nb = extractMaterialNumber(b.title);
+    const na = sortNumber(a);
+    const nb = sortNumber(b);
     if (na !== nb) return na - nb;
     return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
   });
 }
 
-// ── Selectable / badge — driven by backend quizStatus only ───────────────────
+function isMainListMaterial(m: LearningMaterial): boolean {
+  if (m.visibleInMainList === true) return true;
+  if (m.visibleInOtherItems === true) return false;
+  return !m.isNonQuizMaterial && m.quizStatus !== "not_quiz_material";
+}
+
+function isOtherMoodleItem(m: LearningMaterial): boolean {
+  if (m.visibleInOtherItems === true) return true;
+  if (m.visibleInMainList === true) return false;
+  return m.isNonQuizMaterial === true || m.quizStatus === "not_quiz_material";
+}
 
 function isSelectable(m: LearningMaterial): boolean {
-  if (m.quizStatus === "not_quiz_material") return false;
   return m.quizStatus === "ready" && m.quizGenerationEligible === true;
 }
 
@@ -87,10 +98,14 @@ function statusBadge(m: LearningMaterial): {
       return { label: "Ready for quiz", variant: "default" };
     case "extraction_too_short":
       return { label: "Extraction too short", variant: "warning" };
+    case "not_enough_readable_text":
+      return { label: "Not enough readable text", variant: "warning" };
     case "not_uploaded":
       return { label: "Not uploaded yet", variant: "muted" };
     case "extraction_failed":
       return { label: "Extraction failed", variant: "destructive" };
+    case "unsupported":
+      return { label: "Unsupported file type", variant: "warning" };
     case "too_short":
       return { label: "Too little content", variant: "warning" };
     case "not_quiz_material":
@@ -99,8 +114,6 @@ function statusBadge(m: LearningMaterial): {
       return { label: "Content unavailable", variant: "muted" };
   }
 }
-
-// ── Single material row ───────────────────────────────────────────────────────
 
 function MaterialRow({
   material,
@@ -152,8 +165,6 @@ function MaterialRow({
   );
 }
 
-// ── Main component ────────────────────────────────────────────────────────────
-
 export function MaterialSelect({
   materials,
   selectedIds,
@@ -162,17 +173,17 @@ export function MaterialSelect({
   const [showOther, setShowOther] = useState(false);
 
   const sorted = sortMaterials(materials);
-  const educational = sorted.filter((m) => m.quizStatus !== "not_quiz_material");
-  const nonQuiz = sorted.filter((m) => m.quizStatus === "not_quiz_material");
+  const mainList = sorted.filter(isMainListMaterial);
+  const otherItems = sorted.filter(isOtherMoodleItem);
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Select Learning Materials</CardTitle>
         <CardDescription>
-          Lectures, labs, and revisions appear first in order. Materials marked
-          &ldquo;Ready for quiz&rdquo; can generate a quiz. Grades, assignments,
-          and other admin Moodle items cannot be used for quiz generation.
+          Lectures, labs, and revisions appear first in order. Only materials
+          marked &ldquo;Ready for quiz&rdquo; can generate a quiz from their own
+          content. Admin and project files are listed under Other Moodle items.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
@@ -186,9 +197,9 @@ export function MaterialSelect({
           </p>
         ) : (
           <>
-            {educational.length > 0 && (
+            {mainList.length > 0 && (
               <div className="space-y-2">
-                {educational.map((m) => (
+                {mainList.map((m) => (
                   <MaterialRow
                     key={m.id}
                     material={m}
@@ -199,7 +210,7 @@ export function MaterialSelect({
               </div>
             )}
 
-            {nonQuiz.length > 0 && (
+            {otherItems.length > 0 && (
               <div className="mt-4">
                 <button
                   type="button"
@@ -211,12 +222,12 @@ export function MaterialSelect({
                   ) : (
                     <ChevronRight className="h-3 w-3" />
                   )}
-                  {showOther ? "Hide" : "Show"} {nonQuiz.length} other Moodle
-                  item{nonQuiz.length === 1 ? "" : "s"} (grades, admin, forums…)
+                  {showOther ? "Hide" : "Show"} {otherItems.length} other Moodle
+                  item{otherItems.length === 1 ? "" : "s"} (grades, admin, forums…)
                 </button>
                 {showOther && (
                   <div className="mt-2 space-y-2">
-                    {nonQuiz.map((m) => (
+                    {otherItems.map((m) => (
                       <MaterialRow
                         key={m.id}
                         material={m}

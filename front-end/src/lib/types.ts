@@ -246,17 +246,23 @@ export interface LearningMaterial {
     | "extraction_failed"
     | "too_short"
     | "extraction_too_short"
+    | "not_enough_readable_text"
+    | "unsupported"
     | "not_quiz_material"
     | string;
   quizStatusReason?: string | null;
   /** True when the material is educational (lecture/lab/notes/slides/etc.) */
   isEducational?: boolean;
   isNonQuizMaterial?: boolean;
-  /** Stored extracted text length from backend (content_text or content_chars). */
+  /** Stored extracted text length from backend */
   contentTextLength?: number;
-  /** True when backend marks material as ready for quiz generation. */
+  /** True when backend verified quiz can be generated from this material alone */
   quizGenerationEligible?: boolean;
   readyForQuiz?: boolean;
+  visibleInMainList?: boolean;
+  visibleInOtherItems?: boolean;
+  sortGroup?: number;
+  sortNumber?: number;
 }
 
 export interface QuizQuestion {

@@ -23,9 +23,27 @@ function sortGroupLabel(m: LearningMaterial): string {
   return "4-Other";
 }
 
-function extractNumDbg(s: string): number {
-  const m = s.match(/\d+/);
-  return m ? parseInt(m[0], 10) : 9999;
+function extractNumDbg(m: LearningMaterial): number {
+  if (typeof m.sortNumber === "number" && m.sortNumber < 9999) return m.sortNumber;
+  const t = m.title || "";
+  const patterns = [
+    /\b(?:lecture|lec)\s*#?(\d+)/i,
+    /\blab(?:\s+(?:assignment\s*)?)?\s*#?(\d+)/i,
+    /\b(?:revision|review|summary)\s*#?(\d+)/i,
+  ];
+  for (const re of patterns) {
+    const match = t.match(re);
+    if (match?.[1]) return parseInt(match[1], 10);
+  }
+  return 9999;
+}
+
+function sortGroupDbg(m: LearningMaterial): string {
+  if (typeof m.sortGroup === "number") {
+    const labels = ["0-Lecture", "1-Lab", "2-Revision", "3-Notes", "4-Other", "5-NonQuiz"];
+    return labels[m.sortGroup] ?? String(m.sortGroup);
+  }
+  return sortGroupLabel(m);
 }
 
 function QuizDebugPanel({
@@ -43,9 +61,10 @@ function QuizDebugPanel({
   if (!materials) return null;
 
   const sorted = [...materials].sort((a, b) => {
-    const ga = sortGroupLabel(a).charCodeAt(0) - sortGroupLabel(b).charCodeAt(0);
-    if (ga !== 0) return ga;
-    return extractNumDbg(a.title) - extractNumDbg(b.title);
+    const ga = typeof a.sortGroup === "number" ? a.sortGroup : sortGroupLabel(a).charCodeAt(0) - 48;
+    const gb = typeof b.sortGroup === "number" ? b.sortGroup : sortGroupLabel(b).charCodeAt(0) - 48;
+    if (ga !== gb) return ga - gb;
+    return extractNumDbg(a) - extractNumDbg(b);
   });
 
   const educational = materials.filter((m) => m.quizStatus !== "not_quiz_material");
@@ -85,10 +104,10 @@ function QuizDebugPanel({
                 {sorted.slice(0, 12).map((m) => (
                   <tr key={m.id} className="border-t border-border/40">
                     <td className="py-0.5 pr-2 max-w-[220px] truncate">{m.title}</td>
-                    <td className="pr-2">{sortGroupLabel(m)}</td>
-                    <td className="pr-2">{extractNumDbg(m.title)}</td>
+                    <td className="pr-2">{sortGroupDbg(m)}</td>
+                    <td className="pr-2">{extractNumDbg(m)}</td>
                     <td className="pr-2">{m.quizStatus ?? "–"}</td>
-                    <td>{m.quizStatus === "ready" || m.quizStatus === "extraction_too_short" ? "✓" : "✗"}</td>
+                    <td>{m.quizStatus === "ready" && m.quizGenerationEligible ? "✓" : "✗"}</td>
                   </tr>
                 ))}
               </tbody>

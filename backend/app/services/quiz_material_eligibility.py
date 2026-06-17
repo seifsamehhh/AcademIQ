@@ -14,7 +14,7 @@ from app.services.student_data import MIN_QUIZ_CONTENT_CHARS
 
 logger = logging.getLogger(__name__)
 
-_MIN_PROBE_QUESTIONS = 3
+_MIN_PROBE_QUESTIONS = 5
 
 _REASON_MESSAGES = {
     "missing_content_text": (
