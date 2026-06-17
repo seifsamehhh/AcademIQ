@@ -126,5 +126,60 @@ def get_content_with_meta(
     return "\n\n".join(texts), meta
 
 
+def get_ready_context_materials(
+    course_id: str,
+    exclude_ids: List[str],
+    min_chars: int = 600,
+    max_results: int = 8,
+) -> List[Dict[str, Any]]:
+    """
+    Return educational materials in a course that have sufficient extracted text,
+    excluding the materials already selected by the user.
+
+    Used by the course-context fallback in quiz generation when the selected
+    material alone does not have enough content to produce questions.
+
+    Results are sorted by descending content length (richest context first)
+    and capped at max_results.  Only materials with usable extracted text are
+    returned; non-quiz materials (no content_text or failed extraction) are
+    excluded server-side and then re-filtered in Python using content length.
+    """
+    exclude = [str(i) for i in (exclude_ids or [])]
+    # Exclude materials with known non-quiz / failed extraction statuses
+    bad_statuses = {
+        "not_quiz_material", "extraction_failed", "no_content",
+        "insufficient_text", "not_educational", "folder", "assign",
+        "forum",
+    }
+    query: Dict[str, Any] = {
+        "course_id": str(course_id),
+        "content_text": {"$exists": True, "$nin": [None, ""]},
+    }
+    if exclude:
+        query["material_id"] = {"$nin": exclude}
+
+    docs = list(
+        course_materials_collection.find(
+            query,
+            {"content_text": 1, "material_id": 1, "title": 1,
+             "file_type": 1, "extraction_status": 1},
+        )
+    )
+
+    # Python-side filtering: text length + bad status
+    ready: List[Dict[str, Any]] = []
+    for doc in docs:
+        if (doc.get("extraction_status") or "") in bad_statuses:
+            continue
+        text = (doc.get("content_text") or "").strip()
+        if len(text) >= min_chars:
+            doc["_ctx_text_len"] = len(text)
+            ready.append(doc)
+
+    # Richest content first
+    ready.sort(key=lambda d: d["_ctx_text_len"], reverse=True)
+    return ready[:max_results]
+
+
 def count() -> int:
     return course_materials_collection.count_documents({})

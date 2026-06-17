@@ -240,8 +240,17 @@ export interface LearningMaterial {
    *   "too_short"         — extracted text below minimum threshold
    *   "not_quiz_material" — grades / admin / forum / folder type
    */
-  quizStatus?: "ready" | "not_uploaded" | "extraction_failed" | "too_short" | "not_quiz_material" | string;
+  quizStatus?:
+    | "ready"
+    | "not_uploaded"
+    | "extraction_failed"
+    | "too_short"
+    | "extraction_too_short"
+    | "not_quiz_material"
+    | string;
   quizStatusReason?: string | null;
+  /** True when the material is educational (lecture/lab/notes/slides/etc.) */
+  isEducational?: boolean;
 }
 
 export interface QuizQuestion {
@@ -257,4 +266,23 @@ export interface GeneratedQuiz {
   /** Material ids the quiz was generated from. */
   materialIds: string[];
   questions: QuizQuestion[];
+  /**
+   * "selected_material_only"  — content came from the chosen material alone.
+   * "course_context_fallback" — selected material had sparse text; quiz was
+   *                             generated using other ready materials in the
+   *                             same course as supporting context.
+   */
+  generatorMode?: "selected_material_only" | "course_context_fallback" | string;
+  engine?: string;
+  debug?: {
+    generator_mode?: string;
+    selected_material_ids?: string[];
+    selected_material_titles?: (string | null)[];
+    context_material_ids_used?: string[];
+    context_material_titles_used?: string[];
+    reason?: string;
+    total_content_chars?: number;
+    question_count?: number;
+    [key: string]: unknown;
+  };
 }

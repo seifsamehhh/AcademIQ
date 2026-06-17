@@ -48,10 +48,18 @@ export default function QuizPage() {
       .then((list) => {
         if (!active) return;
         setMaterials(list);
-        const readyIds = new Set(
-          list.filter((m) => m.hasContent).map((m) => m.id),
+        // Keep selection only for materials that are ready OR can use context fallback
+        const selectableIds = new Set(
+          list
+            .filter(
+              (m) =>
+                m.hasContent ||
+                m.quizStatus === "ready" ||
+                m.quizStatus === "extraction_too_short",
+            )
+            .map((m) => m.id),
         );
-        setSelectedMaterials((prev) => prev.filter((id) => readyIds.has(id)));
+        setSelectedMaterials((prev) => prev.filter((id) => selectableIds.has(id)));
       })
       .catch(() => {
         if (active) setMaterials([]);
@@ -71,7 +79,12 @@ export default function QuizPage() {
 
   const toggleMaterial = (id: string) => {
     const material = materials?.find((m) => m.id === id);
-    if (!material?.hasContent) return;
+    // Allow selection of "ready" and "extraction_too_short" (context fallback) materials
+    const canSelect =
+      material?.hasContent ||
+      material?.quizStatus === "ready" ||
+      material?.quizStatus === "extraction_too_short";
+    if (!canSelect) return;
     setQuiz(null);
     setError("");
     setSelectedMaterials((prev) =>

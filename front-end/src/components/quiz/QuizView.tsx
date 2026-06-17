@@ -8,6 +8,7 @@ import { QuizQuestionCard } from "./QuizQuestionCard";
 import type { GeneratedQuiz } from "@/lib/types";
 
 export function QuizView({ quiz }: { quiz: GeneratedQuiz }) {
+  const isContextFallback = quiz.generatorMode === "course_context_fallback";
   const [answers, setAnswers] = useState<Record<string, number>>({});
   const [submitted, setSubmitted] = useState(false);
   const topRef = useRef<HTMLDivElement>(null);
@@ -49,7 +50,18 @@ export function QuizView({ quiz }: { quiz: GeneratedQuiz }) {
               <CardDescription>
                 {quiz.questions.length} questions from {quiz.materialIds.length} material
                 {quiz.materialIds.length === 1 ? "" : "s"}
+                {isContextFallback ? (
+                  <span className="ml-2 text-xs text-amber-600 dark:text-amber-400">
+                    · generated using course-context support
+                  </span>
+                ) : null}
               </CardDescription>
+              {isContextFallback && quiz.debug?.context_material_titles_used?.length ? (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Context materials used:{" "}
+                  {(quiz.debug.context_material_titles_used as string[]).join(", ")}
+                </p>
+              ) : null}
             </div>
             {submitted && (
               <Badge
