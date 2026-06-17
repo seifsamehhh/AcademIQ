@@ -75,10 +75,7 @@ function sortMaterials(list: LearningMaterial[]): LearningMaterial[] {
 
 function isSelectable(m: LearningMaterial): boolean {
   if (m.quizStatus === "not_quiz_material") return false;
-  if (m.quizGenerationEligible === true) return true;
-  if (m.quizStatus === "ready") return true;
-  if (m.quizStatus === "extraction_too_short") return true;
-  return false;
+  return m.quizStatus === "ready" && m.quizGenerationEligible === true;
 }
 
 function statusBadge(m: LearningMaterial): {

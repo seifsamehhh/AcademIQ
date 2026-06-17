@@ -10,8 +10,7 @@ Paths intentionally have NO /api prefix to match the frontend's api.ts calls
 """
 
 import logging
-import re
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -21,231 +20,14 @@ from app.repositories import material_repository
 from app.services import quiz_gen, student_data
 from app.services.student_data import (
     MIN_QUIZ_CONTENT_CHARS,
-    MIN_EDUCATIONAL_REPROCESS_CHARS,
     _classify_non_quiz_material,
     _is_educational_material,
+    _is_quiz_generation_eligible,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Student data"])
-
-# ── Context-relevance helpers ─────────────────────────────────────────────────
-
-_CTX_STOP: Set[str] = {
-    "the", "a", "an", "and", "or", "of", "to", "in", "is", "at", "by",
-    "for", "with", "on", "as", "this", "that", "from", "are", "was",
-    "were", "be", "been", "have", "has", "had", "do", "does", "did",
-    "will", "would", "could", "should", "may", "might",
-    # generic material-name words — not discriminative
-    "lecture", "lab", "notes", "slides", "file", "material", "chapter",
-    "handout", "tutorial", "worksheet", "revision", "review",
-}
-
-
-def _tok(text: str) -> Set[str]:
-    """Lowercase, strip punctuation, return significant word set."""
-    words = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower()).split()
-    return {w for w in words if len(w) > 2 and w not in _CTX_STOP}
-
-
-def _extract_num(title: str) -> Optional[int]:
-    """Return the first integer in a title string (e.g. 'Lecture 3' → 3)."""
-    m = re.search(r"\b(\d+)\b", title or "")
-    return int(m.group(1)) if m else None
-
-
-def _type_tag(title: str) -> Optional[str]:
-    t = (title or "").lower()
-    if "lecture" in t:
-        return "lecture"
-    if re.search(r"\blab\b", t):
-        return "lab"
-    if any(w in t for w in ("revision", "review", "summary")):
-        return "revision"
-    if any(w in t for w in ("notes", "handout", "tutorial", "slides")):
-        return "notes"
-    return None
-
-
-def _relevance_score(
-    sel_title: str,
-    sel_snippet: str,
-    ctx_doc: Dict[str, Any],
-) -> float:
-    """
-    Score 0.0–1.0 how relevant a context document is to the selected material.
-
-    Signals (weighted):
-      1. Title Jaccard overlap (0.40)
-      2. Number proximity — adjacent lectures = related topics (0.25)
-      3. Keyword overlap between selected text snippet and ctx text (0.25)
-      4. Same material type bonus (0.10)
-    """
-    ctx_title = ctx_doc.get("title") or ""
-    ctx_snippet = (ctx_doc.get("content_text") or "")[:400]
-
-    sel_tw = _tok(sel_title)
-    ctx_tw = _tok(ctx_title)
-
-    score = 0.0
-
-    # 1. Title Jaccard
-    if sel_tw and ctx_tw:
-        score += len(sel_tw & ctx_tw) / len(sel_tw | ctx_tw) * 0.40
-
-    # 2. Number proximity
-    sel_n = _extract_num(sel_title)
-    ctx_n = _extract_num(ctx_title)
-    if sel_n is not None and ctx_n is not None:
-        d = abs(sel_n - ctx_n)
-        score += 0.25 if d <= 1 else 0.15 if d == 2 else 0.07 if d <= 4 else 0.0
-
-    # 3. Keyword overlap with selected content snippet
-    sw = _tok(sel_snippet)
-    cw = _tok(ctx_snippet)
-    if sw and cw:
-        score += min(len(sw & cw) / max(len(sw), 1), 1.0) * 0.25
-
-    # 4. Same material type
-    if _type_tag(sel_title) and _type_tag(sel_title) == _type_tag(ctx_title):
-        score += 0.10
-
-    return min(score, 1.0)
-
-
-def _build_fallback_context_text(
-    sel_title: str,
-    sel_text: str,
-    edu_candidates: List[Dict[str, Any]],
-    lecture_num: int,
-    max_ctx: int = 3,
-    ctx_cap: int = 10_000,
-) -> Tuple[str, List[str], List[str], str]:
-    """
-    Build the combined text for a course-context fallback quiz generation.
-    Returns (combined_text, ctx_ids, ctx_titles, selection_reason).
-
-    Diversification strategy (why Lecture 1 and Lecture 2 produce different Q):
-
-    1. Rank candidates by relevance (title overlap, number proximity, keyword
-       overlap, same material type).
-    2. For each slot (0, 1, 2 …) pick the candidate at index
-         (lecture_num + slot) % n_candidates
-       so adjacent lectures use a DIFFERENT primary context material.
-       Lecture 1 slot-0 = candidate[1], Lecture 2 slot-0 = candidate[2], etc.
-    3. For each chosen context material, extract a NON-OVERLAPPING chunk:
-         CHUNK = 2 200 chars
-         n_chunks = full_len // CHUNK   (e.g., 8 000 chars → 3 chunks)
-         chunk_idx = (lecture_num + slot) % n_chunks
-         w_start = chunk_idx * CHUNK
-       With CHUNK=2 200 and shift per lecture, Lecture 1 sees chars 0–2200,
-       Lecture 2 sees chars 2200–4400, Lecture 3 sees chars 4400–6600 — zero
-       overlap.  Different chunks → different concepts → different questions.
-    4. Repeat selected-material text once when it is short (<800 chars) to give
-       its concepts higher density relative to the context block.
-    """
-    # Chunk size for non-overlapping context windows.
-    # Keep at 1 400 so that any material with ≥ 2 800 chars produces 2+ distinct
-    # chunks, ensuring adjacent weak lectures see different input text.
-    CHUNK = 1_400
-
-    if not edu_candidates:
-        return "", [], [], "no_candidates"
-
-    scored: List[Tuple[Dict[str, Any], float]] = [
-        (doc, _relevance_score(sel_title, sel_text[:400], doc))
-        for doc in edu_candidates
-    ]
-    scored.sort(key=lambda x: x[1], reverse=True)
-    n = len(scored)
-
-    # ── Build combined text ───────────────────────────────────────────────────
-    parts: List[str] = []
-
-    # 3× title anchor boosts concept-density for rule-based extractor
-    if sel_title:
-        parts.append(f"{sel_title}\n{sel_title}\n{sel_title}")
-
-    # Selected material text (primary content, even if short)
-    if sel_text:
-        header = sel_title or "Selected Material"
-        parts.append(f"# {header}\n{sel_text}")
-        if len(sel_text) < 800:
-            # Repeat once so its concepts appear twice → extractor prioritises them
-            parts.append(f"# {header} (key points)\n{sel_text}")
-
-    ctx_ids: List[str] = []
-    ctx_titles: List[str] = []
-    total_ctx = 0
-
-    for slot in range(max_ctx):
-        if total_ctx >= ctx_cap:
-            break
-
-        # Pick a DIFFERENT material for each lecture+slot combo
-        mat_idx = (lecture_num + slot) % n
-        doc, rel_score = scored[mat_idx]
-
-        full_text = (doc.get("content_text") or "").strip()
-        if not full_text:
-            continue
-
-        ctx_title = doc.get("title") or "Course material"
-        full_len = len(full_text)
-
-        # Non-overlapping chunk selection per lecture number + slot
-        if full_len > CHUNK:
-            n_chunks = max(1, full_len // CHUNK)
-            chunk_idx = (lecture_num + slot) % n_chunks
-            w_start = chunk_idx * CHUNK
-            ctx_text = full_text[w_start: w_start + CHUNK]
-            if len(ctx_text) < 300:  # edge: last tiny chunk → use first chunk
-                ctx_text = full_text[:CHUNK]
-        else:
-            ctx_text = full_text
-
-        remaining = ctx_cap - total_ctx
-        if len(ctx_text) > remaining:
-            ctx_text = ctx_text[:remaining]
-
-        parts.append(f"# {ctx_title}\n{ctx_text}")
-        ctx_ids.append(str(doc.get("material_id") or ""))
-        ctx_titles.append(ctx_title)
-        total_ctx += len(ctx_text)
-
-    combined = "\n\n".join(parts)
-    chunk_offsets = [
-        f"slot{s}:mat{(lecture_num+s)%n}@chunk{(lecture_num+s)%max(1, len((scored[(lecture_num+s)%n][0].get('content_text') or '')) // CHUNK)}"
-        for s in range(min(max_ctx, n))
-    ]
-    reason = (
-        f"lecture_num={lecture_num} n_candidates={n} "
-        f"chunk_size={CHUNK} slots=[{', '.join(chunk_offsets)}] "
-        f"context=[{', '.join(ctx_titles)}]"
-    )
-    return combined, ctx_ids, ctx_titles, reason
-
-
-def _groundedness_check(
-    questions: List[Dict[str, Any]],
-    title_kws: Set[str],
-) -> bool:
-    """
-    Return True if at least one generated question references a keyword
-    from the selected material title.  Generic fallback questions that
-    mention no topic from the title fail this check.
-    """
-    if not title_kws or not questions:
-        return True
-    meaningful = {k for k in title_kws if len(k) > 3}
-    if not meaningful:
-        return True
-    for q in questions:
-        body = (q.get("question", "") + " " + " ".join(q.get("options", []))).lower()
-        if any(kw in body for kw in meaningful):
-            return True
-    return False
 
 
 def _student_id_from_user(user: Dict[str, Any]) -> str | None:
@@ -322,198 +104,123 @@ def generate_quiz(
     _user: Dict[str, Any] = Depends(get_current_user),
 ):
     """
-    Generate a quiz from selected materials' stored content_text.
+    Generate a quiz from selected materials' stored content_text only.
 
-    Two modes:
-      selected_material_only   — selected material has enough content on its own.
-      course_context_fallback  — selected material is educational but too sparse;
-                                 supplemented with other ready educational materials
-                                 from the same course.  Never uses content from a
-                                 different course or non-educational files.
+    Course-context fallback is disabled — each quiz uses the selected material alone.
     """
     material_ids: List[str] = body.get("materialIds", []) or []
     if not material_ids:
         raise HTTPException(status_code=400, detail="materialIds required")
 
-    # ── 1. Fetch selected-material text ───────────────────────────────────────
+    # ── Validate every selected material before generation ─────────────────────
+    for mid in material_ids:
+        doc = material_repository.get(course_id, str(mid))
+        if not doc:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "material_not_found",
+                    "message": f"Material not found: {mid}",
+                    "material_ids": material_ids,
+                },
+            )
+
+        title = doc.get("title") or ""
+        file_type = (doc.get("file_type") or doc.get("category") or "file")
+        content = (doc.get("content_text") or "").strip()
+
+        is_non_quiz, non_quiz_reason = _classify_non_quiz_material(title, file_type)
+        if is_non_quiz or doc.get("extraction_status") == "not_quiz_material":
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "not_quiz_material",
+                    "message": non_quiz_reason or "This material is not quiz learning content.",
+                    "material_ids": material_ids,
+                    "material_title": title,
+                },
+            )
+
+        if not _is_educational_material(title, file_type):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "not_quiz_material",
+                    "message": (
+                        "Only lectures, labs, revisions, notes, and similar "
+                        "learning materials can generate quizzes."
+                    ),
+                    "material_ids": material_ids,
+                    "material_title": title,
+                },
+            )
+
+        if not _is_quiz_generation_eligible(title, file_type, content):
+            chars = len(content)
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "content_too_short",
+                    "message": (
+                        f"Not enough readable educational text in '{title}' "
+                        f"({chars} characters; need at least {MIN_QUIZ_CONTENT_CHARS}). "
+                        "Re-upload a text-based PDF or PPTX via the Chrome extension."
+                    ),
+                    "content_chars": chars,
+                    "min_required": MIN_QUIZ_CONTENT_CHARS,
+                    "material_ids": material_ids,
+                    "material_title": title,
+                },
+            )
+
+    # ── Fetch combined text from selected materials only ──────────────────────
     text, mat_meta = material_repository.get_content_with_meta(course_id, material_ids)
     selected_text = (text or "").strip()
     content_chars = len(selected_text)
-
-    # Primary title used for topic-anchoring and relevance scoring
-    primary_title: str = (
-        (mat_meta[0].get("title") or "") if mat_meta else ""
-    )
+    primary_title: str = (mat_meta[0].get("title") or "") if mat_meta else ""
     selected_titles = [m.get("title") for m in mat_meta]
-    selected_is_educational = all(
-        _is_educational_material(m.get("title") or "", "")
-        or not _classify_non_quiz_material(m.get("title") or "", "")[0]
-        for m in mat_meta
-    )
 
     logger.info(
-        "Quiz request course=%s materials=%s content_chars=%d",
+        "Quiz request course=%s materials=%s content_chars=%d mode=selected_material_only",
         course_id, material_ids, content_chars,
     )
 
-    # ── 2. First attempt: generate from selected material alone ───────────────
-    questions: List[Dict[str, Any]] = []
-    engine = "no_text"
-    generator_mode = "selected_material_only"
-    context_material_ids: List[str] = []
-    context_material_titles: List[str] = []
-    context_reason: str | None = None
-    context_selection_reason: str | None = None
-    duplicate_guard_triggered = False
-
-    if content_chars >= MIN_QUIZ_CONTENT_CHARS:
-        questions, engine = quiz_gen.generate_questions(selected_text, num_questions=5)
-
-    # ── 3. Course-context fallback ────────────────────────────────────────────
-    # Triggered when selected material produced 0 questions AND it is educational.
-    #
-    # Key principle: context is RANKED BY RELEVANCE to the selected material,
-    # not just grabbed by content length.  This ensures Lecture 1 and Lecture 2
-    # use different context documents and thus produce different questions.
-    #
-    # Safeguards:
-    #   - Same course only
-    #   - Max 3 context materials (not 5 generic ones)
-    #   - Selected material title injected as a "Topic Focus" anchor
-    #   - Duplicate guard: checks that at least one question references a
-    #     keyword from the selected material title
-    if not questions and selected_is_educational:
-        # Fetch all ready educational candidates (up to 20 for ranking)
-        all_ctx_docs = material_repository.get_ready_context_materials(
-            course_id,
-            exclude_ids=material_ids,
-            min_chars=MIN_QUIZ_CONTENT_CHARS,
+    if content_chars < MIN_QUIZ_CONTENT_CHARS:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "content_too_short",
+                "message": (
+                    f"Not enough readable educational text in the selected material "
+                    f"({content_chars} characters; need at least {MIN_QUIZ_CONTENT_CHARS})."
+                ),
+                "content_chars": content_chars,
+                "min_required": MIN_QUIZ_CONTENT_CHARS,
+                "material_ids": material_ids,
+            },
         )
 
-        # Remove non-educational documents
-        edu_candidates: List[Dict[str, Any]] = [
-            doc for doc in all_ctx_docs
-            if not _classify_non_quiz_material(
-                doc.get("title") or "", (doc.get("file_type") or "").lower()
-            )[0]
-        ]
+    questions, engine = quiz_gen.generate_questions(selected_text, num_questions=5)
 
-        if edu_candidates:
-            # Use lecture number for deterministic but per-lecture diversification
-            sel_num = _extract_num(primary_title) or 0
-
-            # Build diversified combined text:
-            #   - Rotates candidate selection by lecture number
-            #   - Takes lecture-number-specific windows of context text
-            #   - Repeats selected text when short for concept density
-            combined_text, context_material_ids, context_material_titles, ctx_sel_reason = (
-                _build_fallback_context_text(
-                    sel_title=primary_title,
-                    sel_text=selected_text,
-                    edu_candidates=edu_candidates,
-                    lecture_num=sel_num,
-                    max_ctx=3,
-                    ctx_cap=10_000,
-                )
-            )
-            context_selection_reason = ctx_sel_reason
-
-            if combined_text.strip():
-                ctx_questions, ctx_engine = quiz_gen.generate_questions(
-                    combined_text, num_questions=5
-                )
-                if ctx_questions:
-                    # Duplicate guard: verify questions reference keywords from
-                    # the selected material's title (prevents generic fallback Q)
-                    title_kws = _tok(primary_title)
-                    grounded = _groundedness_check(ctx_questions, title_kws)
-                    if not grounded:
-                        duplicate_guard_triggered = True
-                        logger.warning(
-                            "Fallback questions not grounded in '%s' — "
-                            "retrying with stronger title anchor (lecture_num=%d)",
-                            primary_title, sel_num,
-                        )
-                        # Retry: prepend a more forceful anchor and try a
-                        # slightly different window (shift +1 lecture step)
-                        strong_anchor = (
-                            f"{primary_title}\n{primary_title}\n{primary_title}\n\n"
-                        )
-                        retry_text = strong_anchor + combined_text
-                        retry_qs, retry_engine = quiz_gen.generate_questions(
-                            retry_text, num_questions=5
-                        )
-                        if retry_qs:
-                            ctx_questions = retry_qs
-                            ctx_engine = retry_engine
-
-                    questions = ctx_questions
-                    engine = ctx_engine
-                    generator_mode = "course_context_fallback"
-                    context_reason = (
-                        f"Selected material '{primary_title}' had only {content_chars} chars; "
-                        f"supplemented with {len(context_material_ids)} related educational "
-                        f"material(s) from the same course (lecture_num={sel_num})."
-                    )
-                    logger.info(
-                        "Context fallback succeeded: course=%s selected=%s "
-                        "context=%s questions=%d grounded=%s lecture_num=%d",
-                        course_id, material_ids, context_material_ids,
-                        len(questions), not duplicate_guard_triggered, sel_num,
-                    )
-
-    # ── 4. Final error gates ──────────────────────────────────────────────────
     if not questions:
-        if not content_chars:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "missing_content_text",
-                    "message": (
-                        "Selected materials have no extracted text. "
-                        "Use the Chrome extension → 'Upload materials for quiz' on "
-                        "the Moodle course page first."
-                    ),
-                    "material_ids": material_ids,
-                },
-            )
-
-        if not context_material_ids and content_chars < MIN_QUIZ_CONTENT_CHARS:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "content_too_short_no_context",
-                    "message": (
-                        f"The selected material has only {content_chars} characters of "
-                        f"extracted text (need at least {MIN_QUIZ_CONTENT_CHARS}), and no "
-                        "other ready educational materials exist in this course to provide "
-                        "context. Re-upload a text-based PDF or PPTX via the Chrome extension."
-                    ),
-                    "content_chars": content_chars,
-                    "min_required": MIN_QUIZ_CONTENT_CHARS,
-                    "material_ids": material_ids,
-                },
-            )
-
         raise HTTPException(
             status_code=422,
             detail={
                 "error": "quiz_generation_failed",
                 "message": (
                     f"Could not generate quiz questions from '{primary_title or 'selected material'}' "
-                    f"({content_chars} chars) even with course-context support. "
-                    "The content may be image-only, too fragmented, or have no teachable "
-                    "concepts. Try re-uploading a text-based PDF or selecting a different material."
+                    f"({content_chars} characters). The content may be image-only, too fragmented, "
+                    "or have no teachable concepts. Try re-uploading a text-based PDF or selecting "
+                    "a different material."
                 ),
                 "content_chars": content_chars,
                 "engine": engine,
-                "generator_mode": generator_mode,
-                "context_materials_tried": len(context_material_ids),
+                "generator_mode": "selected_material_only",
                 "material_ids": material_ids,
             },
         )
 
-    # ── 5. Success response ───────────────────────────────────────────────────
+    generator_mode = "selected_material_only"
     debug: Dict[str, Any] = {
         "generator_mode": generator_mode,
         "selected_material_id": material_ids[0] if len(material_ids) == 1 else material_ids,
@@ -526,13 +233,7 @@ def generate_quiz(
         },
         "question_count": len(questions),
         "engine": engine,
-        "duplicate_guard_triggered": duplicate_guard_triggered,
     }
-    if generator_mode == "course_context_fallback":
-        debug["context_material_ids_used"] = context_material_ids
-        debug["context_material_titles_used"] = context_material_titles
-        debug["context_selection_reason"] = context_selection_reason
-        debug["reason"] = context_reason
 
     return {
         "courseId": course_id,

@@ -129,10 +129,7 @@ const QUIZ_DEBUG = process.env.NEXT_PUBLIC_QUIZ_DEBUG === "true";
 
 function isMaterialSelectable(m: LearningMaterial): boolean {
   if (m.quizStatus === "not_quiz_material") return false;
-  if (m.quizGenerationEligible === true) return true;
-  if (m.quizStatus === "ready") return true;
-  if (m.quizStatus === "extraction_too_short") return true;
-  return false;
+  return m.quizStatus === "ready" && m.quizGenerationEligible === true;
 }
 
 export default function QuizPage() {
@@ -204,6 +201,18 @@ export default function QuizPage() {
   };
 
   const handleGenerate = async () => {
+    const blocked = selectedMaterials.filter((id) => {
+      const m = materials?.find((mat) => mat.id === id);
+      return !m || !isMaterialSelectable(m);
+    });
+    if (blocked.length > 0) {
+      setError(
+        "One or more selected materials are not ready for quiz generation. " +
+          "Select only materials marked Ready for quiz.",
+      );
+      return;
+    }
+
     setIsGenerating(true);
     setError("");
     try {

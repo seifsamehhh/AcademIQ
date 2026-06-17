@@ -64,20 +64,29 @@ _NON_QUIZ_TITLE_RE = re.compile(
     r"grade[sd]?|grading|mark[sd]?|marking|score\s+sheet|grade\s+sheet"
     r"|mark\s+sheet|grade\s+book|mark\s+book|final\s+(?:mark[sd]?|grade[sd]?|score[sd]?)"
     r"|student\s+scores?|scores?\s+(?:sheet|list|record|file)"
+    r"|grading\s+criteria"
     # Attendance / roster
     r"|attendance|absent(?:ee)?|student\s+(?:list|roster|record[sd]?)"
     # Submission / status reports
     r"|submission\s+(?:report|status|list|guide|form)"
     r"|assignment\s+(?:submission|status|report|list)"
-    # Project admin (requirements/brief/rubric)
+    r"|submissions?"
+    # Project / task admin (requirements, criteria, task details)
     r"|project\s+(?:requirements?|criteria|rubric|description|brief|plan|outline|guide|specs?)"
+    r"|final\s+project(?:\s+(?:criteria|requirements?|brief|description))?"
+    r"|task[_\s-]*details?"
+    r"|requirements?\s+file"
     r"|assignment\s+(?:instructions?|brief|description|rubric|criteria|requirements?)"
+    r"|assignments?"
     # Standalone admin forms / evaluation sheets
     r"|rubric[sd]?|criteria\s+(?:sheet|form|file)"
     r"|evaluation\s+(?:form|sheet|rubric|criteria)"
+    r"|evaluation\b"
     r"|marking\s+(?:scheme|guide|rubric|sheet)"
     r"|answer\s+(?:key|sheet|model)|model\s+answer[sd]?"
     r"|lab\s+report\s+(?:template|form|sheet)"
+  # Test / phase admin
+    r"|test(?:ing)?\s+phase"
     # Course admin documents
     r"|course\s+(?:outline|plan|schedule|syllabus|calendar|timetable|guide)"
     r"|semester\s+(?:plan|schedule|calendar|timetable)"
@@ -131,18 +140,22 @@ def _classify_non_quiz_material(
     if ft in _NON_QUIZ_FILE_EXTENSIONS:
         return True, f"Spreadsheet file (.{ft}) — likely grades or data export"
 
-    if _NON_QUIZ_TITLE_RE.search(title or ""):
-        return True, "Not quiz material — title indicates grades, admin, rubric, or non-lecture content"
+    normalized = re.sub(r"[_]+", " ", (title or ""))
+    if _NON_QUIZ_TITLE_RE.search(title or "") or _NON_QUIZ_TITLE_RE.search(normalized):
+        return True, "Not quiz material — admin, project, grade, or non-lecture content"
 
     return False, None
 
 
-# Title keywords that positively identify educational learning content.
+# Title keywords that positively identify educational learning content (whitelist).
 _EDUCATIONAL_TITLE_RE = re.compile(
     r"\b(?:"
-    r"lecture|lab\b|tutorial|notes?|slides?|handout|revision|chapter"
-    r"|worksheet|exercise|module|session|reading|lesson|study|material"
-    r"|week\s*\d+|class\s+material|course\s+material|introduction|topic"
+    r"lecture|lec(?:\s*#?\d|\b)"
+    r"|lab(?:\s*#?\d|\b)"
+    r"|tutorial|notes?|slides?|handout|revision|review|summary|chapter"
+    r"|worksheet|exercise|module|session|reading|lesson|study"
+    r"|week\s*#?\d+|class\s+material|introduction|topic"
+    r"|problem\b|svm\b"
     r")\b",
     re.I,
 )
@@ -155,32 +168,38 @@ _EDUCATIONAL_FILE_TYPES: frozenset[str] = frozenset({
 
 def _is_educational_material(title: str, file_type: str) -> bool:
     """
-    Return True when the material is likely educational lecture/lab/notes content.
+    Return True only when the title matches educational whitelist keywords.
 
-    A material is educational when it:
-    - Has a document file type (PDF, PPTX, DOCX, TXT), AND
-    - Is NOT classified as non-quiz (grades, admin, forums, etc.)
-    OR has an explicit educational keyword in the title.
+    Generic PDF/PPTX files without lecture/lab/revision signals are NOT
+    educational — project requirements and admin PDFs must not become Ready.
     """
     ft = (file_type or "").lower().strip()
 
-    # Non-quiz activity types are never educational extractable content
     if ft in _NON_QUIZ_ACTIVITY_TYPES or ft in _NON_QUIZ_FILE_EXTENSIONS:
         return False
 
-    # Explicit non-quiz title → not educational
-    if _NON_QUIZ_TITLE_RE.search(title or ""):
+    normalized = re.sub(r"[_]+", " ", (title or ""))
+    if _NON_QUIZ_TITLE_RE.search(title or "") or _NON_QUIZ_TITLE_RE.search(normalized):
         return False
 
-    # Explicit educational keywords → definitely educational
-    if _EDUCATIONAL_TITLE_RE.search(title or ""):
-        return True
-
-    # Document file type without non-quiz signals → treat as educational
-    if ft in _EDUCATIONAL_FILE_TYPES:
+    if _EDUCATIONAL_TITLE_RE.search(title or "") or _EDUCATIONAL_TITLE_RE.search(normalized):
         return True
 
     return False
+
+
+def _is_quiz_generation_eligible(
+    title: str,
+    file_type: str,
+    content_text: str,
+) -> bool:
+    """Strict: educational, non-quiz, and enough stored text for selected-material-only quiz."""
+    if _classify_non_quiz_material(title, file_type)[0]:
+        return False
+    if not _is_educational_material(title, file_type):
+        return False
+    text = (content_text or "").strip()
+    return len(text) >= MIN_QUIZ_CONTENT_CHARS
 
 
 # Minimal recommendation text per heuristic risk factor (mirrors the v4 map).
@@ -597,11 +616,40 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
                 "quizStatus": "not_quiz_material",
                 "quizStatusReason": non_quiz_reason,
                 "isEducational": False,
+                "isNonQuizMaterial": True,
+                "contentTextLength": content_len,
+                "quizGenerationEligible": False,
             })
             continue
 
-        # ── Step 2: determine readiness and status for educational materials ──
         is_educ = _is_educational_material(title, raw_file_type)
+
+        # Whitelist: generic uploaded files without lecture/lab/revision signals
+        if not is_educ:
+            reason = (
+                "Not quiz material — only lectures, labs, revisions, notes, "
+                "and similar learning materials can generate quizzes."
+            )
+            out.append({
+                "id": str(doc.get("material_id") or ""),
+                "title": title,
+                "kind": raw_file_type.upper(),
+                "hasContent": False,
+                "readyForQuiz": False,
+                "source": _material_source(doc),
+                "contentNote": reason,
+                "extractionStatus": extraction_status or None,
+                "quizStatus": "not_quiz_material",
+                "quizStatusReason": reason,
+                "isEducational": False,
+                "isNonQuizMaterial": True,
+                "contentTextLength": content_len,
+                "quizGenerationEligible": False,
+            })
+            continue
+
+        # ── Educational materials: strict readiness (selected material only) ──
+        eligible = _is_quiz_generation_eligible(title, raw_file_type, content)
 
         if extraction_status == "extraction_failed":
             quiz_ready = False
@@ -625,16 +673,14 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
                 or "Material was processed but no readable text was stored. "
                 "Re-upload a text-based PDF or PPTX via the Chrome extension."
             )
-        elif content_len < MIN_QUIZ_CONTENT_CHARS:
+        elif not eligible:
             quiz_ready = False
-            quiz_status = "extraction_too_short" if is_educ else "too_short"
-            reprocess_hint = (
-                " Re-upload the file via the Chrome extension to re-extract with improved extractor."
-                if is_educ else " Re-upload a text-based PDF or PPTX."
-            )
+            quiz_status = "extraction_too_short"
             content_note = (
-                f"Only {content_len} characters extracted "
-                f"(need at least {MIN_QUIZ_CONTENT_CHARS}).{reprocess_hint}"
+                "Not enough readable educational text to generate a reliable quiz "
+                f"from this material alone ({content_len} characters; "
+                f"need at least {MIN_QUIZ_CONTENT_CHARS}). "
+                "Re-upload a text-based PDF or PPTX via the Chrome extension."
             )
         else:
             quiz_ready = True
@@ -652,9 +698,10 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             "extractionStatus": extraction_status or None,
             "quizStatus": quiz_status,
             "quizStatusReason": content_note,
-            "isEducational": is_educ,
+            "isEducational": True,
+            "isNonQuizMaterial": False,
             "contentTextLength": content_len,
-            "quizGenerationEligible": quiz_status == "ready",
+            "quizGenerationEligible": quiz_ready,
         })
     return out
 
