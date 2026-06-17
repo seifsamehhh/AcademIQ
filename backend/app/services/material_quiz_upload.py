@@ -191,6 +191,32 @@ def _normalize_incoming_material_item(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _resolve_persistence_record(
+    course_id: str,
+    norm: Dict[str, Any],
+) -> tuple[str, Optional[Dict[str, Any]]]:
+    """Resolve stable material_id and any existing row (by id or Moodle URL)."""
+    material_id = str(norm.get("material_id") or "").strip()
+    activity_url = norm.get("activity_url") or ""
+    resolved_url = norm.get("resolved_url") or ""
+    title = norm.get("title") or ""
+
+    existing: Optional[Dict[str, Any]] = None
+    if material_id:
+        existing = material_repository.get(course_id, material_id)
+    if not existing and activity_url:
+        existing = material_repository.find_by_course_and_url(course_id, activity_url)
+    if not existing and resolved_url:
+        existing = material_repository.find_by_course_and_url(course_id, resolved_url)
+    if existing and existing.get("material_id"):
+        material_id = str(existing["material_id"])
+    if not material_id:
+        material_id = (
+            stable_material_id({"url": activity_url or resolved_url, "title": title}) or ""
+        )
+    return material_id, existing
+
+
 def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Upsert metadata for every material detected on a Moodle course page.
@@ -206,6 +232,13 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not course_id:
         raise ValueError("course_id required")
 
+    user_email = (payload.get("user_email") or payload.get("email") or "").strip().lower()
+    academiq_user_id = payload.get("academiq_user_id")
+    if user_email and not academiq_user_id:
+        user = user_repository.find_by_email(user_email)
+        if user:
+            academiq_user_id = str(user["_id"])
+
     inserted = 0
     updated = 0
     skipped = 0
@@ -213,11 +246,12 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     for item in materials_in:
         norm = _normalize_incoming_material_item(item)
-        material_id = norm["material_id"]
         title = norm["title"]
         raw_file_type = norm["file_type"]
         activity_url = norm["activity_url"]
         resolved_url = norm["resolved_url"]
+
+        material_id, existing = _resolve_persistence_record(course_id, norm)
 
         if not material_id:
             skipped += 1
@@ -233,8 +267,8 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             continue
 
         is_non_quiz, non_quiz_reason = classify_non_quiz_material(title, raw_file_type)
-        existing = material_repository.get(course_id, material_id)
         downloadable = _is_downloadable_material(raw_file_type, activity_url, resolved_url)
+        is_metadata_only = not downloadable and not is_non_quiz
 
         scraped: Dict[str, Any] = {
             "title": title,
@@ -272,8 +306,16 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "extractor_version",
                 "uploaded_by_email",
                 "uploaded_by_user_id",
+                "quiz_status",
+                "metadata_only",
             }
         )
+
+        def _apply_user_fields(doc: Dict[str, Any]) -> None:
+            if academiq_user_id:
+                doc["academiq_user_id"] = academiq_user_id
+            if user_email:
+                doc["uploaded_by_email"] = user_email
 
         if existing:
             safe_doc: Dict[str, Any] = {
@@ -298,13 +340,15 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 if key in ("course_id", "material_id") or value is None:
                     continue
                 safe_doc[key] = value
+            _apply_user_fields(safe_doc)
             is_new = material_repository.upsert(safe_doc)
         else:
-            existing_processed = False
             if is_non_quiz:
                 base_doc["extraction_status"] = "not_quiz_material"
                 base_doc["extraction_error"] = non_quiz_reason
                 base_doc["ready_for_quiz"] = False
+                base_doc["quiz_status"] = "not_quiz_material"
+                base_doc["metadata_only"] = False
             else:
                 base_doc["extraction_status"] = "not_uploaded"
                 if downloadable:
@@ -315,6 +359,9 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                     )
                 base_doc["ready_for_quiz"] = False
                 base_doc["content_chars"] = 0
+                base_doc["quiz_status"] = "not_uploaded"
+                base_doc["metadata_only"] = is_metadata_only
+            _apply_user_fields(base_doc)
             is_new = material_repository.upsert(base_doc)
 
         if is_new:
@@ -342,9 +389,17 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "status": status,
                 "reason": reason,
                 "downloadable": downloadable,
+                "metadata_only": is_metadata_only if not existing else bool(
+                    existing.get("metadata_only")
+                ),
             }
         )
 
+    db_rows = material_repository.list_by_course(course_id)
+    metadata_only_count = sum(1 for d in db_rows if d.get("metadata_only"))
+    content_count = sum(
+        1 for d in db_rows if _content_chars_from_doc(d) > 0
+    )
     metadata_saved_total = inserted + updated
     return {
         "course_id": course_id,
@@ -353,7 +408,10 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         "metadata_inserted": inserted,
         "metadata_updated": updated,
         "metadata_skipped": skipped,
-        "saved_total": metadata_saved_total,
+        "saved_total": len(db_rows),
+        "db_materials_found_for_course": len(db_rows),
+        "total_metadata_only_materials": metadata_only_count,
+        "total_content_materials": content_count,
         "materials": results,
     }
 
@@ -677,6 +735,9 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         "total": len(results),
         "skip_count": len(results) - should_upload_count,
         "db_materials_found_for_course": len(all_docs),
+        "total_saved_materials_all": len(all_docs),
+        "total_metadata_only_materials": sum(1 for d in all_docs if d.get("metadata_only")),
+        "total_content_materials": sum(1 for d in all_docs if _content_chars_from_doc(d) > 0),
         "status_summary": status_summary,
         "match_method_summary": match_method_summary,
         "db_sample": db_sample,

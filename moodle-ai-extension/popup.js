@@ -767,6 +767,7 @@ const runQuizMaterialUpload = async () => {
     const excludedFromDownload = detected - downloadable.length;
 
     let metadataSaved = 0;
+    let dbFound = 0;
 
     // ── Step 2: save metadata for EVERY detected material ───────────────────
     refs.uploadMeta.textContent =
@@ -797,6 +798,10 @@ const runQuizMaterialUpload = async () => {
             saveRes.data.metadata_saved_total ||
             saveRes.data.saved_total ||
             detected;
+        dbFound =
+            saveRes.data.db_materials_found_for_course ||
+            saveRes.data.saved_total ||
+            metadataSaved;
     }
 
     // ── Step 3: preflight — runs from popup context (chrome-extension:// origin) ──
@@ -809,7 +814,6 @@ const runQuizMaterialUpload = async () => {
     let skippedExtractionFailed = 0;
     let reprocessing = 0;
     let preflightChecked = 0;
-    let dbFound = 0;
     let onlyMaterialIds = null;
 
     const downloadableIdSet = new Set(

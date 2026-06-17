@@ -216,6 +216,7 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
                 "source_url": doc.get("url") or doc.get("source_url") or doc.get("resolved_url"),
                 "content_text_length": display["content_text_length"],
                 "extraction_status": (doc.get("extraction_status") or None),
+                "metadata_only": bool(display.get("metadata_only") or doc.get("metadata_only")),
                 "is_educational_material": display["is_educational_material"],
                 "is_non_quiz_material": display["is_non_quiz_material"],
                 "is_placeholder": False,
@@ -255,6 +256,13 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
 
     saved_total = len(docs)
     placeholder_count = sum(1 for m in materials_out if m.get("is_placeholder"))
+    metadata_only_count = sum(
+        1 for d in docs if d.get("metadata_only") or (
+            _content_length(d) == 0
+            and str(d.get("file_type") or "").lower() in ("url", "html", "link")
+        )
+    )
+    content_count = sum(1 for d in docs if _content_length(d) > 0)
 
     return {
         "user_exists": user_exists,
@@ -265,6 +273,9 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
         "course_in_visible_synced_list": course_id in visible_course_ids if course_id else False,
         "visible_synced_course_ids": visible_course_ids,
         "saved_total": saved_total,
+        "total_saved_materials_all": saved_total,
+        "total_metadata_only_materials": metadata_only_count,
+        "total_content_materials": content_count,
         "detected_total": saved_total,
         "placeholder_count": placeholder_count,
         "total_saved_materials": course_meta.get("total_saved_materials", saved_total),
