@@ -124,9 +124,16 @@ function QuizDebugPanel({
   );
 }
 
-// Always show the debug panel (collapsed by default).
-// Disable by setting NEXT_PUBLIC_QUIZ_DEBUG=false.
-const QUIZ_DEBUG = process.env.NEXT_PUBLIC_QUIZ_DEBUG !== "false";
+// Hidden unless NEXT_PUBLIC_QUIZ_DEBUG=true (does not clutter demo UI).
+const QUIZ_DEBUG = process.env.NEXT_PUBLIC_QUIZ_DEBUG === "true";
+
+function isMaterialSelectable(m: LearningMaterial): boolean {
+  if (m.quizStatus === "not_quiz_material") return false;
+  if (m.quizGenerationEligible === true) return true;
+  if (m.quizStatus === "ready") return true;
+  if (m.quizStatus === "extraction_too_short") return true;
+  return false;
+}
 
 export default function QuizPage() {
   const [courses, setCourses] = useState<Course[]>([]);
@@ -165,16 +172,8 @@ export default function QuizPage() {
       .then((list) => {
         if (!active) return;
         setMaterials(list);
-        // Keep selection only for materials that are ready OR can use context fallback
         const selectableIds = new Set(
-          list
-            .filter(
-              (m) =>
-                m.hasContent ||
-                m.quizStatus === "ready" ||
-                m.quizStatus === "extraction_too_short",
-            )
-            .map((m) => m.id),
+          list.filter(isMaterialSelectable).map((m) => m.id),
         );
         setSelectedMaterials((prev) => prev.filter((id) => selectableIds.has(id)));
       })
@@ -196,12 +195,7 @@ export default function QuizPage() {
 
   const toggleMaterial = (id: string) => {
     const material = materials?.find((m) => m.id === id);
-    // Allow selection of "ready" and "extraction_too_short" (context fallback) materials
-    const canSelect =
-      material?.hasContent ||
-      material?.quizStatus === "ready" ||
-      material?.quizStatus === "extraction_too_short";
-    if (!canSelect) return;
+    if (!material || !isMaterialSelectable(material)) return;
     setQuiz(null);
     setError("");
     setSelectedMaterials((prev) =>

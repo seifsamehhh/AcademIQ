@@ -503,6 +503,27 @@ def _material_source(doc: Dict[str, Any]) -> str:
     return "moodle_sync"
 
 
+def _material_stored_content_length(doc: Dict[str, Any]) -> int:
+    """Length of stored extracted text — uses content_text, then content_chars."""
+    text = (doc.get("content_text") or "").strip()
+    if text:
+        return len(text)
+    chars = doc.get("content_chars")
+    if isinstance(chars, int) and chars > 0:
+        return chars
+    return 0
+
+
+# Extraction statuses that mean the material was processed (not "never uploaded").
+_PROCESSED_EXTRACTION_STATUSES: frozenset[str] = frozenset({
+    "success",
+    "insufficient_text",
+    "extraction_failed",
+    "not_quiz_material",
+    "no_content",
+})
+
+
 def _quiz_content_status(content: str) -> tuple[bool, str | None]:
     """
     Return (selectable, content_note).
@@ -554,7 +575,8 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
         title = doc.get("title") or "Untitled"
         raw_file_type = (doc.get("file_type") or doc.get("category") or "file")
         content = (doc.get("content_text") or "").strip()
-        extraction_status = doc.get("extraction_status") or ""
+        content_len = len(content) if content else _material_stored_content_length(doc)
+        extraction_status = (doc.get("extraction_status") or "").strip()
 
         # ── Step 1: check if this is non-educational material ──────────────
         # Honour classification stored at upload time, then re-check by title/type.
@@ -579,6 +601,8 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             continue
 
         # ── Step 2: determine readiness and status for educational materials ──
+        is_educ = _is_educational_material(title, raw_file_type)
+
         if extraction_status == "extraction_failed":
             quiz_ready = False
             quiz_status = "extraction_failed"
@@ -586,28 +610,33 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
                 doc.get("extraction_error")
                 or "No readable text could be extracted. Try re-uploading a text-based PDF."
             )
-        elif not content:
+        elif content_len == 0 and extraction_status not in _PROCESSED_EXTRACTION_STATUSES:
             quiz_ready = False
             quiz_status = "not_uploaded"
             content_note = (
                 "No readable text extracted yet. "
                 "Use the Chrome extension → 'Upload materials for quiz' on the Moodle course page."
             )
-        elif len(content) < MIN_QUIZ_CONTENT_CHARS:
+        elif content_len == 0 and extraction_status in _PROCESSED_EXTRACTION_STATUSES:
             quiz_ready = False
-            is_educ = _is_educational_material(title, raw_file_type)
+            quiz_status = "extraction_failed"
+            content_note = (
+                doc.get("extraction_error")
+                or "Material was processed but no readable text was stored. "
+                "Re-upload a text-based PDF or PPTX via the Chrome extension."
+            )
+        elif content_len < MIN_QUIZ_CONTENT_CHARS:
+            quiz_ready = False
             quiz_status = "extraction_too_short" if is_educ else "too_short"
             reprocess_hint = (
                 " Re-upload the file via the Chrome extension to re-extract with improved extractor."
                 if is_educ else " Re-upload a text-based PDF or PPTX."
             )
             content_note = (
-                f"Only {len(content)} characters extracted "
+                f"Only {content_len} characters extracted "
                 f"(need at least {MIN_QUIZ_CONTENT_CHARS}).{reprocess_hint}"
             )
         else:
-            # Any material with sufficient extracted text is selectable.
-            # The four-engine pipeline handles definition, lecture, lab, PPTX content.
             quiz_ready = True
             quiz_status = "ready"
             content_note = None
@@ -623,7 +652,9 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             "extractionStatus": extraction_status or None,
             "quizStatus": quiz_status,
             "quizStatusReason": content_note,
-            "isEducational": _is_educational_material(title, raw_file_type),
+            "isEducational": is_educ,
+            "contentTextLength": content_len,
+            "quizGenerationEligible": quiz_status == "ready",
         })
     return out
 

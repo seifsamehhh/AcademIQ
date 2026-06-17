@@ -14,37 +14,48 @@ interface MaterialSelectProps {
 
 // ── Sorting helpers ────────────────────────────────────────────────────────────
 
+const LECTURE_RE = /\blecture(?:\s*#?(\d+)|\b)/i;
+const LEC_RE = /\blec(?:\s*#?(\d+)|\b)/i;
+const LAB_RE = /\blab(?:\s*#?(\d+)|\b)/i;
+const REVISION_RE = /\b(revision|review|summary)(?:\s*#?(\d+)|\b)/i;
+const NOTES_RE =
+  /\b(notes?|tutorial|handout|slides?|worksheet|chapters?|exercise|module)\b/i;
+
 /**
- * Extract the first integer from a string for natural ordering.
- * "Lecture 10" → 10, "Lab 2" → 2, "Revision" → Infinity
+ * Extract lecture/lab/revision number from title.
+ * Ignores course codes (e.g. SWE423) by preferring numbers after type keywords.
  */
-function extractNum(s: string): number {
-  const m = s.match(/\d+/);
-  return m ? parseInt(m[0], 10) : Infinity;
+function extractMaterialNumber(title: string): number {
+  const patterns = [
+    /\blecture\s*#?(\d+)/i,
+    /\blec\s*#?(\d+)/i,
+    /\blab\s*#?(\d+)/i,
+    /\b(?:revision|review|summary)\s*#?(\d+)/i,
+    /\bchapter\s*#?(\d+)/i,
+  ];
+  for (const re of patterns) {
+    const m = title.match(re);
+    if (m?.[1]) return parseInt(m[1], 10);
+  }
+  const all = title.match(/\d+/g);
+  if (all && all.length > 1) {
+    return parseInt(all[all.length - 1], 10);
+  }
+  if (all?.length === 1) return parseInt(all[0], 10);
+  return Infinity;
 }
 
 /**
- * Map a material title to a sort-group number (lower = shown earlier).
- *
- *   0  Lectures
- *   1  Labs
- *   2  Revision / Review / Summary
- *   3  Notes / Tutorial / Handout / Slides / Worksheet / Chapter / Exercise
- *   4  Other educational (not_quiz_material === false, but no type keyword)
- *  99  Non-quiz / admin
+ * Sort group (lower = shown earlier):
+ *   0 Lectures · 1 Labs · 2 Revision · 3 Notes/slides · 4 Other educational · 5 Non-quiz
  */
 function sortGroup(m: LearningMaterial): number {
-  if (m.quizStatus === "not_quiz_material") return 99;
-  const t = m.title.toLowerCase();
-  // Use only a LEADING word boundary so "lecture1", "lecture#1", "lec 1" all match.
-  // \blecture matches at any word boundary before the letter l, with no constraint
-  // on what follows — avoids the bug where "Lecture1" (digit after e) fails \blecture\b.
-  if (/\blecture|\blec\s*\d/i.test(t)) return 0;
-  // \blab\b is kept strict to avoid false-positives in "syllable" etc., but also
-  // accept "lab1" or "lab_1" patterns.
-  if (/\blab\b|\blab\s*\d/i.test(t)) return 1;
-  if (/\b(revision|review|summary)\b/i.test(t)) return 2;
-  if (/\b(notes?|tutorial|handout|slides?|worksheet|chapter|exercise|module)\b/i.test(t)) return 3;
+  if (m.quizStatus === "not_quiz_material") return 5;
+  const t = m.title;
+  if (LECTURE_RE.test(t) || LEC_RE.test(t)) return 0;
+  if (LAB_RE.test(t)) return 1;
+  if (REVISION_RE.test(t)) return 2;
+  if (NOTES_RE.test(t)) return 3;
   return 4;
 }
 
@@ -53,25 +64,22 @@ function sortMaterials(list: LearningMaterial[]): LearningMaterial[] {
     const ga = sortGroup(a);
     const gb = sortGroup(b);
     if (ga !== gb) return ga - gb;
-    // Within the same group use natural numeric ordering
-    const na = extractNum(a.title);
-    const nb = extractNum(b.title);
+    const na = extractMaterialNumber(a.title);
+    const nb = extractMaterialNumber(b.title);
     if (na !== nb) return na - nb;
-    // Alphabetical fallback
-    return a.title.localeCompare(b.title, undefined, { numeric: true });
+    return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" });
   });
 }
 
-// ── A material is selectable when it is ready OR can use context-fallback ─────
+// ── Selectable / badge — driven by backend quizStatus only ───────────────────
 
 function isSelectable(m: LearningMaterial): boolean {
+  if (m.quizStatus === "not_quiz_material") return false;
+  if (m.quizGenerationEligible === true) return true;
   if (m.quizStatus === "ready") return true;
   if (m.quizStatus === "extraction_too_short") return true;
-  if (!m.quizStatus && m.hasContent) return true;
   return false;
 }
-
-// ── Badge label + variant per status ─────────────────────────────────────────
 
 function statusBadge(m: LearningMaterial): {
   label: string;
@@ -81,7 +89,7 @@ function statusBadge(m: LearningMaterial): {
     case "ready":
       return { label: "Ready for quiz", variant: "default" };
     case "extraction_too_short":
-      return { label: "Ready (uses context)", variant: "warning" };
+      return { label: "Extraction too short", variant: "warning" };
     case "not_uploaded":
       return { label: "Not uploaded yet", variant: "muted" };
     case "extraction_failed":
@@ -91,9 +99,6 @@ function statusBadge(m: LearningMaterial): {
     case "not_quiz_material":
       return { label: "Not quiz material", variant: "muted" };
     default:
-      if (m.hasContent) return { label: "Ready for quiz", variant: "default" };
-      if (m.contentNote?.startsWith("No readable text"))
-        return { label: "Not uploaded yet", variant: "muted" };
       return { label: "Content unavailable", variant: "muted" };
   }
 }
@@ -141,13 +146,7 @@ function MaterialRow({
       ) : null}
       <Badge variant="muted">{material.kind}</Badge>
 
-      {/* Hint text under the row */}
-      {material.quizStatus === "extraction_too_short" ? (
-        <p className="w-full basis-full pl-9 text-xs text-muted-foreground">
-          Extracted text is limited — quiz will use other ready materials from
-          this course as supporting context.
-        </p>
-      ) : !selectable && (material.contentNote || material.quizStatusReason) ? (
+      {!selectable && (material.quizStatusReason || material.contentNote) ? (
         <p className="w-full basis-full pl-9 text-xs text-muted-foreground">
           {material.quizStatusReason || material.contentNote}
         </p>
@@ -174,11 +173,9 @@ export function MaterialSelect({
       <CardHeader>
         <CardTitle>Select Learning Materials</CardTitle>
         <CardDescription>
-          Lectures, labs, revisions, notes, and slides are sorted in order.
-          Materials marked &ldquo;Ready (uses context)&rdquo; will generate a
-          quiz using other ready materials from this course when their own
-          extracted text is limited. Grades files and Moodle activity types
-          cannot be used for quiz generation.
+          Lectures, labs, and revisions appear first in order. Materials marked
+          &ldquo;Ready for quiz&rdquo; can generate a quiz. Grades, assignments,
+          and other admin Moodle items cannot be used for quiz generation.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
@@ -192,7 +189,6 @@ export function MaterialSelect({
           </p>
         ) : (
           <>
-            {/* ── Educational materials, sorted ── */}
             {educational.length > 0 && (
               <div className="space-y-2">
                 {educational.map((m) => (
@@ -206,7 +202,6 @@ export function MaterialSelect({
               </div>
             )}
 
-            {/* ── Non-quiz materials (collapsed by default) ── */}
             {nonQuiz.length > 0 && (
               <div className="mt-4">
                 <button
@@ -219,9 +214,8 @@ export function MaterialSelect({
                   ) : (
                     <ChevronRight className="h-3 w-3" />
                   )}
-                  {showOther ? "Hide" : "Show"} {nonQuiz.length} non-quiz
-                  item{nonQuiz.length === 1 ? "" : "s"} (grades, admin,
-                  forums…)
+                  {showOther ? "Hide" : "Show"} {nonQuiz.length} other Moodle
+                  item{nonQuiz.length === 1 ? "" : "s"} (grades, admin, forums…)
                 </button>
                 {showOther && (
                   <div className="mt-2 space-y-2">

@@ -251,6 +251,11 @@ export interface LearningMaterial {
   quizStatusReason?: string | null;
   /** True when the material is educational (lecture/lab/notes/slides/etc.) */
   isEducational?: boolean;
+  /** Stored extracted text length from backend (content_text or content_chars). */
+  contentTextLength?: number;
+  /** True when backend marks material as ready for quiz generation. */
+  quizGenerationEligible?: boolean;
+  readyForQuiz?: boolean;
 }
 
 export interface QuizQuestion {
