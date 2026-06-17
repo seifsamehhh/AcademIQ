@@ -593,7 +593,13 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
         ) and not has_synced_moodle_data(user_id)
 
     out = []
-    from app.services.material_quiz_display import resolve_material_display
+    from app.services.material_quiz_display import (
+        apply_course_material_visibility,
+        resolve_material_display,
+    )
+
+    displays: List[Dict[str, Any]] = []
+    row_meta: List[tuple] = []
 
     for doc in material_repository.list_by_course(str(course_id)):
         doc_name = _clean_course_name(doc.get("course_name"))
@@ -603,6 +609,13 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
         title = doc.get("title") or "Untitled"
         raw_file_type = (doc.get("file_type") or doc.get("category") or "file")
         display = resolve_material_display(doc)
+        display["material_id"] = str(doc.get("material_id") or "")
+        displays.append(display)
+        row_meta.append((doc, title, raw_file_type, display))
+
+    apply_course_material_visibility(displays)
+
+    for doc, title, raw_file_type, display in row_meta:
         quiz_ready = display["quiz_status"] == "ready"
         quiz_selectable = display["selectable"]
 
@@ -625,9 +638,23 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             "visibleInOtherItems": display["visible_in_other_items"],
             "sortGroup": display["sort_group"],
             "sortNumber": display["sort_number"],
+            "sortLinkRank": display.get("sort_link_rank", 0),
+            "materialKind": display.get("material_kind"),
+            "materialNumber": display.get("material_number"),
+            "isLinkWrapper": display.get("is_link_wrapper", False),
+            "hasRealFileSibling": display.get("has_real_file_sibling", False),
             "questionCountPossible": display.get("question_count_possible"),
             "minQuestionsRequired": display.get("min_questions_required"),
         })
+
+    out.sort(
+        key=lambda row: (
+            row.get("sortGroup") or 5,
+            row.get("sortNumber") or 9999,
+            row.get("sortLinkRank") or 0,
+            (row.get("title") or "").lower(),
+        )
+    )
     return out
 
 

@@ -100,7 +100,10 @@ def _material_quiz_status(doc: Dict[str, Any]) -> tuple[str, str | None]:
     return "ready", None
 
 
-from app.services.material_quiz_display import resolve_material_display
+from app.services.material_quiz_display import (
+    apply_course_material_visibility,
+    resolve_material_display,
+)
 
 
 # ── Per-course + per-material debug ─────────────────────────────────────────
@@ -144,11 +147,21 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
         "not_quiz_material": 0,
     }
 
+    displays: List[Dict[str, Any]] = []
+    doc_rows: List[tuple] = []
+
     for doc in docs:
+        display = resolve_material_display(doc)
+        display["material_id"] = str(doc.get("material_id") or "")
+        displays.append(display)
+        doc_rows.append((doc, display))
+
+    apply_course_material_visibility(displays)
+
+    for doc, display in doc_rows:
         mid = str(doc.get("material_id") or "")
         title = doc.get("title") or "Untitled"
         file_type = (doc.get("file_type") or "unknown").lower()
-        display = resolve_material_display(doc)
         quiz_status = display["quiz_status"]
         quiz_status_reason = display["quiz_status_reason"]
         status_counts[quiz_status] = status_counts.get(quiz_status, 0) + 1
@@ -178,9 +191,14 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
                 "why_not_ready": display.get("why_not_ready"),
                 "quiz_status": quiz_status,
                 "quiz_status_reason": quiz_status_reason,
+                "material_kind": display.get("material_kind"),
+                "material_number": display.get("material_number"),
+                "is_link_wrapper": display.get("is_link_wrapper", False),
+                "has_real_file_sibling": display.get("has_real_file_sibling", False),
                 "sort_group": display["sort_group"],
                 "sort_group_label": display["sort_group_label"],
                 "sort_number": display["sort_number"],
+                "sort_link_rank": display.get("sort_link_rank", 0),
                 "visible_in_main_list": display["visible_in_main_list"],
                 "visible_in_other_items": display["visible_in_other_items"],
                 "visible_in_quiz": display["visible_in_main_list"],
@@ -195,6 +213,7 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
         key=lambda row: (
             row["sort_group"],
             row["sort_number"],
+            row.get("sort_link_rank", 0),
             row["title"].lower(),
         )
     )

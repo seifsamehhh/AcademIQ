@@ -264,6 +264,11 @@ export interface LearningMaterial {
   visibleInOtherItems?: boolean;
   sortGroup?: number;
   sortNumber?: number;
+  sortLinkRank?: number;
+  materialKind?: string;
+  materialNumber?: number;
+  isLinkWrapper?: boolean;
+  hasRealFileSibling?: boolean;
   questionCountPossible?: number;
   minQuestionsRequired?: number;
 }

@@ -66,6 +66,9 @@ function sortGroup(m: LearningMaterial): number {
 
 function sortNumber(m: LearningMaterial): number {
   const sg = sortGroup(m);
+  if (typeof m.materialNumber === "number" && m.materialNumber < 9999) {
+    return m.materialNumber;
+  }
   if (typeof m.sortNumber === "number" && m.sortNumber < 9999) return m.sortNumber;
   return extractMaterialNumber(m.title, sg);
 }
@@ -78,7 +81,9 @@ function sortMaterials(list: LearningMaterial[]): LearningMaterial[] {
     const na = sortNumber(a);
     const nb = sortNumber(b);
     if (na !== nb) return na - nb;
-    // Never use numeric localeCompare on full titles — SWE423/CSC344 digits break order.
+    const lr = a.sortLinkRank ?? (a.isLinkWrapper ? 1 : 0);
+    const lrb = b.sortLinkRank ?? (b.isLinkWrapper ? 1 : 0);
+    if (lr !== lrb) return lr - lrb;
     return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
   });
 }
