@@ -63,21 +63,29 @@ _NON_QUIZ_TITLE_RE = re.compile(
     # Grades / marks / scores
     r"grade[sd]?|grading|mark[sd]?|marking|score\s+sheet|grade\s+sheet"
     r"|mark\s+sheet|grade\s+book|mark\s+book|final\s+(?:mark[sd]?|grade[sd]?|score[sd]?)"
+    r"|student\s+scores?|scores?\s+(?:sheet|list|record|file)"
     # Attendance / roster
     r"|attendance|absent(?:ee)?|student\s+(?:list|roster|record[sd]?)"
     # Submission / status reports
     r"|submission\s+(?:report|status|list|guide|form)"
     r"|assignment\s+(?:submission|status|report|list)"
-    # Project admin (requirements/brief/rubric — not the lecture content itself)
-    r"|project\s+(?:requirements?|criteria|rubric|description|brief|plan|outline|guide)"
+    # Project admin (requirements/brief/rubric)
+    r"|project\s+(?:requirements?|criteria|rubric|description|brief|plan|outline|guide|specs?)"
     r"|assignment\s+(?:instructions?|brief|description|rubric|criteria|requirements?)"
+    # Standalone admin forms / evaluation sheets
+    r"|rubric[sd]?|criteria\s+(?:sheet|form|file)"
+    r"|evaluation\s+(?:form|sheet|rubric|criteria)"
+    r"|marking\s+(?:scheme|guide|rubric|sheet)"
+    r"|answer\s+(?:key|sheet|model)|model\s+answer[sd]?"
+    r"|lab\s+report\s+(?:template|form|sheet)"
     # Course admin documents
-    r"|course\s+(?:outline|plan|schedule|syllabus|calendar|timetable)"
+    r"|course\s+(?:outline|plan|schedule|syllabus|calendar|timetable|guide)"
     r"|semester\s+(?:plan|schedule|calendar|timetable)"
     r"|exam\s+(?:schedule|timetable|calendar)"
-    r"|due\s+dates?"
-    # Announcements / notifications
-    r"|announcements?"
+    r"|due\s+dates?|deadline[sd]?"
+    # Admin / navigation pages
+    r"|announcements?|course\s+contents?|table\s+of\s+contents?"
+    r"|admin(?:istration)?\s+(?:file[sd]?|doc(?:ument)?[sd]?)"
     r")\b",
     re.I,
 )
@@ -124,7 +132,7 @@ def _classify_non_quiz_material(
         return True, f"Spreadsheet file (.{ft}) — likely grades or data export"
 
     if _NON_QUIZ_TITLE_RE.search(title or ""):
-        return True, "File name suggests grades, marks, or attendance data"
+        return True, "Not quiz material — title indicates grades, admin, rubric, or non-lecture content"
 
     return False, None
 

@@ -4,7 +4,8 @@ Safe diagnostics for quiz material readiness (no secrets or full document bodies
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.repositories import material_repository, user_repository
 from app.services.moodle_course_display import get_visible_synced_courses_for_user
@@ -15,6 +16,38 @@ from app.services.student_data import (
     _is_educational_material,
     get_materials,
 )
+
+
+# ── Sort-group helpers (mirror front-end MaterialSelect.tsx logic) ────────────
+
+def _sort_group(title: str, is_non_quiz: bool) -> int:
+    """
+    Returns the numeric sort group for display ordering:
+      0 = Lecture
+      1 = Lab
+      2 = Revision / Review / Summary
+      3 = Notes / Tutorial / Handout / Slides / Chapter
+      4 = Other Educational (selectable)
+      5 = Non-quiz / Admin (disabled / collapsed)
+    """
+    if is_non_quiz:
+        return 5
+    t = (title or "").lower()
+    if "lecture" in t:
+        return 0
+    if re.search(r"\blab\b", t):
+        return 1
+    if any(w in t for w in ("revision", "review", "summary")):
+        return 2
+    if any(w in t for w in ("notes", "note", "tutorial", "handout", "slides", "slide", "chapter")):
+        return 3
+    return 4
+
+
+def _sort_number(title: str) -> int:
+    """Extract the first integer from a title for natural numeric ordering."""
+    m = re.search(r"\b(\d+)\b", title or "")
+    return int(m.group(1)) if m else 0
 
 
 def _content_length(doc: Dict[str, Any]) -> int:
@@ -113,14 +146,17 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
         quiz_status, quiz_status_reason = _material_quiz_status(doc)
         status_counts[quiz_status] = status_counts.get(quiz_status, 0) + 1
 
-        is_non_quiz, _ = _classify_non_quiz_material(title, file_type)
+        is_non_quiz, non_quiz_reason = _classify_non_quiz_material(title, file_type)
         is_educ = _is_educational_material(title, file_type)
-        # Can reprocess: educational with insufficient chars that are not confirmed-failed
         can_reprocess = (
             is_educ
             and quiz_status in ("extraction_too_short", "too_short", "not_uploaded")
             and doc.get("extraction_status") not in ("extraction_failed", "insufficient_text")
         )
+        sg = _sort_group(title, is_non_quiz)
+        sn = _sort_number(title)
+        visible = not is_non_quiz
+        selectable = quiz_status in ("ready", "extraction_too_short") and not is_non_quiz
 
         materials_out.append(
             {
@@ -132,20 +168,36 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
                 "extraction_status": (doc.get("extraction_status") or None),
                 "is_educational_material": is_educ,
                 "is_non_quiz_material": is_non_quiz,
+                "non_quiz_reason": non_quiz_reason,
                 "can_reprocess": can_reprocess,
                 "quiz_generation_eligible": quiz_status == "ready",
                 "ready_for_quiz": quiz_status == "ready",
                 "quiz_status": quiz_status,
                 "quiz_status_reason": quiz_status_reason,
+                "sort_group": sg,
+                "sort_group_label": [
+                    "Lecture", "Lab", "Revision", "Notes/Tutorial/Slides", "Other Educational", "Non-quiz / Admin"
+                ][sg],
+                "sort_number": sn,
+                "visible_in_quiz": visible,
+                "selectable": selectable,
             }
         )
 
     materials_out.sort(
         key=lambda row: (
-            row["quiz_status"] != "ready",
-            row["quiz_status"] == "not_quiz_material",
+            row["sort_group"],
+            row["sort_number"],
             row["title"].lower(),
         )
+    )
+
+    visible_count = sum(1 for m in materials_out if m["visible_in_quiz"])
+    selectable_count = sum(1 for m in materials_out if m["selectable"])
+    educ_count = sum(1 for m in materials_out if m["is_educational_material"])
+    not_quiz_count = sum(1 for m in materials_out if m["is_non_quiz_material"])
+    context_ready_count = sum(
+        1 for m in materials_out if m["quiz_status"] in ("ready", "extraction_too_short")
     )
 
     return {
@@ -158,9 +210,15 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
         "visible_synced_course_ids": visible_course_ids,
         "total_materials": len(materials_out),
         "detected_materials_count": len(materials_out),
+        "visible_in_quiz_count": visible_count,
+        "selectable_count": selectable_count,
+        "educational_materials_count": educ_count,
+        "not_quiz_count": not_quiz_count,
+        "hidden_or_collapsed_count": not_quiz_count,
+        "context_ready_count": context_ready_count,
         "ready_count": status_counts.get("ready", 0),
         "not_uploaded_count": status_counts.get("not_uploaded", 0),
-        "not_quiz_material_count": status_counts.get("not_quiz_material", 0),
+        "not_quiz_material_count": not_quiz_count,
         "extraction_failed_count": status_counts.get("extraction_failed", 0),
         "extraction_too_short_count": status_counts.get("extraction_too_short", 0),
         "too_short_count": status_counts.get("too_short", 0),
@@ -232,11 +290,16 @@ def debug_course_material_coverage(email: str) -> Dict[str, Any]:
             quiz_status, quiz_status_reason = _material_quiz_status(doc)
             status_counts[quiz_status] = status_counts.get(quiz_status, 0) + 1
             is_educ = _is_educational_material(_title, _ft)
+            is_non_quiz, non_quiz_reason = _classify_non_quiz_material(_title, _ft)
             can_reprocess = (
                 is_educ
                 and quiz_status in ("extraction_too_short", "too_short", "not_uploaded")
                 and doc.get("extraction_status") not in ("extraction_failed", "insufficient_text")
             )
+            sg = _sort_group(_title, is_non_quiz)
+            sn = _sort_number(_title)
+            visible = not is_non_quiz
+            selectable = quiz_status in ("ready", "extraction_too_short") and not is_non_quiz
 
             materials_list.append({
                 "material_id": mid,
@@ -245,27 +308,57 @@ def debug_course_material_coverage(email: str) -> Dict[str, Any]:
                 "content_text_length": length,
                 "extraction_status": (doc.get("extraction_status") or None),
                 "is_educational_material": is_educ,
+                "is_non_quiz_material": is_non_quiz,
+                "non_quiz_reason": non_quiz_reason,
                 "can_reprocess": can_reprocess,
                 "quiz_status": quiz_status,
                 "quiz_status_reason": quiz_status_reason,
+                "sort_group": sg,
+                "sort_group_label": [
+                    "Lecture", "Lab", "Revision", "Notes/Tutorial/Slides", "Other Educational", "Non-quiz / Admin"
+                ][sg],
+                "sort_number": sn,
+                "visible_in_quiz": visible,
+                "selectable": selectable,
             })
 
         materials_list.sort(
             key=lambda row: (
-                row["quiz_status"] != "ready",
-                row["quiz_status"] == "not_quiz_material",
+                row["sort_group"],
+                row["sort_number"],
                 row["title"].lower(),
             )
+        )
+
+        c_visible = sum(1 for m in materials_list if m["visible_in_quiz"])
+        c_educ = sum(1 for m in materials_list if m["is_educational_material"])
+        c_non_quiz = sum(1 for m in materials_list if m["is_non_quiz_material"])
+        c_ctx_ready = sum(
+            1 for m in materials_list if m["quiz_status"] in ("ready", "extraction_too_short")
+        )
+        # Missing = educational materials shown in UI but not yet quiz-eligible
+        c_missing = sum(
+            1 for m in materials_list
+            if m["is_educational_material"]
+            and m["quiz_status"] in ("not_uploaded", "too_short", "extraction_failed")
         )
 
         courses_out.append({
             "course_id": course_id,
             "course_name": course_name,
+            "total_saved_materials": len(materials_list),
             "detected_materials_count": len(materials_list),
+            "visible_in_quiz_count": c_visible,
+            "educational_materials_count": c_educ,
             "ready_count": status_counts.get("ready", 0),
+            "context_ready_count": c_ctx_ready,
+            "not_quiz_count": c_non_quiz,
+            "not_quiz_material_count": c_non_quiz,
+            "hidden_or_collapsed_count": c_non_quiz,
+            "missing_from_quiz_count": c_missing,
             "not_uploaded_count": status_counts.get("not_uploaded", 0),
-            "not_quiz_material_count": status_counts.get("not_quiz_material", 0),
             "extraction_failed_count": status_counts.get("extraction_failed", 0),
+            "extraction_too_short_count": status_counts.get("extraction_too_short", 0),
             "too_short_count": status_counts.get("too_short", 0),
             "status_counts": status_counts,
             "materials": materials_list,
