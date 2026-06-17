@@ -930,7 +930,20 @@
         let uploadable = allMaterials.filter(isDownloadableMaterial);
 
         if (Array.isArray(onlyMaterialIds)) {
-            // Popup already ran preflight — only download what it approved
+            if (onlyMaterialIds.length === 0) {
+                return {
+                    status: "done",
+                    course_id: String(tabCourseId),
+                    course_name: course.course_name,
+                    backend_endpoint: backendUploadUrl,
+                    detected: allMaterials.length,
+                    uploaded: 0,
+                    ready: 0,
+                    failed: 0,
+                    total: 0,
+                    results: [],
+                };
+            }
             const allowed = new Set(onlyMaterialIds.map(String));
             uploadable = uploadable.filter((m) => allowed.has(String(m.material_id || m.id)));
             console.log(

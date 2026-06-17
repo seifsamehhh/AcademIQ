@@ -498,6 +498,29 @@ const isDownloadableMaterial = (material) => {
 /** Legacy alias — only use for download/upload filtering, not metadata save. */
 const isQuizUploadableMaterial = isDownloadableMaterial;
 
+/** Preflight statuses that must never trigger a file download/upload. */
+const PREFLIGHT_SKIP_STATUSES = new Set([
+    "already_saved",
+    "already_ready",
+    "already_classified",
+    "already_processed",
+    "not_quiz_material",
+    "extraction_failed",
+    "metadata_only",
+    "extraction_too_short",
+    "insufficient_text",
+    "unsupported",
+    "failed_download",
+]);
+
+const isPreflightUploadAllowed = (item) => {
+    if (!item || item.should_upload !== true) return false;
+    if (PREFLIGHT_SKIP_STATUSES.has(item.status)) return false;
+    // Matched an existing DB row — hard skip (backend should also set should_upload:false).
+    if (item.matched_by) return false;
+    return true;
+};
+
 const getActiveMoodleTab = () =>
     new Promise((resolve) => {
         chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => resolve(tab || null));
@@ -827,30 +850,21 @@ const runQuizMaterialUpload = async () => {
         onlyMaterialIds = [];
         for (const item of (pf.data.materials || [])) {
             const mid = String(item.material_id);
-            if (item.should_upload && downloadableIdSet.has(mid)) {
+            if (isPreflightUploadAllowed(item) && downloadableIdSet.has(mid)) {
                 onlyMaterialIds.push(mid);
-                if (item.status === "extraction_too_short") {
-                    reprocessing += 1;
-                }
-            } else if (!item.should_upload) {
+            } else {
                 if (item.status === "already_ready") {
                     alreadyReady += 1;
-                    skippedExisting += 1;
                 } else if (
-                    ["already_classified", "already_processed", "not_quiz_material"].includes(
+                    ["already_saved", "already_classified", "already_processed", "not_quiz_material"].includes(
                         item.status
                     )
                 ) {
                     alreadyClassified += 1;
-                    skippedExisting += 1;
                 } else if (item.status === "extraction_failed") {
                     skippedExtractionFailed += 1;
-                    skippedExisting += 1;
-                } else if (item.status === "not_uploaded" || item.status === "metadata_only") {
-                    skippedExisting += 1;
-                } else {
-                    skippedExisting += 1;
                 }
+                skippedExisting += 1;
             }
         }
 
@@ -883,12 +897,38 @@ const runQuizMaterialUpload = async () => {
         }
 
         refs.uploadMeta.textContent =
-            `DB: ${dbFound} saved · Uploading ${onlyMaterialIds.length}/${downloadable.length} downloadable ` +
-            `(${skippedExisting} skipped` +
-            (reprocessing > 0 ? `, ${reprocessing} re-extracting` : "") + `)...`;
+            `DB: ${dbFound} saved · Skipped ${skippedExisting} · Uploading ${onlyMaterialIds.length} new file(s)...`;
     }
 
-    // ── Step 4: download + upload only downloadable materials approved by preflight ──
+    if (!onlyMaterialIds || onlyMaterialIds.length === 0) {
+        await refreshData();
+        btn.textContent = "Upload materials for quiz";
+        btn.disabled = false;
+        refs.uploadMeta.textContent = formatQuizUploadSummary({
+            courseId,
+            courseName,
+            detected,
+            metadataSaved,
+            preflightChecked,
+            dbFound,
+            uploadAttempted: 0,
+            uploaded: 0,
+            ready: 0,
+            failed: 0,
+            total: 0,
+            skippedExisting,
+            alreadyReady,
+            alreadyClassified,
+            skippedExtractionFailed,
+            reprocessing: 0,
+            excludedFromDownload,
+            excludedReason: "url/html/link — metadata saved only",
+            endpoint: UPLOAD_QUIZ_URL,
+        });
+        return;
+    }
+
+    // ── Step 4: download + upload only brand-new unmatched downloadable materials ──
     const tabResult = await uploadMaterialsOnActiveTab(courseId, onlyMaterialIds);
 
     if (tabResult.status === "done") {
