@@ -185,9 +185,7 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 existing_doc = by_title_ft[(t_key, "")]
                 matched_by = f"title:{t_key[:25]}"
 
-        # M7: fuzzy title match — Jaccard word-overlap against all stored titles
-        # Catches: "Lecture 1 File" ↔ "Lecture 1", "SWE423 Lab 4" ↔ "Lab 4",
-        #          titles with slight wording differences.
+        # M7: fuzzy title — Jaccard word-overlap (threshold 0.45, same-filetype bonus)
         if not existing_doc and all_docs:
             t_key = _normalize_title(title)
             ft_lower = raw_file_type.lower()
@@ -198,7 +196,6 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 if not stored_t:
                     continue
                 score = _title_word_overlap(t_key, stored_t)
-                # Prefer same file_type — slight bonus avoids cross-type false matches
                 if score > 0:
                     stored_ft = str(doc.get("file_type") or "").lower()
                     if stored_ft and ft_lower and stored_ft == ft_lower:
@@ -206,9 +203,26 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 if score > best_score:
                     best_score = score
                     best_doc_fuzzy = doc
-            if best_score >= 0.6:
+            if best_score >= 0.45:
                 existing_doc = best_doc_fuzzy
                 matched_by = f"fuzzy_title:{best_score:.2f}"
+
+        # M8: word-containment — all words of the shorter title are ⊆ words of longer.
+        # Handles "Lab 4" ↔ "Week 1 Lab 4 File", "Lecture" ↔ "Lecture 1 Introduction".
+        # Requires ≥ 2 significant words in the shorter set to avoid trivial matches.
+        if not existing_doc and all_docs:
+            t_key = _normalize_title(title)
+            words_in = set(t_key.split()) - _TITLE_STOP_WORDS
+            if len(words_in) >= 2:
+                for doc in all_docs:
+                    stored_t = _normalize_title(doc.get("title") or "")
+                    words_stored = set(stored_t.split()) - _TITLE_STOP_WORDS
+                    if not words_stored:
+                        continue
+                    if words_in.issubset(words_stored) or words_stored.issubset(words_in):
+                        existing_doc = doc
+                        matched_by = f"word_containment:{stored_t[:25]}"
+                        break
 
         # ── C: Phase 2 fallback — direct MongoDB query (no course_id filter) ──
         # Handles course_id mismatches: Moodle cmids are globally unique.
@@ -292,6 +306,7 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             continue
 
         # ── C: Determine skip/upload decision from existing record ───────────
+        # Rule: ANY existing record = skip. Re-upload only when force_reupload=True.
         existing_status = existing_doc.get("extraction_status") or ""
         existing_text = (existing_doc.get("content_text") or "").strip()
         existing_chars = (
@@ -299,63 +314,44 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             if existing_text
             else int(existing_doc.get("content_chars") or 0)
         )
+        existing_ready = bool(existing_doc.get("ready_for_quiz"))
 
-        if existing_status == "not_quiz_material":
-            results.append({
-                "material_id": material_id,
-                "title": title,
-                "should_upload": False,
-                "status": "already_classified",
-                "reason": existing_doc.get("extraction_error") or "Classified as non-quiz material",
-                "content_text_length": 0,
-                "matched_by": matched_by,
-                "debug": debug_info,
-            })
-        elif existing_chars >= MIN_QUIZ_CONTENT_CHARS:
-            results.append({
-                "material_id": material_id,
-                "title": title,
-                "should_upload": False,
-                "status": "already_ready",
-                "reason": f"Already has {existing_chars} characters of extracted text",
-                "content_text_length": existing_chars,
-                "matched_by": matched_by,
-                "debug": debug_info,
-            })
-        elif existing_status == "extraction_failed":
-            results.append({
-                "material_id": material_id,
-                "title": title,
-                "should_upload": force_reupload,
-                "status": "extraction_failed",
-                "reason": existing_doc.get("extraction_error") or "Extraction previously failed",
-                "content_text_length": existing_chars,
-                "matched_by": matched_by,
-                "debug": debug_info,
-            })
-        elif existing_chars > 0:
-            results.append({
-                "material_id": material_id,
-                "title": title,
-                "should_upload": False,
-                "status": "too_short",
-                "reason": f"Only {existing_chars} chars (need ≥{MIN_QUIZ_CONTENT_CHARS})",
-                "content_text_length": existing_chars,
-                "matched_by": matched_by,
-                "debug": debug_info,
-            })
+        # Statuses that mean the material was processed and is usable for quizzes
+        _READY_STATUSES = {"success", "ready", "ready_for_quiz", "extracted"}
+        # Statuses that mean the material was processed but cannot generate quizzes
+        _CLASSIFIED_STATUSES = {
+            "not_quiz_material", "too_short", "insufficient_quiz_structure",
+            "unsupported", "extraction_failed", "failed", "no_text",
+            "not_educational", "admin_file", "folder", "assignment",
+            "grades", "project_requirements",
+        }
+
+        if force_reupload:
+            # Honour explicit force_reupload only for failed/empty records
+            should_reupload = existing_status in _CLASSIFIED_STATUSES and existing_chars == 0
         else:
-            # Record exists but no usable content yet
-            results.append({
-                "material_id": material_id,
-                "title": title,
-                "should_upload": True,
-                "status": "no_content",
-                "reason": "Record exists but no extracted text yet",
-                "content_text_length": 0,
-                "matched_by": matched_by,
-                "debug": debug_info,
-            })
+            should_reupload = False
+
+        if existing_ready or existing_chars >= MIN_QUIZ_CONTENT_CHARS or existing_status in _READY_STATUSES:
+            out_status = "already_ready"
+            reason = f"Already has {existing_chars} chars of extracted text"
+        elif existing_status in _CLASSIFIED_STATUSES:
+            out_status = "already_classified"
+            reason = existing_doc.get("extraction_error") or f"Classified: {existing_status}"
+        else:
+            out_status = "already_processed"
+            reason = f"Record exists in DB (status={existing_status or 'none'})"
+
+        results.append({
+            "material_id": material_id,
+            "title": title,
+            "should_upload": should_reupload,
+            "status": out_status,
+            "reason": reason,
+            "content_text_length": existing_chars,
+            "matched_by": matched_by,
+            "debug": debug_info,
+        })
 
     should_upload_count = sum(1 for r in results if r["should_upload"])
     matched_count = sum(1 for r in results if r.get("matched_by") is not None)
@@ -372,16 +368,19 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "course_id": course_id,
-        # Counts the popup summary needs
         "checked": len(results),
         "should_upload_count": should_upload_count,
         "matched_count": matched_count,
         "no_match_count": no_match_count,
+        # Per-status counts for popup display
         "already_ready": status_summary.get("already_ready", 0),
-        "already_classified": status_summary.get("already_classified", 0),
+        "already_classified": (
+            status_summary.get("already_classified", 0)
+            + status_summary.get("already_processed", 0)
+            + status_summary.get("not_quiz_material", 0)
+        ),
         "extraction_failed": status_summary.get("extraction_failed", 0),
         "not_quiz_material": status_summary.get("not_quiz_material", 0),
-        # Legacy fields
         "total": len(results),
         "skip_count": len(results) - should_upload_count,
         "db_materials_found_for_course": len(all_docs),

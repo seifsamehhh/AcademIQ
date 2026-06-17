@@ -738,12 +738,20 @@ const runQuizMaterialUpload = async () => {
             if (item.should_upload) {
                 onlyMaterialIds.push(String(item.material_id));
             } else {
-                // Backend returns: "already_ready", "already_classified", "extraction_failed",
-                // "not_quiz_material" (title-only classification), "too_short", "no_content"
-                if (item.status === "already_ready") { alreadyReady += 1; skippedExisting += 1; }
-                else if (item.status === "already_classified" || item.status === "not_quiz_material") { alreadyClassified += 1; skippedExisting += 1; }
-                else if (item.status === "extraction_failed") { skippedExtractionFailed += 1; skippedExisting += 1; }
-                else { skippedExisting += 1; }
+                // "already_ready" — has extracted text
+                // "already_classified" / "already_processed" / "not_quiz_material" — non-quiz
+                // "extraction_failed" / "too_short" / "no_content" — also skip
+                if (item.status === "already_ready") {
+                    alreadyReady += 1; skippedExisting += 1;
+                } else if (["already_classified", "already_processed",
+                             "not_quiz_material"].includes(item.status)) {
+                    alreadyClassified += 1; skippedExisting += 1;
+                } else if (item.status === "extraction_failed") {
+                    skippedExtractionFailed += 1; skippedExisting += 1;
+                } else {
+                    // too_short, no_content, etc. — still skip
+                    skippedExisting += 1;
+                }
             }
         }
 
