@@ -832,16 +832,7 @@
     };
 
     const uploadMaterialToBackend = async (backendUploadUrl, material, identity) => {
-        const fetched = await fetchMaterialBytes(material);
-        if (!fetched.ok) {
-            return {
-                material_id: material.material_id || material.id,
-                title: material.title,
-                ok: false,
-                error: fetched.error
-            };
-        }
-        const body = {
+        const basePayload = {
             course_id: material.course_id || material.courseId,
             course_name: material.course_name,
             material_id: material.material_id || material.id,
@@ -849,24 +840,49 @@
             material_type: material.material_type || material.type,
             file_type: material.file_type || material.fileType,
             source_url: material.url,
-            content_base64: fetched.base64,
-            content_type: fetched.contentType,
             user_email: identity?.email || null
         };
-        const res = await fetch(backendUploadUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body)
-        });
-        let data = {};
-        try {
-            data = await res.json();
-        } catch (_error) {
-            data = {};
+
+        const postUploadPayload = async (body) => {
+            const res = await fetch(backendUploadUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            });
+            let data = {};
+            try {
+                data = await res.json();
+            } catch (_error) {
+                data = {};
+            }
+            return { res, data };
+        };
+
+        const fetched = await fetchMaterialBytes(material);
+        if (!fetched.ok) {
+            const { res, data } = await postUploadPayload({
+                ...basePayload,
+                upload_attempt_failed: true,
+                extraction_error: fetched.error
+            });
+            return {
+                material_id: basePayload.material_id,
+                title: basePayload.title,
+                ok: false,
+                recorded_on_backend: res.ok,
+                error: fetched.error,
+                ...data
+            };
         }
+
+        const { res, data } = await postUploadPayload({
+            ...basePayload,
+            content_base64: fetched.base64,
+            content_type: fetched.contentType
+        });
         return {
-            material_id: body.material_id,
-            title: body.title,
+            material_id: basePayload.material_id,
+            title: basePayload.title,
             ok: res.ok,
             ...data
         };

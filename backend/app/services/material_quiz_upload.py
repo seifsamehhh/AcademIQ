@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from app.models.material import build_material_doc, stable_material_id
@@ -21,6 +22,35 @@ from app.services.student_data import (
 )
 
 _DOWNLOADABLE_FILE_TYPES = {"pdf", "pptx", "ppt", "docx", "doc", "txt", "text"}
+
+# Bump when extraction logic changes materially — preflight may re-offer upload once.
+CURRENT_EXTRACTOR_VERSION = "2"
+
+_READY_EXTRACTION_STATUSES = frozenset(
+    {"success", "ready", "ready_for_quiz", "extracted"}
+)
+
+# After upload, these statuses are terminal — normal preflight must not re-download.
+_TERMINAL_EXTRACTION_STATUSES = frozenset(
+    {
+        "not_quiz_material",
+        "too_short",
+        "insufficient_text",
+        "insufficient_quiz_structure",
+        "unsupported",
+        "extraction_failed",
+        "failed",
+        "no_text",
+        "no_content",
+        "not_educational",
+        "not_enough_readable_text",
+        "admin_file",
+        "folder",
+        "assignment",
+        "grades",
+        "project_requirements",
+    }
+)
 
 
 _TITLE_STOP_WORDS = {"the", "a", "an", "and", "or", "for", "of", "to", "in", "is", "on", "at", "by"}
@@ -71,6 +101,120 @@ def _is_downloadable_material(
         if url and re.search(r"\.(pdf|pptx?|docx?|txt)(\?|$)", url, re.I):
             return True
     return False
+
+
+def _content_chars_from_doc(doc: Dict[str, Any]) -> int:
+    text = (doc.get("content_text") or "").strip()
+    if text:
+        return len(text)
+    chars = doc.get("content_chars")
+    if isinstance(chars, int) and chars > 0:
+        return chars
+    return 0
+
+
+def _is_force_reprocess(payload: Dict[str, Any]) -> bool:
+    return bool(payload.get("force_reupload") or payload.get("force_reprocess"))
+
+
+def _preflight_upload_decision(
+    existing_doc: Optional[Dict[str, Any]],
+    title: str,
+    raw_file_type: str,
+    activity_url: str,
+    resolved_url: str,
+    force: bool,
+) -> tuple[bool, str, str, int, bool]:
+    """
+    Decide whether the extension should download/upload this material.
+
+    Returns (should_upload, status, reason, content_chars, downloadable).
+    """
+    downloadable = _is_downloadable_material(raw_file_type, activity_url, resolved_url)
+
+    if not existing_doc:
+        if not downloadable:
+            return (
+                False,
+                "metadata_only",
+                "Metadata-only Moodle resource — no downloadable file",
+                0,
+                False,
+            )
+        return (
+            True,
+            "not_uploaded",
+            "No DB record found — file download needed",
+            0,
+            True,
+        )
+
+    existing_status = str(existing_doc.get("extraction_status") or "").strip()
+    existing_chars = _content_chars_from_doc(existing_doc)
+    processed_at = existing_doc.get("processed_at")
+    stored_version = str(existing_doc.get("extractor_version") or "").strip()
+
+    if existing_chars >= MIN_QUIZ_CONTENT_CHARS:
+        return (
+            False,
+            "already_ready",
+            f"Already has {existing_chars} chars of extracted text",
+            existing_chars,
+            downloadable,
+        )
+
+    if existing_status in _TERMINAL_EXTRACTION_STATUSES:
+        reason = existing_doc.get("extraction_error") or f"Previously processed: {existing_status}"
+        return False, "already_classified", reason, existing_chars, downloadable
+
+    if not downloadable:
+        reason = (
+            existing_doc.get("extraction_error")
+            or "Content not extracted yet — Moodle link or page resource"
+        )
+        return False, "not_uploaded", reason, existing_chars, False
+
+    version_stale = stored_version and stored_version != CURRENT_EXTRACTOR_VERSION
+    if force and existing_status not in _TERMINAL_EXTRACTION_STATUSES:
+        return (
+            True,
+            "extraction_too_short",
+            "Force reprocess requested",
+            existing_chars,
+            True,
+        )
+    if version_stale and existing_status not in _TERMINAL_EXTRACTION_STATUSES:
+        return (
+            True,
+            "extraction_too_short",
+            f"Extractor version {stored_version} → {CURRENT_EXTRACTOR_VERSION}",
+            existing_chars,
+            True,
+        )
+
+    if processed_at or existing_chars > 0 or existing_status in _READY_EXTRACTION_STATUSES:
+        reason = (
+            existing_doc.get("extraction_error")
+            or f"Previously processed (status={existing_status or 'none'})"
+        )
+        return False, "already_classified", reason, existing_chars, downloadable
+
+    if existing_status == "not_uploaded" and existing_chars == 0:
+        return (
+            True,
+            "not_uploaded",
+            "File detected but not downloaded yet",
+            0,
+            True,
+        )
+
+    return (
+        False,
+        "already_processed",
+        f"Record exists in DB (status={existing_status or 'none'})",
+        existing_chars,
+        downloadable,
+    )
 
 
 def _normalize_incoming_material_item(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -165,12 +309,21 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         base_doc["material_id"] = material_id
         base_doc["source"] = "moodle_sync"
 
+        existing_processed = bool(
+            existing
+            and (
+                existing.get("processed_at")
+                or str(existing.get("extraction_status") or "") in _TERMINAL_EXTRACTION_STATUSES
+                or _content_chars_from_doc(existing) > 0
+            )
+        )
+
         if is_non_quiz:
-            if not existing_text:
+            if not existing_text and not existing_processed:
                 base_doc["extraction_status"] = "not_quiz_material"
                 base_doc["extraction_error"] = non_quiz_reason
                 base_doc["ready_for_quiz"] = False
-        elif not existing_text:
+        elif not existing_text and not existing_processed:
             base_doc["extraction_status"] = "not_uploaded"
             if downloadable:
                 base_doc["extraction_error"] = "File detected but not downloaded yet"
@@ -253,7 +406,7 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     course_id = str(payload.get("course_id") or "").strip()
     materials_in = payload.get("materials") or []
-    force_reupload = bool(payload.get("force_reupload"))
+    force_reupload = _is_force_reprocess(payload)
 
     if not course_id:
         raise ValueError("course_id required")
@@ -497,79 +650,14 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             continue
 
         # ── C: Determine skip/upload decision from existing record ───────────
-        existing_status = existing_doc.get("extraction_status") or ""
-        existing_text = (existing_doc.get("content_text") or "").strip()
-        existing_chars = (
-            len(existing_text)
-            if existing_text
-            else int(existing_doc.get("content_chars") or 0)
+        should_reupload, out_status, reason, existing_chars, downloadable = _preflight_upload_decision(
+            existing_doc,
+            title,
+            raw_file_type,
+            activity_url,
+            resolved_url,
+            force_reupload,
         )
-
-        # Statuses that mean the material was processed and is usable for quizzes
-        _READY_STATUSES = {"success", "ready", "ready_for_quiz", "extracted"}
-        # Statuses that mean the material was definitively classified as non-quiz
-        # or confirmed extraction failure — don't offer for re-upload
-        _CLASSIFIED_STATUSES = {
-            "not_quiz_material", "too_short", "insufficient_quiz_structure",
-            "unsupported", "extraction_failed", "failed", "no_text",
-            "not_educational", "admin_file", "folder", "assignment",
-            "grades", "project_requirements",
-            # After one re-extraction attempt that still yielded too little text:
-            "insufficient_text",
-        }
-
-        # Determine whether to allow re-upload
-        is_educ = is_educational_material(title, raw_file_type)
-
-        if force_reupload:
-            should_reupload = (
-                existing_status in _CLASSIFIED_STATUSES
-                and existing_chars == 0
-                and downloadable
-            )
-        elif existing_chars >= MIN_EDUCATIONAL_REPROCESS_CHARS:
-            # Well-extracted — always skip regardless of material type
-            should_reupload = False
-        elif existing_chars >= MIN_QUIZ_CONTENT_CHARS and not is_educ:
-            # Non-educational with enough text — skip
-            should_reupload = False
-        elif existing_status in _CLASSIFIED_STATUSES:
-            # Definitively classified — skip (re-extraction confirmed it's too short/non-quiz)
-            should_reupload = False
-        elif existing_chars == 0 and not downloadable:
-            # Moodle url/html/page — metadata saved, nothing to download
-            should_reupload = False
-        elif existing_chars > 0 and existing_chars < MIN_QUIZ_CONTENT_CHARS:
-            # Has content but below usable threshold — allow re-extraction
-            # (catches old records that were marked "success" under the old 200-char threshold)
-            should_reupload = downloadable
-        elif is_educ and existing_chars < MIN_EDUCATIONAL_REPROCESS_CHARS:
-            # Educational material below quality threshold — offer improved re-extraction
-            should_reupload = downloadable
-        else:
-            should_reupload = downloadable if existing_chars == 0 else False
-
-        if existing_chars >= MIN_QUIZ_CONTENT_CHARS and existing_status in _READY_STATUSES:
-            out_status = "already_ready"
-            reason = f"Already has {existing_chars} chars of extracted text"
-        elif existing_status in _CLASSIFIED_STATUSES:
-            out_status = "already_classified"
-            reason = existing_doc.get("extraction_error") or f"Classified: {existing_status}"
-        elif should_reupload:
-            out_status = "extraction_too_short"
-            reason = (
-                f"Only {existing_chars} chars (status={existing_status or 'none'}) — "
-                f"re-extraction recommended (min reliable: {MIN_EDUCATIONAL_REPROCESS_CHARS})"
-            )
-        elif existing_chars == 0 and not downloadable:
-            out_status = "not_uploaded"
-            reason = (
-                existing_doc.get("extraction_error")
-                or "Content not extracted yet — Moodle link or page resource"
-            )
-        else:
-            out_status = "already_processed"
-            reason = f"Record exists in DB (status={existing_status or 'none'})"
 
         results.append({
             "material_id": material_id,
@@ -699,10 +787,75 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         if user:
             academiq_user_id = str(user["_id"])
 
+    force = _is_force_reprocess(payload)
+    now = datetime.utcnow()
+
+    # Extension could not download bytes — record terminal failure so preflight skips retry.
+    if payload.get("upload_attempt_failed"):
+        extraction_error = str(payload.get("extraction_error") or "download_failed")
+        existing_doc = material_repository.get(course_id, material_id)
+        if existing_doc and not force:
+            if existing_doc.get("processed_at") or (
+                existing_doc.get("extraction_status") in _TERMINAL_EXTRACTION_STATUSES
+            ):
+                return {
+                    "status": "skipped_existing",
+                    "already_ready": False,
+                    "course_id": course_id,
+                    "material_id": material_id,
+                    "resolved_from_material_id": (
+                        raw_material_id if raw_material_id != material_id else None
+                    ),
+                    "title": existing_doc.get("title", title),
+                    "chars": _content_chars_from_doc(existing_doc),
+                    "ready_for_quiz": bool(existing_doc.get("ready_for_quiz")),
+                    "hasContent": _content_chars_from_doc(existing_doc) >= MIN_QUIZ_CONTENT_CHARS,
+                    "extraction_status": existing_doc.get("extraction_status"),
+                    "extraction_error": existing_doc.get("extraction_error"),
+                    "content_note": "Previously processed — download not retried",
+                    "inserted": False,
+                    "ok": True,
+                }
+        fail_doc: Dict[str, Any] = {
+            "course_id": course_id,
+            "material_id": material_id,
+            "title": title,
+            "file_type": file_type,
+            "source": "moodle_sync",
+            "ready_for_quiz": False,
+            "extraction_status": "extraction_failed",
+            "extraction_error": f"download_failed:{extraction_error}",
+            "processed_at": now,
+            "extractor_version": CURRENT_EXTRACTOR_VERSION,
+        }
+        if course_name:
+            fail_doc["course_name"] = course_name
+        if source_url:
+            fail_doc["url"] = source_url
+        inserted = material_repository.upsert(fail_doc)
+        return {
+            "status": "stored_failed",
+            "already_ready": False,
+            "course_id": course_id,
+            "material_id": material_id,
+            "resolved_from_material_id": (
+                raw_material_id if raw_material_id != material_id else None
+            ),
+            "title": title,
+            "chars": 0,
+            "ready_for_quiz": False,
+            "hasContent": False,
+            "extraction_status": "extraction_failed",
+            "extraction_error": fail_doc["extraction_error"],
+            "content_note": f"Download failed: {extraction_error}",
+            "inserted": inserted,
+            "ok": True,
+        }
+
     # ── Step 1: classify by title/type before any extraction work ────────────
     # Non-quiz materials (grades, folders, admin, forums, etc.) are stored with
     # minimal metadata but NO text extraction — fast and idempotent on re-upload.
-    is_non_quiz, non_quiz_reason = _classify_non_quiz_material(title, str(file_type))
+    is_non_quiz, non_quiz_reason = classify_non_quiz_material(title, str(file_type))
     if is_non_quiz:
         existing_doc = material_repository.get(course_id, material_id)
         if existing_doc and existing_doc.get("extraction_status") == "not_quiz_material":
@@ -732,6 +885,8 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
             "ready_for_quiz": False,
             "extraction_status": "not_quiz_material",
             "extraction_error": non_quiz_reason,
+            "processed_at": now,
+            "extractor_version": CURRENT_EXTRACTOR_VERSION,
         }
         if course_name:
             minimal_doc["course_name"] = course_name
@@ -754,21 +909,33 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
             "inserted": True,
         }
 
-    # ── Step 2: caching — skip re-extraction if already well-extracted ────────
+    # ── Step 2: caching — skip re-extraction if already processed ───────────
     existing_doc = material_repository.get(course_id, material_id)
-    if existing_doc:
-        existing_status = existing_doc.get("extraction_status") or ""
-        existing_text = (existing_doc.get("content_text") or "").strip()
-        existing_chars = len(existing_text)
-        is_educ = _is_educational_material(title, str(file_type))
+    if existing_doc and not force:
+        existing_status = str(existing_doc.get("extraction_status") or "")
+        existing_chars = _content_chars_from_doc(existing_doc)
 
-        # Skip only when content is reliably sufficient OR material is non-educational
-        skip_for_good_content = (
-            existing_chars >= MIN_EDUCATIONAL_REPROCESS_CHARS
-            or (existing_chars >= MIN_QUIZ_CONTENT_CHARS and not is_educ)
-        )
+        if existing_status in _TERMINAL_EXTRACTION_STATUSES:
+            return {
+                "status": "already_classified",
+                "already_ready": False,
+                "course_id": course_id,
+                "material_id": material_id,
+                "resolved_from_material_id": (
+                    raw_material_id if raw_material_id != material_id else None
+                ),
+                "title": existing_doc.get("title", title),
+                "chars": existing_chars,
+                "ready_for_quiz": False,
+                "hasContent": False,
+                "extraction_status": existing_status,
+                "extraction_error": existing_doc.get("extraction_error"),
+                "content_note": f"Previously processed: {existing_status}",
+                "inserted": False,
+                "ok": True,
+            }
 
-        if skip_for_good_content:
+        if existing_doc.get("processed_at") or existing_chars > 0:
             already_ready = existing_chars >= MIN_QUIZ_CONTENT_CHARS
             return {
                 "status": "skipped_existing",
@@ -783,36 +950,11 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "ready_for_quiz": already_ready,
                 "hasContent": already_ready,
                 "extraction_status": existing_doc.get("extraction_status", "success"),
-                "extraction_error": None,
-                "content_note": None,
+                "extraction_error": existing_doc.get("extraction_error"),
+                "content_note": "Previously processed — not re-extracted",
                 "inserted": False,
+                "ok": True,
             }
-
-        if existing_status == "extraction_failed":
-            # Extraction was already attempted and failed — skip unless force_reupload
-            force = bool(payload.get("force_reupload"))
-            if not force:
-                return {
-                    "status": "skipped_existing",
-                    "already_ready": False,
-                    "course_id": course_id,
-                    "material_id": material_id,
-                    "resolved_from_material_id": (
-                        raw_material_id if raw_material_id != material_id else None
-                    ),
-                    "title": existing_doc.get("title", title),
-                    "chars": 0,
-                    "ready_for_quiz": False,
-                    "hasContent": False,
-                    "extraction_status": "extraction_failed",
-                    "extraction_error": existing_doc.get("extraction_error"),
-                    "content_note": (
-                        "Extraction previously failed. "
-                        "Re-upload with force_reupload=true to retry."
-                    ),
-                    "inserted": False,
-                }
-        # For educational materials with insufficient content — fall through to re-extract
 
     # ── Extract text ─────────────────────────────────────────────────────────
     text = (payload.get("content_text") or "").strip()
@@ -893,6 +1035,8 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
             "extraction_error": extraction_error,
             "uploaded_by_email": user_email or None,
             "uploaded_by_user_id": academiq_user_id,
+            "processed_at": now,
+            "extractor_version": CURRENT_EXTRACTOR_VERSION,
         }
     )
 
