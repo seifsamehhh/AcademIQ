@@ -592,37 +592,67 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             user_id, None
         ) and not has_synced_moodle_data(user_id)
 
-    out = []
-    from app.services.material_quiz_display import (
-        apply_course_material_visibility,
-        resolve_material_display,
-    )
+    docs = [
+        doc
+        for doc in material_repository.list_by_course(str(course_id))
+        if not (
+            apply_demo_name_filter
+            and enrolled_name
+            and _clean_course_name(doc.get("course_name"))
+            and _clean_course_name(doc.get("course_name")) != enrolled_name
+        )
+    ]
 
-    displays: List[Dict[str, Any]] = []
-    row_meta: List[tuple] = []
+    from app.services.material_quiz_display import resolve_quiz_material_display
 
-    for doc in material_repository.list_by_course(str(course_id)):
-        doc_name = _clean_course_name(doc.get("course_name"))
-        if apply_demo_name_filter and enrolled_name and doc_name and doc_name != enrolled_name:
+    displays, _meta = resolve_quiz_material_display(docs)
+    doc_by_id = {str(doc.get("material_id") or ""): doc for doc in docs}
+
+    out: List[Dict[str, Any]] = []
+    for display in displays:
+        mid = str(display.get("material_id") or "")
+        if display.get("missing_from_db"):
+            out.append({
+                "id": mid,
+                "title": display.get("title") or f"Lecture (not synced)",
+                "kind": "MISSING",
+                "hasContent": False,
+                "readyForQuiz": False,
+                "source": "missing_from_db",
+                "contentNote": display.get("quiz_status_reason"),
+                "extractionStatus": None,
+                "quizStatus": display["quiz_status"],
+                "quizStatusReason": display["quiz_status_reason"],
+                "isEducational": True,
+                "isNonQuizMaterial": False,
+                "contentTextLength": 0,
+                "quizGenerationEligible": False,
+                "visibleInMainList": True,
+                "visibleInOtherItems": False,
+                "sortGroup": display["sort_group"],
+                "sortNumber": display["sort_number"],
+                "sortLinkRank": 0,
+                "materialKind": display.get("material_kind"),
+                "materialNumber": display.get("material_number"),
+                "isLinkWrapper": False,
+                "hasRealFileSibling": False,
+                "questionCountPossible": 0,
+                "minQuestionsRequired": display.get("min_questions_required"),
+                "missingFromDb": True,
+            })
             continue
-
-        title = doc.get("title") or "Untitled"
+        doc = doc_by_id.get(mid)
+        if not doc:
+            continue
+        title = doc.get("title") or display.get("title") or "Untitled"
         raw_file_type = (doc.get("file_type") or doc.get("category") or "file")
-        display = resolve_material_display(doc)
-        display["material_id"] = str(doc.get("material_id") or "")
-        displays.append(display)
-        row_meta.append((doc, title, raw_file_type, display))
-
-    apply_course_material_visibility(displays)
-
-    for doc, title, raw_file_type, display in row_meta:
         quiz_ready = display["quiz_status"] == "ready"
         quiz_selectable = display["selectable"]
 
         out.append({
-            "id": str(doc.get("material_id") or ""),
+            "id": mid,
             "title": title,
-            "kind": raw_file_type.upper(),
+            "kind": str(raw_file_type).upper(),
             "hasContent": quiz_selectable,
             "readyForQuiz": quiz_ready,
             "source": _material_source(doc),
@@ -646,15 +676,6 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             "questionCountPossible": display.get("question_count_possible"),
             "minQuestionsRequired": display.get("min_questions_required"),
         })
-
-    out.sort(
-        key=lambda row: (
-            row.get("sortGroup") or 5,
-            row.get("sortNumber") or 9999,
-            row.get("sortLinkRank") or 0,
-            (row.get("title") or "").lower(),
-        )
-    )
     return out
 
 

@@ -269,6 +269,7 @@ export interface LearningMaterial {
   materialNumber?: number;
   isLinkWrapper?: boolean;
   hasRealFileSibling?: boolean;
+  missingFromDb?: boolean;
   questionCountPossible?: number;
   minQuestionsRequired?: number;
 }

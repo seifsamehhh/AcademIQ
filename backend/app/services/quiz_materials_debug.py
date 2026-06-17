@@ -100,10 +100,7 @@ def _material_quiz_status(doc: Dict[str, Any]) -> tuple[str, str | None]:
     return "ready", None
 
 
-from app.services.material_quiz_display import (
-    apply_course_material_visibility,
-    resolve_material_display,
-)
+from app.services.material_quiz_display import resolve_quiz_material_display
 
 
 # ── Per-course + per-material debug ─────────────────────────────────────────
@@ -147,20 +144,54 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
         "not_quiz_material": 0,
     }
 
-    displays: List[Dict[str, Any]] = []
-    doc_rows: List[tuple] = []
+    displays, course_meta = resolve_quiz_material_display(docs)
+    doc_by_id = {str(doc.get("material_id") or ""): doc for doc in docs}
 
-    for doc in docs:
-        display = resolve_material_display(doc)
-        display["material_id"] = str(doc.get("material_id") or "")
-        displays.append(display)
-        doc_rows.append((doc, display))
-
-    apply_course_material_visibility(displays)
-
-    for doc, display in doc_rows:
-        mid = str(doc.get("material_id") or "")
-        title = doc.get("title") or "Untitled"
+    for display in displays:
+        mid = str(display.get("material_id") or "")
+        if display.get("missing_from_db"):
+            quiz_status = display["quiz_status"]
+            status_counts[quiz_status] = status_counts.get(quiz_status, 0) + 1
+            materials_out.append({
+                "material_id": mid,
+                "title": display.get("title") or "Missing lecture",
+                "file_type": "missing",
+                "status": quiz_status,
+                "reason": display.get("reason"),
+                "source": "missing_from_db",
+                "content_text_length": 0,
+                "extraction_status": None,
+                "is_educational_material": True,
+                "is_non_quiz_material": False,
+                "can_reprocess": False,
+                "quiz_generation_eligible": False,
+                "ready_for_quiz": False,
+                "will_generate_successfully": False,
+                "why_not_ready": display.get("why_not_ready"),
+                "quiz_status": quiz_status,
+                "quiz_status_reason": display.get("quiz_status_reason"),
+                "material_kind": display.get("material_kind"),
+                "material_number": display.get("material_number"),
+                "is_link_wrapper": False,
+                "has_real_file_sibling": False,
+                "sort_group": display["sort_group"],
+                "sort_group_label": display.get("sort_group_label"),
+                "sort_number": display["sort_number"],
+                "sort_link_rank": 0,
+                "visible_in_main_list": True,
+                "visible_in_other_items": False,
+                "visible_in_quiz": True,
+                "selectable": False,
+                "probe_question_count": 0,
+                "question_count_possible": 0,
+                "min_questions_required": display.get("min_questions_required"),
+                "missing_from_db": True,
+            })
+            continue
+        doc = doc_by_id.get(mid)
+        if not doc:
+            continue
+        title = doc.get("title") or display.get("title") or "Untitled"
         file_type = (doc.get("file_type") or "unknown").lower()
         quiz_status = display["quiz_status"]
         quiz_status_reason = display["quiz_status_reason"]
@@ -178,7 +209,7 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
                 "title": title,
                 "file_type": file_type,
                 "status": quiz_status,
-                "reason": quiz_status_reason,
+                "reason": display.get("reason") or quiz_status_reason,
                 "source": doc.get("source") or doc.get("seed_source") or "unknown",
                 "content_text_length": display["content_text_length"],
                 "extraction_status": (doc.get("extraction_status") or None),
@@ -206,17 +237,9 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
                 "probe_question_count": display.get("probe_question_count"),
                 "question_count_possible": display.get("question_count_possible"),
                 "min_questions_required": display.get("min_questions_required"),
+                "missing_from_db": display.get("missing_from_db", False),
             }
         )
-
-    materials_out.sort(
-        key=lambda row: (
-            row["sort_group"],
-            row["sort_number"],
-            row.get("sort_link_rank", 0),
-            row["title"].lower(),
-        )
-    )
     visible_count = sum(1 for m in materials_out if m["visible_in_main_list"])
     selectable_count = sum(1 for m in materials_out if m["selectable"])
     educ_count = sum(1 for m in materials_out if m["is_educational_material"])
@@ -233,6 +256,11 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
         "course_name": course_name,
         "course_in_visible_synced_list": course_id in visible_course_ids if course_id else False,
         "visible_synced_course_ids": visible_course_ids,
+        "total_saved_materials": course_meta.get("total_saved_materials", len(materials_out)),
+        "main_list_count": course_meta.get("main_list_count", visible_count),
+        "other_items_count": course_meta.get("other_items_count", 0),
+        "missing_educational_count": course_meta.get("missing_educational_count", 0),
+        "missing_lecture_numbers": course_meta.get("missing_lecture_numbers", []),
         "total_materials": len(materials_out),
         "detected_materials_count": len(materials_out),
         "visible_in_quiz_count": visible_count,

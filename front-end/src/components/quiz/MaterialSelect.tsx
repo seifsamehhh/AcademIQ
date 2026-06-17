@@ -12,80 +12,12 @@ interface MaterialSelectProps {
   onToggle: (id: string) => void;
 }
 
-// ── Sorting (mirrors backend material_quiz_display.py) ───────────────────────
-
-const LECTURE_TYPE_RE = /\b(?:lecture|lec)(?:\s*#?\d|\b)/i;
-const LAB_TYPE_RE = /\blab(?:\s*#?\d|\b)/i;
-const REVISION_TYPE_RE = /\b(?:revision|review|summary)(?:\s*#?\d|\b)/i;
-const NOTES_TYPE_RE =
-  /\b(?:notes?|tutorials?|handouts?|slides?|worksheets?|chapters?|exercises?|modules?|week\b|problems?\b)/i;
-
-const LECTURE_NUM_RE = /\b(?:lecture|lec)\s*#?(\d+)/i;
-const LAB_NUM_RE = /\blab(?:\s+(?:assignment\s*)?)?\s*#?(\d+)/i;
-const REVISION_NUM_RE = /\b(?:revision|review|summary)\s*#?(\d+)/i;
-const CHAPTER_NUM_RE = /\bchapters?\s*#?(\d+)/i;
-const WEEK_NUM_RE = /\bweek\s*#?(\d+)/i;
-
-function extractMaterialNumber(title: string, sortGroup: number): number {
-  if (sortGroup === 0) {
-    const m = title.match(LECTURE_NUM_RE);
-    return m?.[1] ? parseInt(m[1], 10) : 9999;
-  }
-  if (sortGroup === 1) {
-    const m = title.match(LAB_NUM_RE);
-    return m?.[1] ? parseInt(m[1], 10) : 9999;
-  }
-  if (sortGroup === 2) {
-    const m = title.match(REVISION_NUM_RE);
-    return m?.[1] ? parseInt(m[1], 10) : 9999;
-  }
-  if (sortGroup === 3) {
-    for (const re of [CHAPTER_NUM_RE, WEEK_NUM_RE]) {
-      const m = title.match(re);
-      if (m?.[1]) return parseInt(m[1], 10);
-    }
-    return 9999;
-  }
-  return 9999;
-}
-
-function sortGroupLocal(m: LearningMaterial): number {
-  if (m.isNonQuizMaterial || m.quizStatus === "not_quiz_material") return 5;
-  const t = m.title;
-  if (LECTURE_TYPE_RE.test(t)) return 0;
-  if (LAB_TYPE_RE.test(t)) return 1;
-  if (REVISION_TYPE_RE.test(t)) return 2;
-  if (NOTES_TYPE_RE.test(t)) return 3;
-  return 4;
-}
-
-function sortGroup(m: LearningMaterial): number {
-  if (typeof m.sortGroup === "number") return m.sortGroup;
-  return sortGroupLocal(m);
-}
-
-function sortNumber(m: LearningMaterial): number {
-  const sg = sortGroup(m);
-  if (typeof m.materialNumber === "number" && m.materialNumber < 9999) {
-    return m.materialNumber;
-  }
-  if (typeof m.sortNumber === "number" && m.sortNumber < 9999) return m.sortNumber;
-  return extractMaterialNumber(m.title, sg);
-}
-
-function sortMaterials(list: LearningMaterial[]): LearningMaterial[] {
-  return [...list].sort((a, b) => {
-    const ga = sortGroup(a);
-    const gb = sortGroup(b);
-    if (ga !== gb) return ga - gb;
-    const na = sortNumber(a);
-    const nb = sortNumber(b);
-    if (na !== nb) return na - nb;
-    const lr = a.sortLinkRank ?? (a.isLinkWrapper ? 1 : 0);
-    const lrb = b.sortLinkRank ?? (b.isLinkWrapper ? 1 : 0);
-    if (lr !== lrb) return lr - lrb;
-    return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
-  });
+/** Backend returns materials pre-sorted; preserve that order when splitting lists. */
+function preserveApiOrder(
+  all: LearningMaterial[],
+  predicate: (m: LearningMaterial) => boolean,
+): LearningMaterial[] {
+  return all.filter(predicate);
 }
 
 function isMainListMaterial(m: LearningMaterial): boolean {
@@ -101,6 +33,7 @@ function isOtherMoodleItem(m: LearningMaterial): boolean {
 }
 
 function isSelectable(m: LearningMaterial): boolean {
+  if (m.missingFromDb) return false;
   if (m.quizStatus === "not_quiz_material") return false;
   if (m.quizStatus === "ready" || m.quizStatus === "limited_ready") {
     return m.quizGenerationEligible === true;
@@ -198,9 +131,8 @@ export function MaterialSelect({
 }: MaterialSelectProps) {
   const [showOther, setShowOther] = useState(false);
 
-  const sorted = sortMaterials(materials);
-  const mainList = sorted.filter(isMainListMaterial);
-  const otherItems = sorted.filter(isOtherMoodleItem);
+  const mainList = preserveApiOrder(materials, isMainListMaterial);
+  const otherItems = preserveApiOrder(materials, isOtherMoodleItem);
 
   return (
     <Card>

@@ -147,6 +147,7 @@ function QuizDebugPanel({
 const QUIZ_DEBUG = process.env.NEXT_PUBLIC_QUIZ_DEBUG === "true";
 
 function isMaterialSelectable(m: LearningMaterial): boolean {
+  if (m.missingFromDb) return false;
   if (m.quizStatus === "not_quiz_material") return false;
   if (m.quizStatus === "ready" || m.quizStatus === "limited_ready") {
     return m.quizGenerationEligible === true;
