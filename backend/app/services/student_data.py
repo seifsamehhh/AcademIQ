@@ -33,7 +33,11 @@ from app.services.moodle_course_display import (
 logger = logging.getLogger(__name__)
 
 _OVERALL = metrics_repository.OVERALL
-MIN_QUIZ_CONTENT_CHARS = 200
+MIN_QUIZ_CONTENT_CHARS = 600
+
+# Minimum chars for an educational material to be considered well-extracted.
+# Educational files below this threshold are offered for re-extraction.
+MIN_EDUCATIONAL_REPROCESS_CHARS = 1500
 
 # ── Non-quiz material detection ──────────────────────────────────────────────
 # Moodle activity types that are never educational reading content.
@@ -123,6 +127,52 @@ def _classify_non_quiz_material(
         return True, "File name suggests grades, marks, or attendance data"
 
     return False, None
+
+
+# Title keywords that positively identify educational learning content.
+_EDUCATIONAL_TITLE_RE = re.compile(
+    r"\b(?:"
+    r"lecture|lab\b|tutorial|notes?|slides?|handout|revision|chapter"
+    r"|worksheet|exercise|module|session|reading|lesson|study|material"
+    r"|week\s*\d+|class\s+material|course\s+material|introduction|topic"
+    r")\b",
+    re.I,
+)
+
+# File types that can contain educational text content.
+_EDUCATIONAL_FILE_TYPES: frozenset[str] = frozenset({
+    "pdf", "pptx", "ppt", "docx", "doc", "txt", "text",
+})
+
+
+def _is_educational_material(title: str, file_type: str) -> bool:
+    """
+    Return True when the material is likely educational lecture/lab/notes content.
+
+    A material is educational when it:
+    - Has a document file type (PDF, PPTX, DOCX, TXT), AND
+    - Is NOT classified as non-quiz (grades, admin, forums, etc.)
+    OR has an explicit educational keyword in the title.
+    """
+    ft = (file_type or "").lower().strip()
+
+    # Non-quiz activity types are never educational extractable content
+    if ft in _NON_QUIZ_ACTIVITY_TYPES or ft in _NON_QUIZ_FILE_EXTENSIONS:
+        return False
+
+    # Explicit non-quiz title → not educational
+    if _NON_QUIZ_TITLE_RE.search(title or ""):
+        return False
+
+    # Explicit educational keywords → definitely educational
+    if _EDUCATIONAL_TITLE_RE.search(title or ""):
+        return True
+
+    # Document file type without non-quiz signals → treat as educational
+    if ft in _EDUCATIONAL_FILE_TYPES:
+        return True
+
+    return False
 
 
 # Minimal recommendation text per heuristic risk factor (mirrors the v4 map).
@@ -536,11 +586,15 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             )
         elif len(content) < MIN_QUIZ_CONTENT_CHARS:
             quiz_ready = False
-            quiz_status = "too_short"
+            is_educ = _is_educational_material(title, raw_file_type)
+            quiz_status = "extraction_too_short" if is_educ else "too_short"
+            reprocess_hint = (
+                " Re-upload the file via the Chrome extension to re-extract with improved extractor."
+                if is_educ else " Re-upload a text-based PDF or PPTX."
+            )
             content_note = (
                 f"Only {len(content)} characters extracted "
-                f"(need at least {MIN_QUIZ_CONTENT_CHARS}). "
-                "Re-upload a text-based PDF or PPTX."
+                f"(need at least {MIN_QUIZ_CONTENT_CHARS}).{reprocess_hint}"
             )
         else:
             # Any material with sufficient extracted text is selectable.
@@ -554,7 +608,7 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             "title": title,
             "kind": raw_file_type.upper(),
             "hasContent": quiz_ready,
-            "readyForQuiz": bool(doc.get("ready_for_quiz", quiz_ready)),
+            "readyForQuiz": quiz_ready,
             "source": _material_source(doc),
             "contentNote": content_note,
             "extractionStatus": extraction_status or None,

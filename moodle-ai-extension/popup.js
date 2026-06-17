@@ -590,6 +590,7 @@ const formatQuizUploadSummary = ({
     alreadyReady = 0,
     alreadyClassified = 0,
     skippedExtractionFailed = 0,
+    reprocessing = 0,
     endpoint,
     extra = ""
 }) => {
@@ -609,6 +610,9 @@ const formatQuizUploadSummary = ({
         const rest = skippedExisting - alreadyReady - alreadyClassified - skippedExtractionFailed;
         if (rest > 0) detail.push(`${rest} other`);
         parts.push(`Skipped ${skippedExisting}${detail.length ? ` (${detail.join(", ")})` : ""}`);
+    }
+    if (reprocessing > 0) {
+        parts.push(`Re-extracting ${reprocessing} educational (too short)`);
     }
     if (uploaded > 0 || total > 0) {
         parts.push(`Uploaded ${uploaded}/${total}`);
@@ -680,6 +684,7 @@ const runQuizMaterialUpload = async () => {
     let alreadyReady = 0;
     let alreadyClassified = 0;
     let skippedExtractionFailed = 0;
+    let reprocessing = 0;
     let preflightChecked = 0;
     let dbFound = 0;
     let onlyMaterialIds = null; // null = upload everything (fallback if preflight fails)
@@ -737,6 +742,10 @@ const runQuizMaterialUpload = async () => {
         for (const item of (pf.data.materials || [])) {
             if (item.should_upload) {
                 onlyMaterialIds.push(String(item.material_id));
+                // Track re-extraction of educational files that were too short
+                if (item.status === "extraction_too_short") {
+                    reprocessing += 1;
+                }
             } else {
                 // "already_ready" — has extracted text
                 // "already_classified" / "already_processed" / "not_quiz_material" — non-quiz
@@ -774,6 +783,7 @@ const runQuizMaterialUpload = async () => {
                 alreadyReady,
                 alreadyClassified,
                 skippedExtractionFailed,
+                reprocessing,
                 endpoint: UPLOAD_QUIZ_URL
             });
             return;
@@ -781,7 +791,8 @@ const runQuizMaterialUpload = async () => {
 
         refs.uploadMeta.textContent =
             `DB: ${dbFound} saved · Uploading ${onlyMaterialIds.length}/${uploadable.length} ` +
-            `(${skippedExisting} already skipped)...`;
+            `(${skippedExisting} already skipped` +
+            (reprocessing > 0 ? `, ${reprocessing} re-extracting` : "") + `)...`;
     }
 
     // ── Step 3: download + upload only the filtered materials ─────────────────
@@ -809,6 +820,7 @@ const runQuizMaterialUpload = async () => {
             alreadyReady,
             alreadyClassified,
             skippedExtractionFailed,
+            reprocessing,
             endpoint: tabResult.backend_endpoint || UPLOAD_QUIZ_URL
         });
         return;
@@ -853,6 +865,7 @@ const runQuizMaterialUpload = async () => {
             alreadyReady,
             alreadyClassified,
             skippedExtractionFailed,
+            reprocessing,
             endpoint: UPLOAD_QUIZ_URL,
             extra: "Fallback: stored materials"
         });

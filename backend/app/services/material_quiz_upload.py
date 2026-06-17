@@ -11,7 +11,12 @@ from typing import Any, Dict, List, Optional
 from app.models.material import build_material_doc, stable_material_id
 from app.repositories import material_repository, user_repository
 from app.services.material_text_extract import extract_text_from_bytes
-from app.services.student_data import MIN_QUIZ_CONTENT_CHARS, _classify_non_quiz_material
+from app.services.student_data import (
+    MIN_QUIZ_CONTENT_CHARS,
+    MIN_EDUCATIONAL_REPROCESS_CHARS,
+    _classify_non_quiz_material,
+    _is_educational_material,
+)
 
 
 _TITLE_STOP_WORDS = {"the", "a", "an", "and", "or", "for", "of", "to", "in", "is", "on", "at", "by"}
@@ -306,7 +311,6 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             continue
 
         # ── C: Determine skip/upload decision from existing record ───────────
-        # Rule: ANY existing record = skip. Re-upload only when force_reupload=True.
         existing_status = existing_doc.get("extraction_status") or ""
         existing_text = (existing_doc.get("content_text") or "").strip()
         existing_chars = (
@@ -314,30 +318,56 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             if existing_text
             else int(existing_doc.get("content_chars") or 0)
         )
-        existing_ready = bool(existing_doc.get("ready_for_quiz"))
 
         # Statuses that mean the material was processed and is usable for quizzes
         _READY_STATUSES = {"success", "ready", "ready_for_quiz", "extracted"}
-        # Statuses that mean the material was processed but cannot generate quizzes
+        # Statuses that mean the material was definitively classified as non-quiz
+        # or confirmed extraction failure — don't offer for re-upload
         _CLASSIFIED_STATUSES = {
             "not_quiz_material", "too_short", "insufficient_quiz_structure",
             "unsupported", "extraction_failed", "failed", "no_text",
             "not_educational", "admin_file", "folder", "assignment",
             "grades", "project_requirements",
+            # After one re-extraction attempt that still yielded too little text:
+            "insufficient_text",
         }
 
+        # Determine whether to allow re-upload
+        is_educ = _is_educational_material(title, raw_file_type)
+
         if force_reupload:
-            # Honour explicit force_reupload only for failed/empty records
             should_reupload = existing_status in _CLASSIFIED_STATUSES and existing_chars == 0
+        elif existing_chars >= MIN_EDUCATIONAL_REPROCESS_CHARS:
+            # Well-extracted — always skip regardless of material type
+            should_reupload = False
+        elif existing_chars >= MIN_QUIZ_CONTENT_CHARS and not is_educ:
+            # Non-educational with enough text — skip
+            should_reupload = False
+        elif existing_status in _CLASSIFIED_STATUSES:
+            # Definitively classified — skip (re-extraction confirmed it's too short/non-quiz)
+            should_reupload = False
+        elif existing_chars > 0 and existing_chars < MIN_QUIZ_CONTENT_CHARS:
+            # Has content but below usable threshold — allow re-extraction
+            # (catches old records that were marked "success" under the old 200-char threshold)
+            should_reupload = True
+        elif is_educ and existing_chars < MIN_EDUCATIONAL_REPROCESS_CHARS:
+            # Educational material below quality threshold — offer improved re-extraction
+            should_reupload = True
         else:
             should_reupload = False
 
-        if existing_ready or existing_chars >= MIN_QUIZ_CONTENT_CHARS or existing_status in _READY_STATUSES:
+        if existing_chars >= MIN_QUIZ_CONTENT_CHARS and existing_status in _READY_STATUSES:
             out_status = "already_ready"
             reason = f"Already has {existing_chars} chars of extracted text"
         elif existing_status in _CLASSIFIED_STATUSES:
             out_status = "already_classified"
             reason = existing_doc.get("extraction_error") or f"Classified: {existing_status}"
+        elif should_reupload:
+            out_status = "extraction_too_short"
+            reason = (
+                f"Only {existing_chars} chars (status={existing_status or 'none'}) — "
+                f"re-extraction recommended (min reliable: {MIN_EDUCATIONAL_REPROCESS_CHARS})"
+            )
         else:
             out_status = "already_processed"
             reason = f"Record exists in DB (status={existing_status or 'none'})"
@@ -518,16 +548,22 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
             "inserted": True,
         }
 
-    # ── Step 2: caching — skip re-extraction if already processed ────────────
+    # ── Step 2: caching — skip re-extraction if already well-extracted ────────
     existing_doc = material_repository.get(course_id, material_id)
     if existing_doc:
         existing_status = existing_doc.get("extraction_status") or ""
         existing_text = (existing_doc.get("content_text") or "").strip()
         existing_chars = len(existing_text)
+        is_educ = _is_educational_material(title, str(file_type))
 
-        if existing_chars >= MIN_QUIZ_CONTENT_CHARS:
-            # Already has enough content — skip re-extraction entirely
-            already_ready = bool(existing_doc.get("ready_for_quiz", True))
+        # Skip only when content is reliably sufficient OR material is non-educational
+        skip_for_good_content = (
+            existing_chars >= MIN_EDUCATIONAL_REPROCESS_CHARS
+            or (existing_chars >= MIN_QUIZ_CONTENT_CHARS and not is_educ)
+        )
+
+        if skip_for_good_content:
+            already_ready = existing_chars >= MIN_QUIZ_CONTENT_CHARS
             return {
                 "status": "skipped_existing",
                 "already_ready": already_ready,
@@ -570,6 +606,7 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
                     ),
                     "inserted": False,
                 }
+        # For educational materials with insufficient content — fall through to re-extract
 
     # ── Extract text ─────────────────────────────────────────────────────────
     text = (payload.get("content_text") or "").strip()
@@ -608,13 +645,14 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         extraction_status = "no_content"
         ready_for_quiz = False
     elif chars < MIN_QUIZ_CONTENT_CHARS:
+        # Confirmed too-short after extraction — stored as "insufficient_text" so
+        # subsequent preflights classify it as "already_classified" and stop re-uploading.
         extraction_status = "insufficient_text"
         extraction_error = extraction_error or (
             f"Extracted only {chars} characters; need at least {MIN_QUIZ_CONTENT_CHARS}."
         )
         ready_for_quiz = False
     else:
-        # Any material with enough extracted text is selectable for quiz generation.
         extraction_status = "success"
         extraction_error = None
         ready_for_quiz = True

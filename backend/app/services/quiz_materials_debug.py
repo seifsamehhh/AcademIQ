@@ -10,7 +10,9 @@ from app.repositories import material_repository, user_repository
 from app.services.moodle_course_display import get_visible_synced_courses_for_user
 from app.services.student_data import (
     MIN_QUIZ_CONTENT_CHARS,
+    MIN_EDUCATIONAL_REPROCESS_CHARS,
     _classify_non_quiz_material,
+    _is_educational_material,
     get_materials,
 )
 
@@ -30,11 +32,12 @@ def _material_quiz_status(doc: Dict[str, Any]) -> tuple[str, str | None]:
     Return (quiz_status, quiz_status_reason) for a raw MongoDB material doc.
 
     Status values:
-      ready              — has enough extracted text, selectable for quiz
-      not_uploaded       — no content_text stored yet
-      extraction_failed  — extraction attempted but failed
-      too_short          — extracted text < MIN_QUIZ_CONTENT_CHARS
-      not_quiz_material  — activity type / title / extension is non-educational
+      ready                 — has enough extracted text, selectable for quiz
+      not_uploaded          — no content_text stored yet
+      extraction_failed     — extraction attempted but failed
+      extraction_too_short  — educational material with < MIN_QUIZ_CONTENT_CHARS chars
+      too_short             — non-educational material with < MIN_QUIZ_CONTENT_CHARS chars
+      not_quiz_material     — activity type / title / extension is non-educational
     """
     title = doc.get("title") or ""
     file_type = (doc.get("file_type") or doc.get("category") or "")
@@ -53,6 +56,12 @@ def _material_quiz_status(doc: Dict[str, Any]) -> tuple[str, str | None]:
     if not content and length == 0:
         return "not_uploaded", "No content_text stored yet"
     if length < MIN_QUIZ_CONTENT_CHARS:
+        is_educ = _is_educational_material(title, file_type)
+        if is_educ:
+            return "extraction_too_short", (
+                f"Only {length} chars — educational material needs re-extraction "
+                f"(min: {MIN_QUIZ_CONTENT_CHARS})"
+            )
         return "too_short", f"Only {length} chars (need ≥ {MIN_QUIZ_CONTENT_CHARS})"
 
     return "ready", None
@@ -91,6 +100,7 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
         "ready": 0,
         "not_uploaded": 0,
         "extraction_failed": 0,
+        "extraction_too_short": 0,
         "too_short": 0,
         "not_quiz_material": 0,
     }
@@ -98,19 +108,33 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
     for doc in docs:
         mid = str(doc.get("material_id") or "")
         length = _content_length(doc)
+        file_type = (doc.get("file_type") or "unknown").lower()
+        title = doc.get("title") or "Untitled"
         quiz_status, quiz_status_reason = _material_quiz_status(doc)
         status_counts[quiz_status] = status_counts.get(quiz_status, 0) + 1
+
+        is_non_quiz, _ = _classify_non_quiz_material(title, file_type)
+        is_educ = _is_educational_material(title, file_type)
+        # Can reprocess: educational with insufficient chars that are not confirmed-failed
+        can_reprocess = (
+            is_educ
+            and quiz_status in ("extraction_too_short", "too_short", "not_uploaded")
+            and doc.get("extraction_status") not in ("extraction_failed", "insufficient_text")
+        )
 
         materials_out.append(
             {
                 "material_id": mid,
-                "title": doc.get("title") or "Untitled",
-                "file_type": (doc.get("file_type") or "unknown").lower(),
+                "title": title,
+                "file_type": file_type,
                 "source": doc.get("source") or doc.get("seed_source") or "unknown",
                 "content_text_length": length,
-                "quiz_generation_eligible": quiz_status == "ready",
-                "ready_for_quiz": bool(doc.get("ready_for_quiz")) if doc.get("ready_for_quiz") is not None else (quiz_status == "ready"),
                 "extraction_status": (doc.get("extraction_status") or None),
+                "is_educational_material": is_educ,
+                "is_non_quiz_material": is_non_quiz,
+                "can_reprocess": can_reprocess,
+                "quiz_generation_eligible": quiz_status == "ready",
+                "ready_for_quiz": quiz_status == "ready",
                 "quiz_status": quiz_status,
                 "quiz_status_reason": quiz_status_reason,
             }
@@ -138,15 +162,20 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
         "not_uploaded_count": status_counts.get("not_uploaded", 0),
         "not_quiz_material_count": status_counts.get("not_quiz_material", 0),
         "extraction_failed_count": status_counts.get("extraction_failed", 0),
+        "extraction_too_short_count": status_counts.get("extraction_too_short", 0),
         "too_short_count": status_counts.get("too_short", 0),
         "status_counts": status_counts,
         "min_quiz_content_chars": MIN_QUIZ_CONTENT_CHARS,
+        "min_educational_reprocess_chars": MIN_EDUCATIONAL_REPROCESS_CHARS,
         "materials": materials_out,
         "hint": (
-            "quiz_status='ready' means the material has enough extracted text "
-            "and will be selectable in the Quiz Generation page. "
-            "'not_quiz_material' = grades/admin/forum type; "
-            "'not_uploaded' = listed from Moodle but not processed yet."
+            "quiz_status='ready' = selectable for quiz. "
+            "'extraction_too_short' = educational file with too little extracted text — "
+            "re-upload via Chrome extension to re-extract with improved extractor. "
+            "'not_quiz_material' = grades/admin/forum type (never selectable). "
+            "'not_uploaded' = listed from Moodle but not processed yet. "
+            f"min_quiz_content_chars={MIN_QUIZ_CONTENT_CHARS}, "
+            f"min_educational_reprocess_chars={MIN_EDUCATIONAL_REPROCESS_CHARS}."
         ),
     }
 
@@ -189,6 +218,7 @@ def debug_course_material_coverage(email: str) -> Dict[str, Any]:
             "ready": 0,
             "not_uploaded": 0,
             "extraction_failed": 0,
+            "extraction_too_short": 0,
             "too_short": 0,
             "not_quiz_material": 0,
         }
@@ -197,17 +227,27 @@ def debug_course_material_coverage(email: str) -> Dict[str, Any]:
         for doc in docs:
             mid = str(doc.get("material_id") or "")
             length = _content_length(doc)
+            _ft = (doc.get("file_type") or "unknown").lower()
+            _title = doc.get("title") or "Untitled"
             quiz_status, quiz_status_reason = _material_quiz_status(doc)
             status_counts[quiz_status] = status_counts.get(quiz_status, 0) + 1
+            is_educ = _is_educational_material(_title, _ft)
+            can_reprocess = (
+                is_educ
+                and quiz_status in ("extraction_too_short", "too_short", "not_uploaded")
+                and doc.get("extraction_status") not in ("extraction_failed", "insufficient_text")
+            )
 
             materials_list.append({
                 "material_id": mid,
-                "title": doc.get("title") or "Untitled",
-                "file_type": (doc.get("file_type") or "unknown").lower(),
+                "title": _title,
+                "file_type": _ft,
                 "content_text_length": length,
+                "extraction_status": (doc.get("extraction_status") or None),
+                "is_educational_material": is_educ,
+                "can_reprocess": can_reprocess,
                 "quiz_status": quiz_status,
                 "quiz_status_reason": quiz_status_reason,
-                "extraction_status": (doc.get("extraction_status") or None),
             })
 
         materials_list.sort(
