@@ -296,26 +296,13 @@ def _apply_link_wrapper_visibility(displays: List[Dict[str, Any]]) -> None:
             d["material_kind"] = "other_moodle_item"
 
 
-def _lecture_numbers_present(displays: List[Dict[str, Any]]) -> Set[int]:
-    """Lecture numbers backed by a saved MongoDB row (any educational title match)."""
+def _detect_missing_lecture_numbers(displays: List[Dict[str, Any]]) -> List[int]:
     nums: Set[int] = set()
     for d in displays:
-        if d.get("missing_from_db"):
-            continue
-        title = d.get("title") or ""
-        if not _LECTURE_TYPE_RE.search(title):
-            continue
-        m = _LECTURE_NUM_RE.search(title)
-        if not m:
-            continue
-        n = int(m.group(1))
-        if n < 9999:
-            nums.add(n)
-    return nums
-
-
-def _detect_missing_lecture_numbers(displays: List[Dict[str, Any]]) -> List[int]:
-    nums = _lecture_numbers_present(displays)
+        if d.get("material_kind") in ("lecture", "lecture_link"):
+            n = d.get("material_number")
+            if n is not None and n < 9999:
+                nums.add(n)
     if len(nums) < 2:
         return []
     lo, hi = min(nums), max(nums)
@@ -369,11 +356,6 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
     sort_link_rank = 1 if is_link_wrapper else 0
     sort_group = _KIND_SORT_GROUP.get(material_kind, 5)
     is_educ = is_educational_material(title, raw_file_type) if not is_non_quiz else False
-    metadata_only = bool(doc.get("metadata_only")) or (
-        not is_non_quiz
-        and _material_stored_content_length(doc) == 0
-        and raw_file_type in _LINK_FILE_TYPES
-    )
 
     base: Dict[str, Any] = {
         "material_id": material_id,
@@ -394,8 +376,6 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
         "question_count_possible": 0,
         "min_questions_required": MIN_LIMITED_QUESTIONS,
         "missing_from_db": False,
-        "metadata_only": metadata_only,
-        "source_url": doc.get("url") or doc.get("source_url") or doc.get("resolved_url"),
     }
 
     if is_non_quiz or not is_educ:
@@ -437,13 +417,8 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
     elif content_len == 0 and extraction_status not in _PROCESSED_EXTRACTION_STATUSES:
         quiz_status = "not_uploaded"
         content_note = (
-            doc.get("extraction_error")
-            or (
-                "No readable text extracted yet."
-                if metadata_only
-                else "No readable text extracted yet. "
-                "Use the Chrome extension → 'Upload materials for quiz' on the Moodle course page."
-            )
+            "No readable text extracted yet. "
+            "Use the Chrome extension → 'Upload materials for quiz' on the Moodle course page."
         )
     elif content_len == 0 and extraction_status in _PROCESSED_EXTRACTION_STATUSES:
         quiz_status = "extraction_failed"
@@ -563,7 +538,7 @@ def resolve_quiz_material_display(
     other_count = sum(1 for d in displays if d.get("visible_in_other_items"))
 
     meta = {
-        "total_saved_materials": len(materials),
+        "total_saved_materials": len(displays),
         "main_list_count": main_count,
         "other_items_count": other_count,
         "missing_educational_count": len(missing_lectures),

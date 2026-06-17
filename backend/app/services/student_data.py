@@ -656,7 +656,6 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             "hasContent": quiz_selectable,
             "readyForQuiz": quiz_ready,
             "source": _material_source(doc),
-            "sourceUrl": doc.get("url") or doc.get("resolved_url"),
             "contentNote": display["quiz_status_reason"],
             "extractionStatus": (doc.get("extraction_status") or None),
             "quizStatus": display["quiz_status"],
@@ -676,8 +675,6 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             "hasRealFileSibling": display.get("has_real_file_sibling", False),
             "questionCountPossible": display.get("question_count_possible"),
             "minQuestionsRequired": display.get("min_questions_required"),
-            "metadataOnly": bool(display.get("metadata_only") or doc.get("metadata_only")),
-            "missingFromDb": False,
         })
     return out
 
