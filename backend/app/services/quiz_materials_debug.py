@@ -244,6 +244,13 @@ def debug_quiz_materials_for_email(email: str, course_id: str) -> Dict[str, Any]
                 "min_questions_required": display.get("min_questions_required"),
                 "missing_from_db": display.get("missing_from_db", False),
                 "can_reprocess": can_reprocess,
+                "content_text_length": display.get("content_text_length"),
+                "cleaned_text_length": display.get("cleaned_text_length"),
+                "educational_line_count": display.get("educational_line_count"),
+                "bullet_line_count": display.get("bullet_line_count"),
+                "concept_candidate_count": display.get("concept_candidate_count"),
+                "probe_failure_reason": display.get("probe_failure_reason"),
+                "why_not_ready": display.get("why_not_ready"),
             }
         )
     visible_count = sum(1 for m in materials_out if m["visible_in_main_list"])

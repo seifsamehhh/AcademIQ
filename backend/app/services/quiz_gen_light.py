@@ -595,14 +595,14 @@ def generate_lightweight(text: str, num_questions: int = 8) -> List[Dict[str, An
     extracted definition pairs or from sentence fragments in the same content.
     No hardcoded or generic distractors are used.
     """
-    from app.services.quiz_material_eligibility import normalize_quiz_text
+    from app.services.quiz_material_eligibility import prepare_quiz_generation_text
 
-    normalized = normalize_quiz_text(text)
-    if not normalized:
+    prepared = prepare_quiz_generation_text(text)
+    if not prepared:
         logger.warning("Lightweight quiz gen: empty text")
         return []
 
-    pairs = extract_definitions(normalized)
+    pairs = extract_definitions(prepared)
     logger.info("Lightweight quiz gen: extracted %d definition pairs", len(pairs))
 
     if len(pairs) < 3:
@@ -610,7 +610,7 @@ def generate_lightweight(text: str, num_questions: int = 8) -> List[Dict[str, An
         return []
 
     # Extract sentence fragments from the same material for fallback distractors
-    material_sentences = _extract_material_sentences(normalized)
+    material_sentences = _extract_material_sentences(re.sub(r"\s+", " ", prepared))
     logger.debug("Lightweight quiz gen: %d material sentence fragments", len(material_sentences))
 
     target = max(_MIN_QUESTIONS, min(num_questions, len(pairs)))

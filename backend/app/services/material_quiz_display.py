@@ -520,7 +520,7 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
         )
         will_generate = quiz_status in ("ready", "limited_ready")
         if not will_generate:
-            why_not_ready = content_note
+            why_not_ready = content_note or eligibility_meta.get("probe_failure_reason")
 
     selectable = quiz_status in ("ready", "limited_ready")
 
@@ -548,9 +548,19 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
                 "lecture_concept_count",
                 "definition_pair_count",
                 "total_concepts",
+                "concept_candidate_count",
+                "cleaned_text_length",
+                "educational_line_count",
+                "bullet_line_count",
+                "probe_failure_reason",
             )
             if eligibility_meta.get(k) is not None
         },
+        "probe_failure_reason": eligibility_meta.get("probe_failure_reason"),
+        "cleaned_text_length": eligibility_meta.get("cleaned_text_length"),
+        "educational_line_count": eligibility_meta.get("educational_line_count"),
+        "bullet_line_count": eligibility_meta.get("bullet_line_count"),
+        "concept_candidate_count": eligibility_meta.get("concept_candidate_count"),
     }
 
 

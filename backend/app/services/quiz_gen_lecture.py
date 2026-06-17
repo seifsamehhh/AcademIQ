@@ -201,6 +201,52 @@ def extract_concept_groups(
     return groups
 
 
+_SLIDE_MARKER_RE = re.compile(r"^\[Slide\s+\d+\]$", re.I)
+
+
+def _extract_slide_section_groups(structured_text: str) -> List[Tuple[str, List[str]]]:
+    """
+    Slide PDF/PPTX chunks often look like:
+      [Slide 3]
+      Histogram Equalization
+      Increases global contrast
+      Uses cumulative distribution
+    """
+    lines = [l.strip() for l in structured_text.splitlines() if l.strip()]
+    groups: List[Tuple[str, List[str]]] = []
+    seen_topics: Set[str] = set()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if _SLIDE_MARKER_RE.match(line):
+            i += 1
+            continue
+        if 3 <= len(line) <= 72 and len(line.split()) <= 10:
+            title = line.rstrip(":").strip()
+            topic_key = title.lower()
+            if topic_key in seen_topics:
+                i += 1
+                continue
+            items: List[str] = []
+            j = i + 1
+            while j < len(lines):
+                candidate = lines[j]
+                if _SLIDE_MARKER_RE.match(candidate):
+                    break
+                if len(candidate.split()) > 14 or len(candidate) > 140:
+                    break
+                if len(candidate.split()) >= 1 and len(candidate) >= 3:
+                    items.append(candidate)
+                j += 1
+            if len(items) >= 2:
+                seen_topics.add(topic_key)
+                groups.append((title, items))
+                i = j
+                continue
+        i += 1
+    return groups
+
+
 # ─────────────────────────── MCQ Building ───────────────────────────────────
 
 def _format_option(text: str) -> str:
@@ -344,7 +390,12 @@ def count_lecture_concepts(text: str) -> int:
     Quick count of extractable lecture concepts (for eligibility checks).
     Does not build full MCQs — fast probe only.
     """
-    structured = clean_lecture_text(text)
+    from app.services.quiz_material_eligibility import prepare_quiz_generation_text
+
+    prepared = prepare_quiz_generation_text(text)
+    if not prepared:
+        return 0
+    structured = clean_lecture_text(prepared)
     blob = re.sub(r"\s+", " ", structured)
 
     seen: Set[str] = set()
@@ -352,7 +403,7 @@ def count_lecture_concepts(text: str) -> int:
     _extract_arrow_pairs(blob, seen, pairs)
 
     groups = extract_concept_groups(structured)
-    # Each group with ≥2 items contributes at least 1 quizzable concept
+    groups.extend(_extract_slide_section_groups(structured))
     group_concepts = sum(1 for _, items in groups if len(items) >= 2)
 
     return len(pairs) + group_concepts
@@ -369,13 +420,13 @@ def generate_lecture_quiz(text: str, num_questions: int = 8) -> List[Dict[str, A
 
     Returns [] when there is truly not enough structured content.
     """
-    from app.services.quiz_material_eligibility import normalize_quiz_text
+    from app.services.quiz_material_eligibility import prepare_quiz_generation_text
 
-    normalized = normalize_quiz_text(text)
-    if not normalized:
+    prepared = prepare_quiz_generation_text(text)
+    if not prepared:
         return []
 
-    structured = clean_lecture_text(normalized)
+    structured = clean_lecture_text(prepared)
     blob = re.sub(r"\s+", " ", structured)
 
     # ── Extract concept pairs ──────────────────────────────────────────────
@@ -383,10 +434,10 @@ def generate_lecture_quiz(text: str, num_questions: int = 8) -> List[Dict[str, A
     pairs: List[Tuple[str, str]] = []
     _extract_arrow_pairs(blob, seen, pairs)
 
-    # Also pull any definition pairs from the lightweight extractor
+    # Also pull definition pairs from the same prepared slide text
     try:
         from app.services.quiz_gen_light import extract_definitions, _extract_material_sentences
-        for concept, definition in extract_definitions(text):
+        for concept, definition in extract_definitions(prepared):
             _add_pair(pairs, seen, concept, definition)
         material_sentences: List[str] = _extract_material_sentences(blob)
     except Exception:
@@ -394,6 +445,7 @@ def generate_lecture_quiz(text: str, num_questions: int = 8) -> List[Dict[str, A
 
     # ── Extract concept groups ─────────────────────────────────────────────
     groups = extract_concept_groups(structured)
+    groups.extend(_extract_slide_section_groups(structured))
 
     logger.info(
         "Lecture quiz gen: %d concept pairs, %d concept groups",

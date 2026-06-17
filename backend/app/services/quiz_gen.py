@@ -197,8 +197,8 @@ def generate_questions(text: str, num_questions: int = 5) -> Tuple[List[Dict[str
     # Deep-clean: removes emails, ToC lines, name headers, page numbers while
     # PRESERVING newlines so line-aware engines still work correctly.
     try:
-        from app.services.quiz_material_eligibility import deep_clean_quiz_text
-        text = deep_clean_quiz_text(text)
+        from app.services.quiz_material_eligibility import prepare_quiz_generation_text
+        text = prepare_quiz_generation_text(text)
     except Exception:
         pass
 
