@@ -126,22 +126,30 @@ def _build_fallback_context_text(
     Build the combined text for a course-context fallback quiz generation.
     Returns (combined_text, ctx_ids, ctx_titles, selection_reason).
 
-    Diversification strategy — prevents adjacent weak lectures (Lecture 1,
-    Lecture 2, Lecture 3) from all producing the same quiz:
+    Diversification strategy (why Lecture 1 and Lecture 2 produce different Q):
 
-    1. Rank all candidates by relevance to the selected material.
-    2. Apply a lecture-number rotation within the top candidates so that each
-       lecture number naturally picks from a slightly different position in the
-       ranked list.  Lecture 1 → starts at index 1, Lecture 2 → index 2, etc.
-    3. For each selected context material, extract a DIFFERENT WINDOW of its
-       text based on the lecture number:
-         window_start = (lecture_num * 700) % max(1, full_len - 2800)
-       Lecture 1 and Lecture 2 using the same context material will therefore
-       see different paragraphs and different extracted concepts → different Q.
-    4. Repeat the selected material's own text twice when it is short (<1 000
-       chars) so its concepts get higher "density" in the generator's input,
-       making the output more topic-grounded.
+    1. Rank candidates by relevance (title overlap, number proximity, keyword
+       overlap, same material type).
+    2. For each slot (0, 1, 2 …) pick the candidate at index
+         (lecture_num + slot) % n_candidates
+       so adjacent lectures use a DIFFERENT primary context material.
+       Lecture 1 slot-0 = candidate[1], Lecture 2 slot-0 = candidate[2], etc.
+    3. For each chosen context material, extract a NON-OVERLAPPING chunk:
+         CHUNK = 2 200 chars
+         n_chunks = full_len // CHUNK   (e.g., 8 000 chars → 3 chunks)
+         chunk_idx = (lecture_num + slot) % n_chunks
+         w_start = chunk_idx * CHUNK
+       With CHUNK=2 200 and shift per lecture, Lecture 1 sees chars 0–2200,
+       Lecture 2 sees chars 2200–4400, Lecture 3 sees chars 4400–6600 — zero
+       overlap.  Different chunks → different concepts → different questions.
+    4. Repeat selected-material text once when it is short (<800 chars) to give
+       its concepts higher density relative to the context block.
     """
+    # Chunk size for non-overlapping context windows.
+    # Keep at 1 400 so that any material with ≥ 2 800 chars produces 2+ distinct
+    # chunks, ensuring adjacent weak lectures see different input text.
+    CHUNK = 1_400
+
     if not edu_candidates:
         return "", [], [], "no_candidates"
 
@@ -150,52 +158,35 @@ def _build_fallback_context_text(
         for doc in edu_candidates
     ]
     scored.sort(key=lambda x: x[1], reverse=True)
-
-    # ── Rotation within the candidate pool ───────────────────────────────────
     n = len(scored)
-    high_rel = [(d, s) for d, s in scored if s >= 0.20]
-    low_rel  = [(d, s) for d, s in scored if s < 0.20]
-
-    if len(high_rel) >= max_ctx:
-        # Rotate within high-relevance tier by lecture number
-        offset = lecture_num % len(high_rel)
-        ordered = [high_rel[(i + offset) % len(high_rel)] for i in range(len(high_rel))]
-    elif high_rel:
-        # Some high-rel + fill from low-rel with rotation
-        offset = lecture_num % max(1, len(low_rel))
-        low_rotated = [low_rel[(i + offset) % len(low_rel)] for i in range(len(low_rel))]
-        ordered = high_rel + low_rotated
-    else:
-        offset = lecture_num % max(1, n)
-        ordered = [scored[(i + offset) % n] for i in range(n)]
-
-    selected_docs = [doc for doc, _ in ordered[:max_ctx]]
 
     # ── Build combined text ───────────────────────────────────────────────────
     parts: List[str] = []
 
-    # Topic anchor – helps rule-based generators tag this as the focal topic
+    # 3× title anchor boosts concept-density for rule-based extractor
     if sel_title:
-        parts.append(
-            f"{sel_title}\n{sel_title}\n{sel_title}"
-        )
+        parts.append(f"{sel_title}\n{sel_title}\n{sel_title}")
 
-    # Selected material text (boost: repeat if short to raise concept density)
+    # Selected material text (primary content, even if short)
     if sel_text:
         header = sel_title or "Selected Material"
         parts.append(f"# {header}\n{sel_text}")
-        if len(sel_text) < 1_000:
-            parts.append(f"# {header} (continued)\n{sel_text}")
+        if len(sel_text) < 800:
+            # Repeat once so its concepts appear twice → extractor prioritises them
+            parts.append(f"# {header} (key points)\n{sel_text}")
 
-    # Context materials with lecture-number windowing
     ctx_ids: List[str] = []
     ctx_titles: List[str] = []
     total_ctx = 0
-    window_size = 2_800
 
-    for doc in selected_docs:
+    for slot in range(max_ctx):
         if total_ctx >= ctx_cap:
             break
+
+        # Pick a DIFFERENT material for each lecture+slot combo
+        mat_idx = (lecture_num + slot) % n
+        doc, rel_score = scored[mat_idx]
+
         full_text = (doc.get("content_text") or "").strip()
         if not full_text:
             continue
@@ -203,12 +194,14 @@ def _build_fallback_context_text(
         ctx_title = doc.get("title") or "Course material"
         full_len = len(full_text)
 
-        # Different lecture numbers access different windows of the same material
-        if full_len > window_size:
-            w_start = (lecture_num * 700) % max(1, full_len - window_size)
-            ctx_text = full_text[w_start: w_start + window_size]
-            if len(ctx_text) < 400:  # edge case: window too close to end
-                ctx_text = full_text[:window_size]
+        # Non-overlapping chunk selection per lecture number + slot
+        if full_len > CHUNK:
+            n_chunks = max(1, full_len // CHUNK)
+            chunk_idx = (lecture_num + slot) % n_chunks
+            w_start = chunk_idx * CHUNK
+            ctx_text = full_text[w_start: w_start + CHUNK]
+            if len(ctx_text) < 300:  # edge: last tiny chunk → use first chunk
+                ctx_text = full_text[:CHUNK]
         else:
             ctx_text = full_text
 
@@ -222,9 +215,13 @@ def _build_fallback_context_text(
         total_ctx += len(ctx_text)
 
     combined = "\n\n".join(parts)
+    chunk_offsets = [
+        f"slot{s}:mat{(lecture_num+s)%n}@chunk{(lecture_num+s)%max(1, len((scored[(lecture_num+s)%n][0].get('content_text') or '')) // CHUNK)}"
+        for s in range(min(max_ctx, n))
+    ]
     reason = (
-        f"lecture_num={lecture_num} offset={lecture_num % max(1, n)} "
-        f"window_start={lecture_num * 700} "
+        f"lecture_num={lecture_num} n_candidates={n} "
+        f"chunk_size={CHUNK} slots=[{', '.join(chunk_offsets)}] "
         f"context=[{', '.join(ctx_titles)}]"
     )
     return combined, ctx_ids, ctx_titles, reason

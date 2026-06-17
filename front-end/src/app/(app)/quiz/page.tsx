@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Loader2, Sparkles } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, Sparkles } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Course, GeneratedQuiz, LearningMaterial } from "@/lib/types";
 import { CourseSelect } from "@/components/common/CourseSelect";
@@ -10,6 +10,123 @@ import { MaterialSelect } from "@/components/quiz/MaterialSelect";
 import { QuizView } from "@/components/quiz/QuizView";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+
+// ── Debug panel (only rendered when NEXT_PUBLIC_QUIZ_DEBUG=true) ──────────────
+
+function sortGroupLabel(m: LearningMaterial): string {
+  if (m.quizStatus === "not_quiz_material") return "5-NonQuiz";
+  const t = (m.title || "").toLowerCase();
+  if (/\blecture|\blec\s*\d/i.test(t)) return "0-Lecture";
+  if (/\blab\b|\blab\s*\d/i.test(t)) return "1-Lab";
+  if (/\b(revision|review|summary)\b/i.test(t)) return "2-Revision";
+  if (/\b(notes?|tutorial|handout|slides?|worksheet|chapter|exercise|module)\b/i.test(t)) return "3-Notes";
+  return "4-Other";
+}
+
+function extractNumDbg(s: string): number {
+  const m = s.match(/\d+/);
+  return m ? parseInt(m[0], 10) : 9999;
+}
+
+function QuizDebugPanel({
+  courseId,
+  materials,
+  quiz,
+}: {
+  courseId: string;
+  materials: LearningMaterial[] | null;
+  quiz: GeneratedQuiz | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const apiUrl = `/courses/${courseId}/materials`;
+
+  if (!materials) return null;
+
+  const sorted = [...materials].sort((a, b) => {
+    const ga = sortGroupLabel(a).charCodeAt(0) - sortGroupLabel(b).charCodeAt(0);
+    if (ga !== 0) return ga;
+    return extractNumDbg(a.title) - extractNumDbg(b.title);
+  });
+
+  const educational = materials.filter((m) => m.quizStatus !== "not_quiz_material");
+  const nonQuiz = materials.filter((m) => m.quizStatus === "not_quiz_material");
+
+  return (
+    <div className="mt-4 rounded-lg border border-dashed border-border bg-muted/30 text-xs">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 p-3 text-left text-muted-foreground hover:text-foreground"
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        <span className="font-mono font-medium">
+          [Debug] API: {apiUrl} · {materials.length} materials returned
+          ({educational.length} educational, {nonQuiz.length} non-quiz)
+        </span>
+      </button>
+      {open && (
+        <div className="space-y-3 border-t border-border p-3">
+          {/* Materials table */}
+          <div>
+            <p className="mb-1 font-semibold text-foreground">
+              First 12 materials (sorted as UI would show):
+            </p>
+            <table className="w-full text-left">
+              <thead>
+                <tr className="text-muted-foreground">
+                  <th className="pr-2">Title</th>
+                  <th className="pr-2">sort_group</th>
+                  <th className="pr-2">sort_num</th>
+                  <th className="pr-2">status</th>
+                  <th>selectable</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono">
+                {sorted.slice(0, 12).map((m) => (
+                  <tr key={m.id} className="border-t border-border/40">
+                    <td className="py-0.5 pr-2 max-w-[220px] truncate">{m.title}</td>
+                    <td className="pr-2">{sortGroupLabel(m)}</td>
+                    <td className="pr-2">{extractNumDbg(m.title)}</td>
+                    <td className="pr-2">{m.quizStatus ?? "–"}</td>
+                    <td>{m.quizStatus === "ready" || m.quizStatus === "extraction_too_short" ? "✓" : "✗"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Quiz debug info */}
+          {quiz && (
+            <div className="border-t border-border pt-2">
+              <p className="mb-1 font-semibold text-foreground">Last generated quiz debug:</p>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[11px] text-muted-foreground">
+                {JSON.stringify(
+                  {
+                    generator_mode: quiz.generatorMode,
+                    engine: quiz.engine,
+                    selected_ids: quiz.debug?.selected_material_ids,
+                    selected_titles: quiz.debug?.selected_material_titles,
+                    context_titles: quiz.debug?.context_material_titles_used,
+                    context_selection_reason: quiz.debug?.context_selection_reason,
+                    duplicate_guard: quiz.debug?.duplicate_guard_triggered,
+                    content_length: quiz.debug?.selected_material_content_length,
+                    question_count: quiz.questions?.length,
+                  },
+                  null,
+                  2,
+                )}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Always show the debug panel (collapsed by default).
+// Disable by setting NEXT_PUBLIC_QUIZ_DEBUG=false.
+const QUIZ_DEBUG = process.env.NEXT_PUBLIC_QUIZ_DEBUG !== "false";
 
 export default function QuizPage() {
   const [courses, setCourses] = useState<Course[]>([]);
@@ -159,6 +276,14 @@ export default function QuizPage() {
       </Button>
 
       {quiz && <QuizView quiz={quiz} />}
+
+      {QUIZ_DEBUG && (
+        <QuizDebugPanel
+          courseId={selectedCourse}
+          materials={materials}
+          quiz={quiz}
+        />
+      )}
     </div>
   );
 }

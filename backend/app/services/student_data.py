@@ -574,6 +574,7 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
                 "extractionStatus": extraction_status or None,
                 "quizStatus": "not_quiz_material",
                 "quizStatusReason": non_quiz_reason,
+                "isEducational": False,
             })
             continue
 
@@ -622,6 +623,7 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             "extractionStatus": extraction_status or None,
             "quizStatus": quiz_status,
             "quizStatusReason": content_note,
+            "isEducational": _is_educational_material(title, raw_file_type),
         })
     return out
 

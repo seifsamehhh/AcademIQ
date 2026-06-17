@@ -36,10 +36,15 @@ function extractNum(s: string): number {
 function sortGroup(m: LearningMaterial): number {
   if (m.quizStatus === "not_quiz_material") return 99;
   const t = m.title.toLowerCase();
-  if (/\blecture\b/.test(t)) return 0;
-  if (/\blab\b/.test(t)) return 1;
-  if (/\b(revision|review|summary)\b/.test(t)) return 2;
-  if (/\b(notes|tutorial|handout|slides|worksheet|chapter|exercise|module)\b/.test(t)) return 3;
+  // Use only a LEADING word boundary so "lecture1", "lecture#1", "lec 1" all match.
+  // \blecture matches at any word boundary before the letter l, with no constraint
+  // on what follows — avoids the bug where "Lecture1" (digit after e) fails \blecture\b.
+  if (/\blecture|\blec\s*\d/i.test(t)) return 0;
+  // \blab\b is kept strict to avoid false-positives in "syllable" etc., but also
+  // accept "lab1" or "lab_1" patterns.
+  if (/\blab\b|\blab\s*\d/i.test(t)) return 1;
+  if (/\b(revision|review|summary)\b/i.test(t)) return 2;
+  if (/\b(notes?|tutorial|handout|slides?|worksheet|chapter|exercise|module)\b/i.test(t)) return 3;
   return 4;
 }
 
