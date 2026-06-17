@@ -602,7 +602,7 @@ const scrapeCurrentCourseOnActiveTab = (courseId) =>
  *   downloads and uploads materials whose id is in this list.  Pass null to
  *   upload everything (no pre-filtering).
  */
-const uploadMaterialsOnActiveTab = (courseId, onlyMaterialIds = null) =>
+const uploadMaterialsOnActiveTab = (courseId, onlyMaterialIds = null, preflightItems = null) =>
     new Promise((resolve) => {
         getActiveMoodleTab().then((tab) => {
             if (!tab?.id) {
@@ -617,7 +617,8 @@ const uploadMaterialsOnActiveTab = (courseId, onlyMaterialIds = null) =>
                     courseId,
                     // Pre-filtered list from popup's preflight call.
                     // content.js skips any material not in this set.
-                    only_material_ids: onlyMaterialIds
+                    only_material_ids: onlyMaterialIds,
+                    preflight_items: preflightItems
                 },
                 (response) => {
                     if (chrome.runtime.lastError) {
@@ -788,6 +789,29 @@ const syncPopupCourseToTab = async () => {
     return { ok: true, courseId: tabId, courseName: tabName, materials: scrape.materials || [] };
 };
 
+const logRetryExtractionAudit = (tabResult, courseId) => {
+    const audit =
+        tabResult?.targeted_retry_audit ||
+        tabResult?.retry_audit ||
+        (tabResult?.results || []).map((row) => row.audit).filter(Boolean);
+    if (!audit.length) return;
+    console.group(`[AcademIQ] Not-uploaded extraction audit — course ${courseId}`);
+    console.table(
+        audit.map((row) => ({
+            title: row.title,
+            file_type: row.file_type,
+            source_url: row.source_url_present,
+            resolved_url: row.resolved_url_present,
+            download_attempted: row.download_attempted,
+            download_status: row.download_status,
+            extracted_chars: row.extracted_chars,
+            quiz_status: row.quiz_status,
+            reason: row.reason,
+        }))
+    );
+    console.groupEnd();
+};
+
 const runQuizMaterialUpload = async () => {
     const btn = refs.uploadQuizBtn;
     if (!currentCourseId) {
@@ -863,6 +887,7 @@ const runQuizMaterialUpload = async () => {
     let reprocessing = 0;
     let preflightChecked = 0;
     let onlyMaterialIds = null;
+    let preflightItems = null;
 
     if (detected > 0) {
         const pf = await callPreflightFromPopup(courseId, scrapedMaterials, identity);
@@ -895,8 +920,9 @@ const runQuizMaterialUpload = async () => {
         console.log("metadata_saved:", metadataSaved, "| downloadable:", downloadable.length);
         console.groupEnd();
 
+        preflightItems = pf.data.materials || [];
         onlyMaterialIds = [];
-        for (const item of (pf.data.materials || [])) {
+        for (const item of preflightItems) {
             const mid = String(item.material_id);
             if (isPreflightUploadAllowed(item)) {
                 onlyMaterialIds.push(mid);
@@ -977,9 +1003,10 @@ const runQuizMaterialUpload = async () => {
     }
 
     // ── Step 4: download + upload only brand-new unmatched downloadable materials ──
-    const tabResult = await uploadMaterialsOnActiveTab(courseId, onlyMaterialIds);
+    const tabResult = await uploadMaterialsOnActiveTab(courseId, onlyMaterialIds, preflightItems);
 
     if (tabResult.status === "done") {
+        logRetryExtractionAudit(tabResult, courseId);
         const uploaded = tabResult.uploaded || 0;
         const ready = tabResult.ready || 0;
         const failed = tabResult.failed ?? Math.max(0, (tabResult.total || 0) - uploaded);

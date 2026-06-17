@@ -405,12 +405,33 @@
                 credentials: "include",
                 redirect: "follow"
             });
-            if (!response.ok) return { downloadUrl: null, pageText: null, pageUrl: null };
+            if (!response.ok) {
+                return {
+                    downloadUrl: null,
+                    pageText: null,
+                    pageUrl: null,
+                    error: `http_${response.status}`
+                };
+            }
             const html = await response.text();
             const parser = new DOMParser();
             const doc = parser.parseFromString(html, "text/html");
             const pageUrl = response.url || activityUrl;
-            const anchors = Array.from(doc.querySelectorAll("a[href]"));
+            const anchorSelectors = [
+                ".resourceworkaround a[href]",
+                ".resourcecontent a[href]",
+                ".fileuploadsubmission a[href]",
+                "a.resource-wrapped-link[href]",
+                "a[href*='pluginfile.php']",
+                "a[href*='forcedownload=1']"
+            ];
+            const anchors = [];
+            anchorSelectors.forEach((selector) => {
+                doc.querySelectorAll(selector).forEach((node) => anchors.push(node));
+            });
+            if (!anchors.length) {
+                anchors.push(...Array.from(doc.querySelectorAll("a[href]")));
+            }
             let downloadUrl = null;
             for (const anchor of anchors) {
                 const href = resolveHref(anchor, pageUrl);
@@ -425,10 +446,64 @@
                 }
             }
             const pageText = extractReadablePageText(doc);
-            return { downloadUrl, pageText, pageUrl };
-        } catch (_error) {
-            return { downloadUrl: null, pageText: null, pageUrl: null };
+            return { downloadUrl, pageText, pageUrl, error: downloadUrl ? null : "no_download_link_on_page" };
+        } catch (error) {
+            return { downloadUrl: null, pageText: null, pageUrl: null, error: String(error) };
         }
+    };
+
+    const isMoodleActivityPageUrl = (url) =>
+        /\/mod\/(resource|url|page|book|folder)\/view\.php/i.test(url || "");
+
+    const resolveMoodleFileDownloadUrl = async (material) => {
+        const activityUrl = material.url || material.source_url || "";
+        let downloadUrl = material.resolvedUrl || material.resolved_url || activityUrl;
+        let pageText = material.pageText || material.page_text || null;
+        let resolveError = null;
+
+        const needsResolve =
+            !downloadUrl ||
+            isMoodleActivityPageUrl(downloadUrl) ||
+            (!isDirectDownloadUrl(downloadUrl) && !PLUGINFILE_RE.test(downloadUrl));
+
+        if (needsResolve && activityUrl) {
+            const resolved = await resolveEducationalActivityContent(activityUrl);
+            resolveError = resolved.error || null;
+            if (resolved.downloadUrl) {
+                downloadUrl = resolved.downloadUrl;
+                material.resolvedUrl = resolved.downloadUrl;
+                material.resolved_url = resolved.downloadUrl;
+                const nestedType = inferFileTypeFromUrl(resolved.downloadUrl);
+                if (nestedType) {
+                    material.file_type = nestedType;
+                    material.fileType = nestedType;
+                }
+            }
+            if (resolved.pageText) {
+                pageText = resolved.pageText;
+                material.pageText = resolved.pageText;
+                material.page_text = resolved.pageText;
+            }
+        }
+
+        if (
+            downloadUrl &&
+            (isMoodleActivityPageUrl(downloadUrl) || !isDirectDownloadUrl(downloadUrl))
+        ) {
+            const head = await fetchHeadMetadata(downloadUrl);
+            if (head.finalUrl && (isDirectDownloadUrl(head.finalUrl) || PLUGINFILE_RE.test(head.finalUrl))) {
+                downloadUrl = head.finalUrl;
+                material.resolvedUrl = head.finalUrl;
+                material.resolved_url = head.finalUrl;
+            }
+            const hintedType = mapMimeTypeToFileType(head.contentType);
+            if (hintedType && QUIZ_DOWNLOAD_FILE_TYPES.has(hintedType)) {
+                material.file_type = hintedType;
+                material.fileType = hintedType;
+            }
+        }
+
+        return { downloadUrl, pageText, resolveError };
     };
 
     const findNestedDownloadUrl = async (activityUrl, baseHref) => {
@@ -944,21 +1019,78 @@
 
     const isQuizUploadableMaterial = isDownloadableMaterial;
 
-    const fetchMaterialBytes = async (material) => {
-        const url = material.resolvedUrl || material.url;
-        if (!url) return { ok: false, error: "missing_url" };
+    const fetchMaterialBytes = async (material, downloadUrlOverride = null) => {
+        const url = downloadUrlOverride || material.resolvedUrl || material.resolved_url || material.url;
+        if (!url) return { ok: false, error: "missing_url", download_attempted: true };
         try {
             const res = await fetch(url, { credentials: "include", redirect: "follow" });
-            if (!res.ok) return { ok: false, error: `http_${res.status}` };
+            const contentType = res.headers.get("content-type") || "";
+            if (!res.ok) {
+                return {
+                    ok: false,
+                    error: `http_${res.status}`,
+                    httpStatus: res.status,
+                    contentType,
+                    download_attempted: true
+                };
+            }
+            if (
+                /text\/html/i.test(contentType) &&
+                !/pdf|powerpoint|presentation|octet-stream/i.test(contentType)
+            ) {
+                return {
+                    ok: false,
+                    error: `unexpected_content_type:${contentType}`,
+                    httpStatus: res.status,
+                    contentType,
+                    download_attempted: true
+                };
+            }
             const buf = await res.arrayBuffer();
+            if (!buf || buf.byteLength < 64) {
+                return {
+                    ok: false,
+                    error: "empty_or_tiny_response",
+                    httpStatus: res.status,
+                    contentType,
+                    download_attempted: true
+                };
+            }
             return {
                 ok: true,
                 base64: arrayBufferToBase64(buf),
-                contentType: res.headers.get("content-type") || ""
+                contentType,
+                finalUrl: res.url || url,
+                download_attempted: true
             };
         } catch (error) {
-            return { ok: false, error: String(error) };
+            return {
+                ok: false,
+                error: String(error),
+                download_attempted: true
+            };
         }
+    };
+
+    const buildUploadAuditRow = (material, fetched, backendResult, pageTextUsed = false) => {
+        const sourceUrl = material.url || material.source_url || "";
+        const resolvedUrl = material.resolvedUrl || material.resolved_url || "";
+        const backend = backendResult || {};
+        return {
+            title: (material.title || "").slice(0, 55),
+            file_type: material.file_type || material.fileType || "",
+            source_url_present: Boolean(sourceUrl),
+            resolved_url_present: Boolean(resolvedUrl),
+            download_attempted: Boolean(fetched?.download_attempted || pageTextUsed),
+            download_status: fetched?.ok
+                ? "ok"
+                : pageTextUsed
+                    ? "page_text"
+                    : fetched?.error || backend.extraction_error || "not_attempted",
+            extracted_chars: backend.chars || 0,
+            quiz_status: backend.quiz_status || backend.extraction_status || backend.status,
+            reason: backend.extraction_error || backend.content_note || fetched?.error || null
+        };
     };
 
     const uploadMaterialToBackend = async (backendUploadUrl, material, identity) => {
@@ -994,49 +1126,41 @@
         const educational = isEducationalLearningTitle(workingMaterial.title || "");
         const urlLike = isUrlLikeFileType(ft);
 
-        if (educational && urlLike && workingMaterial.url) {
-            const hasPageText = (workingMaterial.pageText || workingMaterial.page_text || "").length >= 80;
-            if (!hasPageText || !isDirectDownloadUrl(workingMaterial.resolvedUrl || workingMaterial.url)) {
-                const resolved = await resolveEducationalActivityContent(workingMaterial.url);
-                if (resolved.downloadUrl) {
-                    workingMaterial.resolvedUrl = resolved.downloadUrl;
-                    const nestedType = inferFileTypeFromUrl(resolved.downloadUrl);
-                    if (nestedType) {
-                        workingMaterial.file_type = nestedType;
-                        workingMaterial.fileType = nestedType;
-                    }
-                }
-                if (resolved.pageText) {
-                    workingMaterial.pageText = resolved.pageText;
-                    workingMaterial.page_text = resolved.pageText;
-                }
-            }
+        const { downloadUrl, pageText: resolvedPageText, resolveError } = await resolveMoodleFileDownloadUrl(
+            workingMaterial
+        );
+        if (resolvedPageText) {
+            workingMaterial.pageText = resolvedPageText;
+            workingMaterial.page_text = resolvedPageText;
         }
 
-        const downloadUrl =
-            workingMaterial.resolvedUrl || workingMaterial.resolved_url || workingMaterial.url || "";
         const effectiveFt = String(
             workingMaterial.file_type || workingMaterial.fileType || ft
         ).toLowerCase();
         const canFetchFile =
-            QUIZ_DOWNLOAD_FILE_TYPES.has(effectiveFt) || isDirectDownloadUrl(downloadUrl);
+            QUIZ_DOWNLOAD_FILE_TYPES.has(effectiveFt) ||
+            isDirectDownloadUrl(downloadUrl) ||
+            PLUGINFILE_RE.test(downloadUrl || "");
 
+        let fetched = { ok: false, error: resolveError || "not_attempted", download_attempted: false };
         if (canFetchFile && downloadUrl) {
-            const fetched = await fetchMaterialBytes(workingMaterial);
+            fetched = await fetchMaterialBytes(workingMaterial, downloadUrl);
             if (fetched.ok) {
                 const { res, data } = await postUploadPayload({
                     ...basePayload,
                     file_type: effectiveFt,
-                    resolved_url: workingMaterial.resolvedUrl || workingMaterial.resolved_url || null,
+                    resolved_url: workingMaterial.resolvedUrl || workingMaterial.resolved_url || downloadUrl,
                     content_base64: fetched.base64,
                     content_type: fetched.contentType
                 });
-                return {
+                const result = {
                     material_id: basePayload.material_id,
                     title: basePayload.title,
                     ok: res.ok,
-                    ...data
+                    ...data,
+                    audit: buildUploadAuditRow(workingMaterial, fetched, data)
                 };
+                return result;
             }
         }
 
@@ -1053,22 +1177,28 @@
                 title: basePayload.title,
                 ok: res.ok,
                 ready_for_quiz: data.ready_for_quiz,
-                ...data
+                ...data,
+                audit: buildUploadAuditRow(workingMaterial, fetched, data, true)
             };
         }
 
+        const failureReason =
+            fetched.error ||
+            resolveError ||
+            (canFetchFile ? "download_or_page_text_failed" : "no_downloadable_file_or_page_text");
         const { res, data } = await postUploadPayload({
             ...basePayload,
             upload_attempt_failed: true,
-            extraction_error: canFetchFile ? "download_or_page_text_failed" : "no_downloadable_file_or_page_text"
+            extraction_error: failureReason
         });
         return {
             material_id: basePayload.material_id,
             title: basePayload.title,
             ok: false,
             recorded_on_backend: res.ok,
-            error: "no_downloadable_file_or_page_text",
-            ...data
+            error: failureReason,
+            ...data,
+            audit: buildUploadAuditRow(workingMaterial, fetched, data)
         };
     };
 
@@ -1083,8 +1213,14 @@
      * @param {string}        courseId          Moodle course ID from the popup dropdown
      * @param {string[]|null} onlyMaterialIds   IDs approved for upload by popup's preflight.
      *                                          null = upload everything (no pre-filtering).
+     * @param {object[]|null} preflightItems    Full preflight rows (URLs from DB when scrape misses).
      */
-    const uploadMaterialsForQuiz = async (backendUploadUrl, courseId, onlyMaterialIds = null) => {
+    const uploadMaterialsForQuiz = async (
+        backendUploadUrl,
+        courseId,
+        onlyMaterialIds = null,
+        preflightItems = null
+    ) => {
         const course = getCourseContext();
         const tabCourseId = course.course_id;
         if (!tabCourseId) {
@@ -1126,10 +1262,47 @@
                     failed: 0,
                     total: 0,
                     results: [],
+                    retry_audit: [],
                 };
             }
             const allowed = new Set(onlyMaterialIds.map(String));
-            uploadable = uploadable.filter((m) => allowed.has(String(m.material_id || m.id)));
+            const cmidFromUrl = (url) => {
+                const match = String(url || "").match(/[?&](?:id|cmid)=([^&#]+)/i);
+                return match ? String(match[1]) : null;
+            };
+            const materialAllowed = (m) => {
+                const mid = String(m.material_id || m.id || "");
+                if (allowed.has(mid)) return true;
+                const cmid = cmidFromUrl(m.url);
+                return cmid && allowed.has(cmid);
+            };
+            uploadable = uploadable.filter(materialAllowed);
+
+            const scrapeIds = new Set(
+                uploadable.map((m) => String(m.material_id || m.id || ""))
+            );
+            const pfItems = Array.isArray(preflightItems) ? preflightItems : [];
+            for (const item of pfItems) {
+                const mid = String(item.material_id || "");
+                if (!mid || !allowed.has(mid) || scrapeIds.has(mid)) continue;
+                const sourceUrl = item.db_source_url || item.source_url || null;
+                if (!sourceUrl) continue;
+                uploadable.push({
+                    material_id: mid,
+                    id: mid,
+                    title: item.title || "Untitled",
+                    url: sourceUrl,
+                    source_url: sourceUrl,
+                    resolvedUrl: item.db_resolved_url || item.resolved_url || null,
+                    resolved_url: item.db_resolved_url || item.resolved_url || null,
+                    file_type: item.file_type || "unknown",
+                    fileType: item.file_type || "unknown",
+                    course_id: tabCourseId,
+                    courseId: tabCourseId,
+                    course_name: course.course_name,
+                });
+                scrapeIds.add(mid);
+            }
             console.log(
                 `[AcademIQ] Upload: ${uploadable.length}/${allMaterials.length} materials after preflight filter`
             );
@@ -1146,6 +1319,9 @@
         const uploaded = results.filter((row) => row.ok).length;
         const ready = results.filter((row) => row.ready_for_quiz).length;
         const failed = results.length - uploaded;
+        const retryAudit = results.map((row) => row.audit).filter(Boolean);
+        const targetTitles = /lecture\s*#?\d|lecture\d|lab\s*#?\d|\blab\b/i;
+        const targetedAudit = retryAudit.filter((row) => targetTitles.test(row.title || ""));
 
         return {
             status: "done",
@@ -1157,7 +1333,9 @@
             ready,
             failed,
             total: uploadable.length,
-            results
+            results,
+            retry_audit: retryAudit,
+            targeted_retry_audit: targetedAudit,
         };
     };
 
@@ -1186,7 +1364,8 @@
             uploadMaterialsForQuiz(
                 message.backendUploadUrl,
                 message.courseId,
-                message.only_material_ids || null
+                message.only_material_ids || null,
+                message.preflight_items || null
             )
                 .then((result) => sendResponse(result))
                 .catch((error) => sendResponse({ status: "error", error: String(error) }));

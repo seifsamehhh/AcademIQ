@@ -26,6 +26,9 @@ from app.services.student_data import (
 
 _DOWNLOADABLE_FILE_TYPES = {"pdf", "pptx", "ppt", "docx", "doc", "txt", "text"}
 _LINK_LIKE_FILE_TYPES = frozenset({"link", "url", "html", "page", "book"})
+_TARGETED_RETRY_FILE_TYPES = frozenset(
+    {"pdf", "pptx", "ppt", "html", "link", "url", "page", "book"}
+)
 
 # Bump when extraction logic changes materially — preflight may re-offer upload once.
 CURRENT_EXTRACTOR_VERSION = "2"
@@ -121,6 +124,59 @@ def _is_force_reprocess(payload: Dict[str, Any]) -> bool:
     return bool(payload.get("force_reupload") or payload.get("force_reprocess"))
 
 
+def _is_targeted_not_uploaded_learning_material(
+    title: str,
+    file_type: str,
+    existing_doc: Optional[Dict[str, Any]],
+) -> bool:
+    """
+    Educational rows that still need a first extraction attempt (not_ready admin).
+    """
+    if not existing_doc:
+        return False
+    ft = (file_type or "").lower().strip()
+    if ft not in _TARGETED_RETRY_FILE_TYPES and ft not in _LINK_LIKE_FILE_TYPES:
+        return False
+    if not is_educational_material(title, file_type):
+        return False
+    is_non_quiz, _ = classify_non_quiz_material(title, file_type)
+    if is_non_quiz:
+        return False
+    if not matches_educational_title(title):
+        return False
+    chars = _content_chars_from_doc(existing_doc)
+    if chars >= MIN_QUIZ_CONTENT_CHARS and bool(existing_doc.get("ready_for_quiz")):
+        return False
+    status = str(existing_doc.get("extraction_status") or "")
+    if status == "not_quiz_material":
+        return False
+    if status in ("not_uploaded", "no_content") and chars == 0:
+        return True
+    if bool(existing_doc.get("metadata_only")) and chars == 0 and status != "extraction_failed":
+        return True
+    return False
+
+
+def _preflight_row_urls(
+    existing_doc: Optional[Dict[str, Any]],
+    activity_url: str,
+    resolved_url: str,
+) -> Dict[str, Any]:
+    db_source = ""
+    db_resolved = ""
+    if existing_doc:
+        db_source = str(
+            existing_doc.get("url") or existing_doc.get("source_url") or activity_url or ""
+        ).strip()
+        db_resolved = str(existing_doc.get("resolved_url") or resolved_url or "").strip()
+    return {
+        "source_url_present": bool(activity_url or db_source),
+        "resolved_url_present": bool(resolved_url or db_resolved),
+        "db_source_url": db_source or activity_url or None,
+        "db_resolved_url": db_resolved or resolved_url or None,
+    }
+
+
 def _preflight_upload_decision(
     existing_doc: Optional[Dict[str, Any]],
     title: str,
@@ -198,6 +254,14 @@ def _preflight_upload_decision(
         )
 
     if resolvable_educational and existing_chars < MIN_QUIZ_CONTENT_CHARS:
+        if _is_targeted_not_uploaded_learning_material(title, raw_file_type, existing_doc):
+            return (
+                True,
+                "not_uploaded",
+                "Educational material — targeted content extraction needed",
+                existing_chars,
+                downloadable or url_like,
+            )
         if not existing_doc.get("processed_at"):
             return (
                 True,
@@ -786,6 +850,72 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _append_db_not_uploaded_retry_rows(
+    course_id: str,
+    all_docs: List[Dict[str, Any]],
+    results: List[Dict[str, Any]],
+    force_reupload: bool,
+) -> None:
+    """Add DB-only not_uploaded learning rows missing from the scrape preflight batch."""
+    seen_ids = {str(r.get("material_id") or "") for r in results}
+    seen_cmids: set[str] = set()
+    for r in results:
+        for u in (r.get("db_source_url"), r.get("debug", {}).get("incoming_source_url")):
+            cmid = _material_id_from_url(str(u or ""))
+            if cmid:
+                seen_cmids.add(cmid)
+
+    for doc in all_docs:
+        material_id = str(doc.get("material_id") or "").strip()
+        if not material_id or material_id in seen_ids:
+            continue
+        title = str(doc.get("title") or "Untitled").strip()
+        raw_file_type = str(doc.get("file_type") or "unknown").strip()
+        if not _is_targeted_not_uploaded_learning_material(title, raw_file_type, doc):
+            continue
+        activity_url = str(doc.get("url") or doc.get("source_url") or "").strip()
+        resolved_url = str(doc.get("resolved_url") or "").strip()
+        url_cmid = _material_id_from_url(activity_url) or _material_id_from_url(resolved_url)
+        if url_cmid and url_cmid in seen_cmids:
+            continue
+
+        downloadable = _is_downloadable_material(raw_file_type, activity_url, resolved_url)
+        should_reupload, out_status, reason, existing_chars, _ = _preflight_upload_decision(
+            doc,
+            title,
+            raw_file_type,
+            activity_url,
+            resolved_url,
+            force_reupload,
+        )
+        url_fields = _preflight_row_urls(doc, activity_url, resolved_url)
+        results.append(
+            {
+                "material_id": material_id,
+                "title": title,
+                "file_type": raw_file_type,
+                "should_upload": should_reupload,
+                "status": out_status,
+                "reason": reason,
+                "content_text_length": existing_chars,
+                "matched_by": "db_not_uploaded_retry",
+                "downloadable": downloadable,
+                "targeted_retry": True,
+                **url_fields,
+                "debug": {
+                    "material_id_sent": material_id,
+                    "material_id_used": material_id,
+                    "course_id": course_id,
+                    "db_record_found": True,
+                    "source": "db_retry_queue",
+                },
+            }
+        )
+        seen_ids.add(material_id)
+        if url_cmid:
+            seen_cmids.add(url_cmid)
+
+
 def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Pre-upload check: return which materials need uploading without downloading files.
@@ -871,6 +1001,7 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "reason": non_quiz_reason,
                 "content_text_length": 0,
                 "matched_by": "classification",
+                **_preflight_row_urls(None, activity_url, resolved_url),
                 "debug": {
                     "material_id_sent": raw_material_id,
                     "material_id_used": material_id,
@@ -1041,6 +1172,7 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "content_text_length": 0,
                 "matched_by": None,
                 "downloadable": downloadable,
+                **_preflight_row_urls(None, activity_url, resolved_url),
                 "debug": debug_info,
             })
             continue
@@ -1058,14 +1190,21 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         results.append({
             "material_id": material_id,
             "title": title,
+            "file_type": raw_file_type,
             "should_upload": should_reupload,
             "status": out_status,
             "reason": reason,
             "content_text_length": existing_chars,
             "matched_by": matched_by,
             "downloadable": downloadable,
+            "targeted_retry": _is_targeted_not_uploaded_learning_material(
+                title, raw_file_type, existing_doc
+            ),
+            **_preflight_row_urls(existing_doc, activity_url, resolved_url),
             "debug": debug_info,
         })
+
+    _append_db_not_uploaded_retry_rows(course_id, all_docs, results, force_reupload)
 
     should_upload_count = sum(1 for r in results if r["should_upload"])
     matched_count = sum(1 for r in results if r.get("matched_by") is not None)
@@ -1167,6 +1306,9 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload.get("material_id") or payload.get("id") or stable_material_id(payload) or ""
     ).strip()
     source_url = payload.get("source_url") or payload.get("url")
+    resolved_url_payload = str(
+        payload.get("resolved_url") or payload.get("resolvedUrl") or ""
+    ).strip() or None
     material_id = _resolve_material_id(course_id, raw_material_id, source_url)
     if not course_id or not material_id:
         raise ValueError("course_id and material_id are required")
@@ -1223,12 +1365,15 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
             "extraction_status": "extraction_failed",
             "extraction_error": f"download_failed:{extraction_error}",
             "processed_at": now,
+            "last_attempted_at": now,
             "extractor_version": CURRENT_EXTRACTOR_VERSION,
         }
         if course_name:
             fail_doc["course_name"] = course_name
         if source_url:
             fail_doc["url"] = source_url
+        if resolved_url_payload:
+            fail_doc["resolved_url"] = resolved_url_payload
         inserted = material_repository.upsert(fail_doc)
         return {
             "status": "stored_failed",
@@ -1390,6 +1535,7 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     text = (text or "").strip()
     chars = len(text)
+    probe_fields: Dict[str, Any] = {}
 
     if extraction_error and not text:
         extraction_status = "extraction_failed"
@@ -1437,9 +1583,15 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
             "uploaded_by_email": user_email or None,
             "uploaded_by_user_id": academiq_user_id,
             "processed_at": now,
+            "last_attempted_at": now,
+            "metadata_only": False,
             "extractor_version": CURRENT_EXTRACTOR_VERSION,
         }
     )
+    if source_url:
+        material_doc["url"] = source_url
+    if resolved_url_payload:
+        material_doc["resolved_url"] = resolved_url_payload
 
     inserted = material_repository.upsert(material_doc)
 
@@ -1470,6 +1622,10 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         "extraction_status": extraction_status,
         "extraction_error": extraction_error,
         "probe_question_count": probe_count,
+        "quiz_status": probe_fields.get("quiz_probe_status") if chars > 0 else extraction_status,
+        "download_attempted": True,
+        "download_status": "extracted" if chars > 0 else extraction_status,
         "content_note": content_note,
         "inserted": inserted,
+        "ok": True,
     }
