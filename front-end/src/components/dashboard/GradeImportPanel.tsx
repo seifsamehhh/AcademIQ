@@ -158,7 +158,7 @@ export function GradeImportPanel({ courses, courseResults, onSaved }: Props) {
         className="flex w-full items-center justify-between rounded-lg border border-border bg-card px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
         aria-expanded={expanded}
       >
-        <span>Edit grades manually</span>
+        <span>Manage uploaded grades</span>
         <ChevronDown
           className={`h-4 w-4 text-muted-foreground transition-transform ${expanded ? "rotate-180" : ""}`}
           aria-hidden
@@ -172,10 +172,11 @@ export function GradeImportPanel({ courses, courseResults, onSaved }: Props) {
       {expanded ? (
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-base">Manage uploaded grades</CardTitle>
+            <CardTitle className="text-base">Midterm scoring records</CardTitle>
             <CardDescription>
-              Update current 26S midterm scores. Midterm scoring overrides Moodle course
-              totals on the Dashboard for this semester.
+              Add or update per-course midterm scoring records for the current semester.
+              Official cumulative GPA comes from your uploaded official transcript, not these
+              percentages.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
@@ -297,6 +298,18 @@ export function GradeImportPanel({ courses, courseResults, onSaved }: Props) {
               <Button type="button" onClick={handleSave} disabled={saving} size="sm">
                 {saving ? "Saving…" : "Save grade"}
               </Button>
+            </div>
+
+            <div className="rounded-lg border border-dashed border-border bg-muted/20 p-4 space-y-2">
+              <p className="text-sm font-medium text-foreground">
+                Upload official transcript
+              </p>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Coming soon: upload a PDF or image to parse cumulative GPA, qualified hours,
+                and qualified points. For now, official transcript GPA is stored from your
+                uploaded official transcript record (e.g. Cum GPA 2.35, Qul. Hrs 112.00,
+                Qul.Points 263.20).
+              </p>
             </div>
 
             {status && expanded ? (

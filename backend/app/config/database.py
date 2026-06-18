@@ -32,6 +32,7 @@ course_materials_collection = None
 student_metrics_collection = None
 student_events_collection = None
 uploaded_grade_records_collection = None
+uploaded_transcript_records_collection = None
 
 _initialized = False
 
@@ -45,6 +46,7 @@ def connect_database() -> bool:
     global users_collection, user, course_materials_collection
     global student_metrics_collection, student_events_collection
     global uploaded_grade_records_collection
+    global uploaded_transcript_records_collection
 
     if _initialized and client is not None:
         return True
@@ -77,6 +79,7 @@ def connect_database() -> bool:
         student_metrics_collection = db["student_metrics"]
         student_events_collection = db["student_events"]
         uploaded_grade_records_collection = db["uploaded_grade_records"]
+        uploaded_transcript_records_collection = db["uploaded_transcript_records"]
 
         _initialized = True
         print("[OK] Connected to MongoDB Atlas!")
@@ -149,6 +152,11 @@ def ensure_indexes() -> None:
         [("academiq_user_id", ASCENDING), ("course_id", ASCENDING)],
         unique=True,
         name="uniq_user_course_uploaded_grade",
+    )
+    uploaded_transcript_records_collection.create_index(
+        [("academiq_user_id", ASCENDING)],
+        unique=True,
+        name="uniq_user_official_transcript",
     )
 
     for coll, name in (

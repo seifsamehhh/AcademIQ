@@ -113,7 +113,16 @@ export default function DashboardPage() {
   const displayName = results?.name ?? studentName ?? "Student";
   const signedInAs = results?.loginEmail || studentId;
   const hasResults = Boolean(results?.name);
-  const gpaUnavailable = results?.gpaAvailable !== true;
+  const officialGpaAvailable =
+    results?.officialGpaAvailable === true || results?.gpaAvailable === true;
+  const officialGpa =
+    results?.officialGpa ?? (officialGpaAvailable ? results?.gpa : null);
+  const officialGpaNote =
+    results?.officialGpaNote ?? results?.gpaNote ?? undefined;
+  const officialGpaSource =
+    results?.officialGpaSource ?? results?.gpaSource ?? undefined;
+  const midtermAvailable = results?.midtermAverageAvailable === true;
+  const midtermAvg = results?.midtermAverage ?? results?.averageScore;
 
   const riskLabel =
     results?.riskAvailable === false
@@ -156,21 +165,36 @@ export default function DashboardPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="text-base text-muted-foreground">
-                  GPA
+                  Official GPA
                 </CardTitle>
               </CardHeader>
-              <CardContent>
+              <CardContent className="space-y-3">
                 <p className="text-3xl font-bold text-foreground">
-                  {gpaUnavailable ? "GPA not available yet" : results!.gpa}
+                  {officialGpaAvailable && officialGpa != null
+                    ? officialGpa
+                    : "Not available"}
                 </p>
-                {gpaUnavailable && results?.gpaNote ? (
-                  <p className="mt-2 text-sm text-muted-foreground">
-                    {results.gpaNote}
+                {officialGpaAvailable && officialGpaSource ? (
+                  <p className="text-sm text-muted-foreground">
+                    {officialGpaSource}
                   </p>
-                ) : results?.gpaSource ? (
-                  <p className="mt-2 text-sm text-muted-foreground">
-                    {results.gpaSource}
-                  </p>
+                ) : officialGpaNote ? (
+                  <p className="text-sm text-muted-foreground">{officialGpaNote}</p>
+                ) : null}
+                {midtermAvailable && midtermAvg != null ? (
+                  <div className="rounded-md border border-border/80 bg-muted/30 px-3 py-2">
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Current Midterm Average
+                    </p>
+                    <p className="text-lg font-semibold text-foreground">
+                      {formatDisplayGrade(midtermAvg)}%
+                    </p>
+                    {results?.midtermAverageSource ? (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {results.midtermAverageSource}
+                      </p>
+                    ) : null}
+                  </div>
                 ) : null}
               </CardContent>
             </Card>
@@ -200,6 +224,9 @@ export default function DashboardPage() {
           <Card>
             <CardHeader>
               <CardTitle>Courses &amp; Grades</CardTitle>
+              <p className="text-sm text-muted-foreground font-normal">
+                Current 26S course scores from midterm scoring records.
+              </p>
             </CardHeader>
             <CardContent>
               <ul className="divide-y divide-border">

@@ -75,10 +75,21 @@ export interface DemoCourseResult {
 export interface StudentResults {
   name?: string;
   loginEmail?: string;
+  /** Official cumulative GPA from uploaded transcript (backward-compat alias: gpa). */
   gpa?: number | null;
   gpaAvailable?: boolean;
   gpaSource?: string | null;
   gpaNote?: string | null;
+  officialGpa?: number | null;
+  officialGpaAvailable?: boolean;
+  officialGpaSource?: string | null;
+  officialGpaNote?: string | null;
+  qualifiedHours?: number | null;
+  qualifiedPoints?: number | null;
+  transcriptLabel?: string | null;
+  midtermAverage?: number | null;
+  midtermAverageAvailable?: boolean;
+  midtermAverageSource?: string | null;
   risk?: string;
   riskAvailable?: boolean;
   riskSource?: string | null;
@@ -86,6 +97,7 @@ export interface StudentResults {
   courses?: DemoCourseResult[];
   dataSource?: "synced" | "demo" | "metrics_only" | "none";
   lastSync?: string | null;
+  /** Current-semester midterm average (%), not official GPA. */
   averageScore?: number | null;
 }
 

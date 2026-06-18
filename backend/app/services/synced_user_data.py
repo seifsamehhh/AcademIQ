@@ -31,6 +31,11 @@ from app.services.moodle_sync_status import has_synced_moodle_data
 from app.services.moodle_ingest import is_real_course
 from app.services.grade_resolution import resolve_course_grade
 from app.repositories.uploaded_grade_repository import map_by_course_id
+from app.repositories.uploaded_transcript_repository import (
+    LABEL_OFFICIAL,
+    ensure_demo_official_transcript,
+    get_for_user as get_official_transcript,
+)
 from app.services.student_data import (
     _clean_course_name,
     _course_code,
@@ -192,22 +197,44 @@ def _gpa_from_percentages(grades: List[float]) -> Optional[float]:
     return round(min(4.0, avg_pct / 25.0), 2)
 
 
-def _gpa_source_for_courses(courses_out: List[Dict[str, Any]]) -> Optional[str]:
-    eligible = [
-        c
+def _midterm_average(courses_out: List[Dict[str, Any]]) -> Optional[float]:
+    scores = [
+        float(c["grade"])
         for c in courses_out
-        if c.get("gpaEligible") and c.get("grade") is not None
+        if c.get("gradeSource") == "midterm_scoring" and c.get("grade") is not None
     ]
-    if len(eligible) < 2:
+    if not scores:
         return None
-    if all(c.get("gradeSource") == "midterm_scoring" for c in eligible):
-        return "Calculated from current midterm scoring records."
-    midterm_count = sum(
-        1 for c in eligible if c.get("gradeSource") == "midterm_scoring"
-    )
-    if midterm_count >= 2:
-        return "Calculated from current midterm scoring records."
-    return "Calculated from synced Moodle and uploaded grade records"
+    return round(sum(scores) / len(scores), 2)
+
+
+def _official_transcript_payload(
+    user_id: str,
+    user: Dict[str, Any],
+) -> Dict[str, Any]:
+    record = ensure_demo_official_transcript(user_id, user.get("email"))
+    if not record:
+        record = get_official_transcript(user_id)
+    if not record or record.get("official_cumulative_gpa") is None:
+        return {
+            "officialGpa": None,
+            "officialGpaAvailable": False,
+            "officialGpaSource": None,
+            "officialGpaNote": "Upload your official transcript to show cumulative GPA.",
+            "qualifiedHours": None,
+            "qualifiedPoints": None,
+            "transcriptLabel": None,
+        }
+    label = record.get("transcript_label") or LABEL_OFFICIAL
+    return {
+        "officialGpa": float(record["official_cumulative_gpa"]),
+        "officialGpaAvailable": True,
+        "officialGpaSource": "From uploaded official transcript",
+        "officialGpaNote": None,
+        "qualifiedHours": record.get("qualified_hours"),
+        "qualifiedPoints": record.get("qualified_points"),
+        "transcriptLabel": label,
+    }
 
 
 def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
@@ -243,23 +270,31 @@ def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
-    graded = [
-        c["grade"]
-        for c in courses_out
-        if c.get("gpaEligible") and c["grade"] is not None
-    ]
-    overall_avg = round(sum(graded) / len(graded), 2) if graded else None
-    gpa_available = len(graded) >= 2
-    risk_payload = _derive_synced_risk(user_id, student_id, overall_avg)
-    gpa_source = _gpa_source_for_courses(courses_out)
+    midterm_avg = _midterm_average(courses_out)
+    midterm_available = midterm_avg is not None
+    risk_payload = _derive_synced_risk(user_id, student_id, midterm_avg)
+    official = _official_transcript_payload(user_id, user)
 
     return {
         "name": display_name,
         "loginEmail": resolve_login_email(user),
-        "gpa": _gpa_from_percentages(graded) if gpa_available else None,
-        "gpaAvailable": gpa_available,
-        "gpaSource": gpa_source if gpa_available else None,
-        "gpaNote": None if gpa_available else "GPA not available yet.",
+        # Official cumulative GPA (transcript) — not derived from midterm percentages.
+        "gpa": official["officialGpa"],
+        "gpaAvailable": official["officialGpaAvailable"],
+        "gpaSource": official["officialGpaSource"],
+        "gpaNote": official["officialGpaNote"],
+        "officialGpa": official["officialGpa"],
+        "officialGpaAvailable": official["officialGpaAvailable"],
+        "officialGpaSource": official["officialGpaSource"],
+        "officialGpaNote": official["officialGpaNote"],
+        "qualifiedHours": official["qualifiedHours"],
+        "qualifiedPoints": official["qualifiedPoints"],
+        "transcriptLabel": official["transcriptLabel"],
+        "midtermAverage": midterm_avg,
+        "midtermAverageAvailable": midterm_available,
+        "midtermAverageSource": (
+            "Calculated from current midterm scoring records" if midterm_available else None
+        ),
         "risk": risk_payload["risk"],
         "riskAvailable": risk_payload["riskAvailable"],
         "riskSource": risk_payload["riskSource"],
@@ -267,7 +302,7 @@ def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
         "courses": courses_out,
         "dataSource": "synced",
         "lastSync": _last_sync_iso(user_id),
-        "averageScore": overall_avg,
+        "averageScore": midterm_avg,
     }
 
 
