@@ -6,7 +6,7 @@ import { api } from "@/lib/api";
 import type { Course, GeneratedQuiz, LearningMaterial } from "@/lib/types";
 import { CourseSelect } from "@/components/common/CourseSelect";
 import { ApiErrorAlert } from "@/components/common/ApiErrorAlert";
-import { MaterialSelect } from "@/components/quiz/MaterialSelect";
+import { MaterialSelect, isMaterialSelectable } from "@/components/quiz/MaterialSelect";
 import { QuizView } from "@/components/quiz/QuizView";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -146,13 +146,22 @@ function QuizDebugPanel({
 // Hidden unless NEXT_PUBLIC_QUIZ_DEBUG=true (does not clutter demo UI).
 const QUIZ_DEBUG = process.env.NEXT_PUBLIC_QUIZ_DEBUG === "true";
 
-function isMaterialSelectable(m: LearningMaterial): boolean {
+function isVisibleMaterial(m: LearningMaterial): boolean {
   if (m.missingFromDb) return false;
-  if (m.quizStatus === "not_quiz_material") return false;
-  if (m.quizStatus === "ready" || m.quizStatus === "limited_ready") {
-    return m.quizGenerationEligible === true;
+  if (m.kind === "MISSING") return false;
+  if (m.source === "missing_from_db") return false;
+  return true;
+}
+
+function sanitizeQuizError(msg: string): string {
+  const lower = msg.toLowerCase();
+  if (lower.includes("course context") || lower.includes("course-context")) {
+    return "Quiz generation failed for the selected material. Choose another ready material.";
   }
-  return false;
+  if (lower.includes("download_failed") || lower.includes("pluginfile")) {
+    return "Quiz generation failed. The selected material may not have readable content.";
+  }
+  return msg;
 }
 
 export default function QuizPage() {
@@ -191,9 +200,10 @@ export default function QuizPage() {
       .getMaterials(selectedCourse)
       .then((list) => {
         if (!active) return;
-        setMaterials(list);
+        const visible = list.filter(isVisibleMaterial);
+        setMaterials(visible);
         const selectableIds = new Set(
-          list.filter(isMaterialSelectable).map((m) => m.id),
+          visible.filter(isMaterialSelectable).map((m) => m.id),
         );
         setSelectedMaterials((prev) => prev.filter((id) => selectableIds.has(id)));
       })
@@ -244,8 +254,10 @@ export default function QuizPage() {
     } catch (err) {
       setQuiz(null);
       const msg = err instanceof Error ? err.message : String(err);
-      // msg is already the backend's detail.message or detail string
-      setError(msg || "Quiz generation failed. Please try another material or try again later.");
+      setError(
+        sanitizeQuizError(msg) ||
+          "Quiz generation failed. Please try another ready material.",
+      );
     } finally {
       setIsGenerating(false);
     }
@@ -256,8 +268,8 @@ export default function QuizPage() {
       <div>
         <h1 className="text-2xl font-bold text-foreground">Quiz Generation</h1>
         <p className="text-muted-foreground">
-          Select materials marked Ready for quiz or Ready, limited, then generate.
-          Use the Chrome extension on your Moodle course page to sync materials first.
+          Choose a course, select ready learning materials, then generate a quiz
+          from each file&apos;s own content.
         </p>
       </div>
 
