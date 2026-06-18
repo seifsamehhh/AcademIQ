@@ -170,25 +170,39 @@ export interface DashboardData {
   burnout: BurnoutStatus;
 }
 
+/** Source of an activity statistic value shown on Performance Analysis. */
+export type ActivityValueSource =
+  | "synced_moodle"
+  | "feature_vector"
+  | "estimated_from_synced_activity"
+  | "unavailable";
+
 /** Breakdown of a task type (quizzes or assignments) within a course. */
 export interface TaskBreakdown {
-  attempted: number;
+  attempted: number | null;
   /** Null when Moodle did not report a total count. */
   total: number | null;
   /** Average score on attempted tasks (0-100); null when no graded items yet. */
   averageScore: number | null;
+  valueSource: ActivityValueSource;
+  available: boolean;
 }
 
 /** Per-course statistics shown on the Performance Analysis page. */
 export interface CourseStatistics {
   quizzes: TaskBreakdown;
   assignments: TaskBreakdown;
-  /** Total time spent on the course, in hours. */
-  totalTimeHours: number;
+  /** Total time spent on the course, in hours; null when unavailable. */
+  totalTimeHours: number | null;
+  totalTimeValueSource: ActivityValueSource;
+  totalTimeAvailable: boolean;
   /** Weekly-average study time; null when no time data exists. */
   weeklyAverageHours: number | null;
+  weeklyAverageValueSource: ActivityValueSource;
+  weeklyAverageAvailable: boolean;
   /** True when weekly average is approximated, not from Moodle weekly logs. */
   weeklyAverageEstimated?: boolean;
+  hasMissingFields?: boolean;
 }
 
 export type ActivityDataSource = "seeded" | "synced" | "none";

@@ -17,8 +17,7 @@ LIMITED_INSIGHT_MESSAGE = (
     "Based on current grade records and available activity signals."
 )
 NOT_ENOUGH_DATA_MESSAGE = (
-    "More course-specific Moodle activity is needed before a reliable prediction "
-    "can be generated."
+    "Not enough synced Moodle activity data is available for a reliable prediction yet."
 )
 
 

@@ -547,6 +547,109 @@ GUIDANCE_STRENGTH_SPECS: List[Dict[str, Any]] = [
 ]
 
 
+def _metrics_has(metrics: Dict[str, Any], key: str) -> bool:
+    return bool(metrics) and key in metrics and metrics.get(key) is not None
+
+
+def _build_engagement_weakness(
+    overlay_feats: Dict[str, Any],
+    metrics: Dict[str, Any],
+    trust_context: Dict[str, Any],
+    active: int,
+) -> Optional[Dict[str, Any]]:
+    active_untrusted = trust_context.get("active_days_untrusted")
+    metrics_active = metrics.get("active_days_count")
+    if active_untrusted and metrics_active is None:
+        return {
+            "title": "Weekly engagement not synced",
+            "description": "Weekly engagement data is not synced for this course yet.",
+            "impact": 45,
+            "recommendation": "Sync Moodle activity or log in regularly so engagement can be tracked.",
+            "feature": "active_days",
+            "severity": "Medium",
+        }
+    if active < 8:
+        return {
+            "title": "Low weekly engagement",
+            "description": "Active days on the platform are low; consistent access predicts performance better than total time.",
+            "impact": 75 if active < 5 else 55,
+            "recommendation": "Log in for a short focused session most days rather than occasional long ones.",
+            "feature": "active_days",
+            "severity": "High",
+        }
+    return None
+
+
+def _build_quiz_weakness(
+    overlay_feats: Dict[str, Any],
+    metrics: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if _metrics_has(metrics, "quiz_attempts"):
+        if int(metrics.get("quiz_attempts") or 0) == 0:
+            return {
+                "title": "No quiz practice recorded",
+                "description": "No quiz attempts are synced for this course.",
+                "impact": 48,
+                "recommendation": "Attempt available quizzes and review incorrect answers before the next assessment.",
+                "feature": "quiz_attempts",
+                "severity": "Medium",
+            }
+        return None
+    if overlay_feats.get("quiz_attempts") is not None and int(overlay_feats.get("quiz_attempts") or 0) == 0:
+        return {
+            "title": "No quiz practice recorded",
+            "description": "Feature records show no quiz attempts for this course.",
+            "impact": 48,
+            "recommendation": "Attempt available quizzes and review incorrect answers before the next assessment.",
+            "feature": "quiz_attempts",
+            "severity": "Medium",
+        }
+    return {
+        "title": "Quiz practice not synced",
+        "description": "No synced quiz practice is available for this course yet.",
+        "impact": 42,
+        "recommendation": "Complete Moodle quizzes so attempt data can support guidance.",
+        "feature": "quiz_attempts",
+        "severity": "Medium",
+    }
+
+
+def _build_assignment_weakness(
+    overlay_feats: Dict[str, Any],
+    metrics: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if _metrics_has(metrics, "assignment_submissions"):
+        if int(metrics.get("assignment_submissions") or 0) == 0:
+            return {
+                "title": "No assignment activity recorded",
+                "description": "No assignment submissions are synced for this course.",
+                "impact": 46,
+                "recommendation": "Submit drafts early and use feedback before the final due date.",
+                "feature": "assignment_submissions",
+                "severity": "Medium",
+            }
+        return None
+    if overlay_feats.get("assignment_submissions") is not None and int(
+        overlay_feats.get("assignment_submissions") or 0
+    ) == 0:
+        return {
+            "title": "No assignment activity recorded",
+            "description": "Feature records show no assignment submissions for this course.",
+            "impact": 46,
+            "recommendation": "Submit drafts early and use feedback before the final due date.",
+            "feature": "assignment_submissions",
+            "severity": "Medium",
+        }
+    return {
+        "title": "Assignment activity not synced",
+        "description": "No synced assignment activity is available for this course yet.",
+        "impact": 40,
+        "recommendation": "Submit assignments in Moodle so activity can inform guidance.",
+        "feature": "assignment_submissions",
+        "severity": "Medium",
+    }
+
+
 def build_guidance_factors(
     overlay_feats: Dict[str, Any],
     metrics: Dict[str, Any],
@@ -559,27 +662,76 @@ def build_guidance_factors(
     grade_val = float(display) if display is not None else None
 
     weaknesses: List[Dict[str, Any]] = []
-    for spec in GUIDANCE_WEAKNESS_SPECS:
-        key = spec["key"]
-        if key == "late_submission_count" or key == "procrastination_index":
-            assign = int(
-                overlay_feats.get("assignment_submissions") or metrics.get("assignment_submissions") or 0
-            )
-            if assign <= 0 and key == "late_submission_count":
-                continue
-            if assign <= 0 and int(overlay_feats.get("late_submission_count") or 0) <= 0:
-                if key == "procrastination_index":
-                    continue
-        if not spec["test"](overlay_feats, metrics, active):
-            continue
+
+    engagement = _build_engagement_weakness(overlay_feats, metrics, trust_context, active)
+    if engagement:
+        weaknesses.append(engagement)
+
+    material = int(
+        overlay_feats.get("material_clicks") or metrics.get("number_of_resources_clicked") or 0
+    )
+    clicks = int(overlay_feats.get("all_clicks") or 0)
+    if material < 2 and clicks < 5:
         weaknesses.append(
             {
-                "title": spec["title"],
-                "description": spec["description"],
-                "impact": spec["impact"](overlay_feats, metrics, active),
-                "recommendation": spec["recommendation"],
-                "feature": key if key != "material_engagement" else "material_clicks",
-                "severity": spec["severity"],
+                "title": "Low material engagement",
+                "description": "Few course materials have been opened compared to typical engagement.",
+                "impact": 50,
+                "recommendation": "Review lecture slides and readings before each assignment deadline.",
+                "feature": "material_clicks",
+                "severity": "Medium",
+            }
+        )
+
+    time_spent = int(
+        overlay_feats.get("total_time_spent") or metrics.get("total_time_spent_seconds") or 0
+    )
+    if _metrics_has(metrics, "total_time_spent_seconds") or overlay_feats.get("total_time_spent") is not None:
+        if time_spent < 600:
+            weaknesses.append(
+                {
+                    "title": "Low study time",
+                    "description": "Total time spent in the course is low relative to what strong performers typically log.",
+                    "impact": 45,
+                    "recommendation": "Schedule two 45-minute study blocks per week for this course.",
+                    "feature": "total_time_spent",
+                    "severity": "Medium",
+                }
+            )
+
+    quiz_weakness = _build_quiz_weakness(overlay_feats, metrics)
+    if quiz_weakness:
+        weaknesses.append(quiz_weakness)
+
+    assign_weakness = _build_assignment_weakness(overlay_feats, metrics)
+    if assign_weakness:
+        weaknesses.append(assign_weakness)
+
+    assign = int(
+        overlay_feats.get("assignment_submissions") or metrics.get("assignment_submissions") or 0
+    )
+    late = int(overlay_feats.get("late_submission_count") or 0)
+    proc = float(overlay_feats.get("procrastination_index") or 0)
+    if assign > 0 and late > 0:
+        weaknesses.append(
+            {
+                "title": "Late submissions",
+                "description": "One or more assignments were submitted past their due date.",
+                "impact": min(85, 40 + late * 15),
+                "recommendation": "Enable calendar reminders and aim to submit a day early.",
+                "feature": "late_submission_count",
+                "severity": "High",
+            }
+        )
+    if assign > 0 and proc >= 3:
+        weaknesses.append(
+            {
+                "title": "High procrastination",
+                "description": "Tasks are being started close to deadlines, which the data links to lower performance.",
+                "impact": min(90, int(proc * 10)),
+                "recommendation": "Break work into daily micro-tasks and set personal deadlines 48 hours early.",
+                "feature": "procrastination_index",
+                "severity": "High",
             }
         )
 

@@ -184,6 +184,36 @@ export const mockDashboard: DashboardData = {
   },
 };
 
+const mockTask = (
+  attempted: number,
+  total: number,
+  averageScore: number
+) => ({
+  attempted,
+  total,
+  averageScore,
+  valueSource: "synced_moodle" as const,
+  available: true,
+});
+
+const mockStats = (
+  quizzes: ReturnType<typeof mockTask>,
+  assignments: ReturnType<typeof mockTask>,
+  totalTimeHours: number,
+  weeklyAverageHours: number
+) => ({
+  quizzes,
+  assignments,
+  totalTimeHours,
+  totalTimeValueSource: "synced_moodle" as const,
+  totalTimeAvailable: true,
+  weeklyAverageHours,
+  weeklyAverageValueSource: "synced_moodle" as const,
+  weeklyAverageAvailable: true,
+  weeklyAverageEstimated: false,
+  hasMissingFields: false,
+});
+
 const performanceByCourse: Record<string, PerformanceAnalysis> = {
   c_cs204: {
     course: mockCourses[0],
@@ -196,13 +226,12 @@ const performanceByCourse: Record<string, PerformanceAnalysis> = {
     activityDataSource: "synced",
     activityStatsNote:
       "Activity stats below are based on your latest synced Moodle activity records.",
-    statistics: {
-      quizzes: { attempted: 5, total: 6, averageScore: 81 },
-      assignments: { attempted: 4, total: 5, averageScore: 77 },
-      totalTimeHours: 41.5,
-      weeklyAverageHours: 3.8,
-      weeklyAverageEstimated: false,
-    },
+    statistics: mockStats(
+      mockTask(5, 6, 81),
+      mockTask(4, 5, 77),
+      41.5,
+      3.8
+    ),
   },
   c_cs311: {
     course: mockCourses[1],
@@ -215,13 +244,12 @@ const performanceByCourse: Record<string, PerformanceAnalysis> = {
     activityDataSource: "synced",
     activityStatsNote:
       "Activity stats below are based on your latest synced Moodle activity records.",
-    statistics: {
-      quizzes: { attempted: 3, total: 6, averageScore: 58 },
-      assignments: { attempted: 2, total: 5, averageScore: 63 },
-      totalTimeHours: 18.0,
-      weeklyAverageHours: 1.6,
-      weeklyAverageEstimated: false,
-    },
+    statistics: mockStats(
+      mockTask(3, 6, 58),
+      mockTask(2, 5, 63),
+      18.0,
+      1.6
+    ),
   },
   c_math210: {
     course: mockCourses[2],
@@ -234,13 +262,12 @@ const performanceByCourse: Record<string, PerformanceAnalysis> = {
     activityDataSource: "synced",
     activityStatsNote:
       "Activity stats below are based on your latest synced Moodle activity records.",
-    statistics: {
-      quizzes: { attempted: 6, total: 7, averageScore: 70 },
-      assignments: { attempted: 3, total: 4, averageScore: 74 },
-      totalTimeHours: 28.5,
-      weeklyAverageHours: 2.6,
-      weeklyAverageEstimated: false,
-    },
+    statistics: mockStats(
+      mockTask(6, 7, 70),
+      mockTask(3, 4, 74),
+      28.5,
+      2.6
+    ),
   },
   c_se340: {
     course: mockCourses[3],
@@ -253,13 +280,12 @@ const performanceByCourse: Record<string, PerformanceAnalysis> = {
     activityDataSource: "synced",
     activityStatsNote:
       "Activity stats below are based on your latest synced Moodle activity records.",
-    statistics: {
-      quizzes: { attempted: 4, total: 4, averageScore: 90 },
-      assignments: { attempted: 5, total: 5, averageScore: 85 },
-      totalTimeHours: 36.0,
-      weeklyAverageHours: 3.3,
-      weeklyAverageEstimated: false,
-    },
+    statistics: mockStats(
+      mockTask(4, 4, 90),
+      mockTask(5, 5, 85),
+      36.0,
+      3.3
+    ),
   },
 };
 

@@ -103,15 +103,28 @@ export default function PerformancePage() {
               />
               <PerformanceStatusCard
                 status={ready.status}
-                source={ready.classificationSource}
-                statusNote={ready.statusNote}
+                source={
+                  ready.predictionConfidence === "high"
+                    ? ready.classificationSource
+                    : undefined
+                }
+                statusNote={
+                  ready.statusNote ??
+                  (ready.predictionConfidence === "limited"
+                    ? "Status based on limited available data."
+                    : undefined)
+                }
               />
             </div>
-          ) : notEnoughData ? (
+          ) : null}
+
+          {notEnoughData ? (
             <MlUnavailableCard message={ready.message ?? ""} />
-          ) : (
+          ) : null}
+
+          {!hasPrediction && !notEnoughData ? (
             <LimitedInsightCard message={ready.message ?? ""} />
-          )}
+          ) : null}
 
           {hasPrediction ? (
             <Link

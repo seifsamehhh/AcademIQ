@@ -6,12 +6,13 @@ export function MlUnavailableCard({ message }: { message: string }) {
       <CardHeader>
         <CardTitle>Prediction not available yet</CardTitle>
         <CardDescription>
-          More course-specific Moodle activity is needed before a reliable prediction
-          can be generated.
+          Not enough synced Moodle activity data for a reliable prediction.
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <p className="text-sm text-muted-foreground leading-relaxed">{message}</p>
+        {message ? (
+          <p className="text-sm text-muted-foreground leading-relaxed">{message}</p>
+        ) : null}
       </CardContent>
     </Card>
   );

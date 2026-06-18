@@ -496,13 +496,13 @@ _ML_NO_FEATURES_MESSAGE = (
 )
 
 _ACTIVITY_NOTE_SEEDED = (
-    "Activity stats are based on synced Moodle records available to AcademIQ."
+    "Activity records are based on synced Moodle data currently available to AcademIQ."
 )
 _ACTIVITY_NOTE_SYNCED = (
-    "Activity stats are based on synced Moodle records available to AcademIQ."
+    "Activity records are based on synced Moodle data currently available to AcademIQ."
 )
 _ACTIVITY_NOTE_NONE = (
-    "Some Moodle activity features are not available yet."
+    "Some Moodle activity fields are not available yet."
 )
 _ML_INCOMPLETE_MESSAGE = (
     "The model needs complete synced Moodle activity features before it can "
@@ -822,9 +822,21 @@ def get_performance(
     total_seconds = metrics.get("total_time_spent_seconds", 0) or 0
     total_hours = round(total_seconds / 3600, 1)
     activity_source = _resolve_activity_source(user_id, metrics)
-    weekly_avg, weekly_estimated = _weekly_average_hours(
-        user_id, total_hours, activity_source
+    activity_stats = build_course_activity_statistics(
+        user_id,
+        metrics,
+        feats,
+        feat_debug,
+        quiz_avg,
+        assign_avg,
+        activity_source,
+        performance_mode,
     )
+    activity_note = _activity_stats_note(activity_source)
+    if activity_stats.get("hasMissingFields") and activity_source != "none":
+        activity_note = (
+            f"{activity_note} Some Moodle activity fields are not available yet."
+        )
 
     return {
         "course": _course_obj(user_id, course_id, student_id),
@@ -835,18 +847,8 @@ def get_performance(
         "gradeSource": resolved.get("gradeSource"),
         "gradeLabel": grade_source_label,
         "activityDataSource": activity_source,
-        "activityStatsNote": _activity_stats_note(activity_source),
-        "statistics": {
-            "quizzes": _task_breakdown(
-                metrics, "quiz_attempts", "number_of_quizzes_viewed", quiz_avg
-            ),
-            "assignments": _task_breakdown(
-                metrics, "assignment_submissions", "number_of_assignments_viewed", assign_avg
-            ),
-            "totalTimeHours": total_hours,
-            "weeklyAverageHours": weekly_avg,
-            "weeklyAverageEstimated": weekly_estimated,
-        },
+        "activityStatsNote": activity_note,
+        "statistics": activity_stats,
         "engine": "ml" if prediction_verified else "fallback",
         "mlAvailable": predicted is not None,
         "predictionVerified": prediction_verified,
@@ -886,6 +888,21 @@ def get_insights(
     trust_context = bundle.get("trustContext") or {}
     predicted = bundle.get("predictedGrade")
     mode = bundle.get("performanceMode") or "not_enough_data"
+
+    if mode == "not_enough_data":
+        return {
+            "course": _course_obj(user_id, course_id, student_id),
+            "isHighPerformer": False,
+            "performanceStatus": None,
+            "classificationSummary": (
+                "Not enough synced Moodle activity data is available for guidance yet."
+            ),
+            "riskFactors": [],
+            "heuristic": True,
+            "classificationSource": None,
+            "performanceMode": mode,
+        }
+
     factors = build_guidance_factors(
         feats, metrics, trust_context, resolved, predicted
     )
@@ -918,11 +935,30 @@ def get_insights(
                     factors = model_factors[:3]
 
     perf_status = bundle.get("status") or "Room to improve"
-    summary = bundle.get("classificationSource") or "Performance guidance"
-    if bundle.get("message"):
+    classification_source = bundle.get("classificationSource")
+    summary = classification_source or "Performance guidance"
+    if bundle.get("message") and bundle.get("message") != classification_source:
         summary = f"{summary}. {bundle['message']}"
 
     heuristic = bundle.get("predictionSource") not in ("ml_service", "local_ml")
+
+    factors = factors[:3]
+    if not factors and mode != "not_enough_data":
+        factors = [
+            {
+                "title": "Keep your current rhythm",
+                "description": (
+                    "Keep your current study rhythm and continue checking course "
+                    "materials weekly."
+                ),
+                "impact": 30,
+                "recommendation": (
+                    "Maintain steady weekly access even when assignment load is lighter."
+                ),
+                "feature": None,
+                "severity": "Low",
+            }
+        ]
 
     return {
         "course": _course_obj(user_id, course_id, student_id),

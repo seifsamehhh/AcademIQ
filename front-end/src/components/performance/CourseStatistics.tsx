@@ -2,6 +2,16 @@ import { ClipboardList, Clock, FileCheck2, CalendarClock } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import type { CourseStatistics as Stats, TaskBreakdown } from "@/lib/types";
 
+function formatAttempted(breakdown: TaskBreakdown): string {
+  if (!breakdown.available) {
+    return "Not available";
+  }
+  if (breakdown.total != null) {
+    return `${breakdown.attempted ?? 0} of ${breakdown.total} recorded`;
+  }
+  return `${breakdown.attempted ?? 0} recorded`;
+}
+
 function TaskRow({
   icon: Icon,
   label,
@@ -19,11 +29,7 @@ function TaskRow({
         </div>
         <div>
           <p className="text-sm font-medium text-foreground">{label}</p>
-          <p className="text-xs text-muted-foreground">
-            {breakdown.total != null
-              ? `${breakdown.attempted} of ${breakdown.total} recorded`
-              : "Not available"}
-          </p>
+          <p className="text-xs text-muted-foreground">{formatAttempted(breakdown)}</p>
         </div>
       </div>
       <div className="text-right">
@@ -43,11 +49,13 @@ function TimeRow({
   label,
   value,
   hint,
+  available,
 }: {
   icon: typeof Clock;
   label: string;
   value: string;
   hint?: string;
+  available: boolean;
 }) {
   return (
     <div className="flex items-center gap-3 rounded-lg border border-border bg-background p-4">
@@ -55,7 +63,9 @@ function TimeRow({
         <Icon className="h-4 w-4 text-primary" />
       </div>
       <div>
-        <p className="text-lg font-semibold text-foreground">{value}</p>
+        <p className="text-lg font-semibold text-foreground">
+          {available ? value : "Not available"}
+        </p>
         <p className="text-xs text-muted-foreground">{label}</p>
         {hint ? <p className="mt-1 text-xs text-muted-foreground/80">{hint}</p> : null}
       </div>
@@ -64,8 +74,6 @@ function TimeRow({
 }
 
 export function CourseStatistics({ stats }: { stats: Stats }) {
-  const showWeekly =
-    stats.weeklyAverageHours !== null && stats.weeklyAverageHours !== undefined;
   const weeklyEstimated = stats.weeklyAverageEstimated ?? false;
 
   return (
@@ -73,9 +81,14 @@ export function CourseStatistics({ stats }: { stats: Stats }) {
       <CardHeader>
         <CardTitle>Course Activity Records</CardTitle>
         <CardDescription>
-          Counts and time from stored activity snapshots — not live Moodle
-          dashboards or AI analytics.
+          Activity records are based on synced Moodle data currently available to
+          AcademIQ.
         </CardDescription>
+        {stats.hasMissingFields ? (
+          <p className="text-xs text-muted-foreground pt-1">
+            Some Moodle activity fields are not available yet.
+          </p>
+        ) : null}
       </CardHeader>
       <CardContent className="grid gap-4 sm:grid-cols-2">
         <TaskRow icon={ClipboardList} label="Quizzes" breakdown={stats.quizzes} />
@@ -83,24 +96,30 @@ export function CourseStatistics({ stats }: { stats: Stats }) {
         <TimeRow
           icon={Clock}
           label="Total recorded time on course"
-          value={`${stats.totalTimeHours.toFixed(1)} h`}
+          value={
+            stats.totalTimeHours != null ? `${stats.totalTimeHours.toFixed(1)} h` : "—"
+          }
+          available={stats.totalTimeAvailable}
         />
-        {showWeekly ? (
-          <TimeRow
-            icon={CalendarClock}
-            label={
-              weeklyEstimated
-                ? "Estimated weekly study time"
-                : "Average weekly study time (synced weeks)"
-            }
-            value={`${stats.weeklyAverageHours!.toFixed(1)} h`}
-            hint={
-              weeklyEstimated
-                ? "Approximation from total course time — not from Moodle weekly logs."
-                : undefined
-            }
-          />
-        ) : null}
+        <TimeRow
+          icon={CalendarClock}
+          label={
+            weeklyEstimated
+              ? "Estimated weekly study time"
+              : "Average weekly study time"
+          }
+          value={
+            stats.weeklyAverageHours != null
+              ? `${stats.weeklyAverageHours.toFixed(1)} h`
+              : "—"
+          }
+          available={stats.weeklyAverageAvailable}
+          hint={
+            weeklyEstimated && stats.weeklyAverageAvailable
+              ? "Estimated from total course time — not from Moodle weekly logs."
+              : undefined
+          }
+        />
       </CardContent>
     </Card>
   );
