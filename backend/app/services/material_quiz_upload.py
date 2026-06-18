@@ -19,6 +19,7 @@ from app.services.material_quiz_display import (
     detect_link_wrapper,
     is_educational_material,
     matches_educational_title,
+    resolve_quiz_material_display,
     _LAB_NUM_RE,
     _LECTURE_NUM_RE,
 )
@@ -1164,8 +1165,9 @@ def _append_db_not_uploaded_retry_rows(
     all_docs: List[Dict[str, Any]],
     results: List[Dict[str, Any]],
     force_reupload: bool,
-) -> None:
+) -> int:
     """Add DB-only not_uploaded learning rows missing from the scrape preflight batch."""
+    added = 0
     seen_ids = {str(r.get("material_id") or "") for r in results}
     seen_cmids: set[str] = set()
     for r in results:
@@ -1241,6 +1243,8 @@ def _append_db_not_uploaded_retry_rows(
         seen_ids.add(material_id)
         if url_cmid:
             seen_cmids.add(url_cmid)
+        added += 1
+    return added
 
 
 def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1545,7 +1549,7 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             "debug": debug_info,
         })
 
-    _append_db_not_uploaded_retry_rows(course_id, all_docs, results, force_reupload)
+    _db_retry_rows_added = _append_db_not_uploaded_retry_rows(course_id, all_docs, results, force_reupload)
 
     should_upload_count = sum(1 for r in results if r["should_upload"])
     matched_count = sum(1 for r in results if r.get("matched_by") is not None)
@@ -1562,10 +1566,19 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     downloadable_count = sum(1 for r in results if r.get("downloadable"))
 
+    unique_input_ids = {
+        str(_normalize_incoming_material_item(item).get("material_id") or "")
+        for item in materials_in
+    }
+    unique_input_ids.discard("")
+
     return {
         "course_id": course_id,
         "checked": len(results),
         "preflight_checked_total": len(results),
+        "preflight_input_count": len(materials_in),
+        "preflight_unique_input_count": len(unique_input_ids),
+        "db_retry_rows_added": _db_retry_rows_added,
         "detected_total": len(materials_in),
         "downloadable_count": downloadable_count,
         "metadata_only_count": len(results) - downloadable_count,
@@ -1719,6 +1732,269 @@ def _decode_payload_bytes(payload: Dict[str, Any]) -> tuple[bytes, Optional[str]
     return b"", None
 
 
+_TERMINAL_QUIZ_DISPLAY_STATUSES = frozenset(
+    {
+        "ready",
+        "limited_ready",
+        "extraction_failed",
+        "not_enough_readable_text",
+        "extraction_too_short",
+        "not_quiz_material",
+    }
+)
+
+
+def _resolve_preflight_upload_target(
+    course_id: str,
+    payload: Dict[str, Any],
+    title: str,
+    file_type: str,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """
+    Resolve the exact Mongo row Quiz Generation displays for this upload.
+    Requires db_id from preflight; aligns to canonical file row when applicable.
+    """
+    target_db_id = str(
+        payload.get("db_id") or payload.get("matched_db_id") or ""
+    ).strip()
+    if not target_db_id:
+        return None, None, {
+            "status": "rejected",
+            "reason": "db_id_required_from_preflight",
+            "extraction_error": "db_id_required_from_preflight",
+            "ok": False,
+            "verified_ok": False,
+            "attempted": False,
+            "backend_called": True,
+        }
+
+    target_doc = material_repository.get_by_object_id(target_db_id)
+    if not target_doc:
+        return None, None, {
+            "status": "rejected",
+            "reason": "db_id_not_found",
+            "extraction_error": "db_id_not_found",
+            "db_id": target_db_id,
+            "ok": False,
+            "verified_ok": False,
+            "attempted": False,
+            "backend_called": True,
+        }
+
+    if str(target_doc.get("course_id") or "") != str(course_id):
+        return None, None, {
+            "status": "rejected",
+            "reason": "db_id_course_mismatch",
+            "extraction_error": "db_id_course_mismatch",
+            "db_id": target_db_id,
+            "ok": False,
+            "verified_ok": False,
+            "attempted": False,
+            "backend_called": True,
+        }
+
+    canonical = _find_canonical_learning_row(course_id, title, file_type)
+    if canonical:
+        canonical_db_id = _mongo_id_str(canonical)
+        if canonical_db_id and canonical_db_id != target_db_id:
+            target_db_id = canonical_db_id
+            target_doc = canonical
+
+    return target_db_id, target_doc, None
+
+
+def _read_verified_upload_state(
+    course_id: str,
+    target_db_id: str,
+) -> Dict[str, Any]:
+    """Re-read the exact preflight db_id from Mongo and map Quiz Generation display fields."""
+    doc = material_repository.get_by_object_id(target_db_id)
+    if not doc:
+        return {
+            "found": False,
+            "db_id": target_db_id,
+            "reason": "db_id_not_found_after_save",
+        }
+
+    displays, _ = resolve_quiz_material_display([doc])
+    display = displays[0] if displays else {}
+    content_len = int(display.get("content_text_length") or 0) or _content_chars_from_doc(doc)
+    quiz_status = str(display.get("quiz_status") or "not_uploaded")
+    extraction_status = str(doc.get("extraction_status") or "not_uploaded")
+    reason = (
+        display.get("reason")
+        or display.get("why_not_ready")
+        or doc.get("extraction_error")
+        or ""
+    )
+
+    return {
+        "found": True,
+        "db_id": target_db_id,
+        "material_id": str(doc.get("material_id") or ""),
+        "title": display.get("title") or doc.get("title"),
+        "content_text_length": content_len,
+        "quiz_status": quiz_status,
+        "extraction_status": extraction_status,
+        "ready_for_quiz": bool(display.get("ready_for_quiz")),
+        "probe_question_count": display.get("probe_question_count"),
+        "reason": reason,
+        "source_url": doc.get("url") or doc.get("source_url"),
+        "resolved_url": doc.get("resolved_url"),
+    }
+
+
+def _compute_verified_upload_flags(
+    state: Dict[str, Any],
+    attempted: bool,
+) -> Dict[str, bool]:
+    content_len = int(state.get("content_text_length") or 0)
+    quiz_status = str(state.get("quiz_status") or "not_uploaded")
+    extraction_status = str(state.get("extraction_status") or "not_uploaded")
+
+    terminal_extraction = extraction_status not in ("", "not_uploaded")
+    terminal_quiz = quiz_status in _TERMINAL_QUIZ_DISPLAY_STATUSES
+
+    verified_ready = quiz_status in ("ready", "limited_ready")
+    verified_failed = (
+        extraction_status == "extraction_failed"
+        or quiz_status == "extraction_failed"
+        or quiz_status in ("not_enough_readable_text", "extraction_too_short")
+    )
+    verified_uploaded = content_len > 0 or (
+        attempted and (terminal_extraction or terminal_quiz)
+    )
+    verified_ok = (
+        content_len > 0
+        or verified_ready
+        or verified_failed
+        or (attempted and terminal_extraction)
+    )
+    if attempted and content_len == 0 and extraction_status == "not_uploaded":
+        verified_ok = False
+        verified_uploaded = False
+
+    return {
+        "verified_ok": verified_ok,
+        "verified_uploaded": verified_uploaded,
+        "verified_ready": verified_ready,
+        "verified_failed": verified_failed,
+    }
+
+
+def _repair_still_not_uploaded_row(
+    course_id: str,
+    target_db_id: str,
+    reason: str,
+) -> None:
+    doc = material_repository.get_by_object_id(target_db_id)
+    if not doc:
+        return
+    now = datetime.utcnow()
+    material_repository.upsert(
+        {
+            "course_id": course_id,
+            "material_id": str(doc.get("material_id") or ""),
+            "title": doc.get("title"),
+            "extraction_status": "extraction_failed",
+            "extraction_error": reason,
+            "ready_for_quiz": False,
+            "last_attempted_at": now,
+            "processed_at": now,
+            "metadata_only": False,
+        }
+    )
+
+
+def _package_upload_response(
+    course_id: str,
+    target_db_id: str,
+    attempted: bool,
+    payload: Dict[str, Any],
+    body: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Attach verified Mongo re-read fields and set ok only when the exact db_id row
+    was substantively updated (content or terminal status).
+    """
+    upload_audit = dict(payload.get("upload_audit") or {})
+    upload_audit["backend_called"] = True
+    upload_audit["attempted"] = attempted
+
+    state = _read_verified_upload_state(course_id, target_db_id)
+    if not state.get("found"):
+        body.update(
+            {
+                "db_id": target_db_id,
+                "ok": False,
+                "verified_ok": False,
+                "attempted": attempted,
+                "backend_called": True,
+                "reason": state.get("reason"),
+                "verification_audit": upload_audit,
+            }
+        )
+        return body
+
+    if (
+        attempted
+        and state["content_text_length"] == 0
+        and state["extraction_status"] == "not_uploaded"
+    ):
+        repair_reason = (
+            body.get("extraction_error")
+            or upload_audit.get("failure_reason")
+            or upload_audit.get("download_status")
+            or "upload_verification_failed_still_not_uploaded"
+        )
+        _repair_still_not_uploaded_row(course_id, target_db_id, repair_reason)
+        state = _read_verified_upload_state(course_id, target_db_id)
+
+    flags = _compute_verified_upload_flags(state, attempted)
+    verification_audit = {
+        "title": state.get("title"),
+        "db_id": target_db_id,
+        "material_id": state.get("material_id"),
+        "source_url": state.get("source_url"),
+        "resolved_url": state.get("resolved_url"),
+        "download_url_used": upload_audit.get("download_url_used"),
+        "attempted": attempted,
+        "backend_called": True,
+        "verified_content_text_length": state["content_text_length"],
+        "verified_quiz_status": state["quiz_status"],
+        "verified_extraction_status": state["extraction_status"],
+        "reason": state.get("reason"),
+        **flags,
+    }
+
+    body.update(
+        {
+            "db_id": target_db_id,
+            "material_id": state.get("material_id"),
+            "title": state.get("title"),
+            "content_text_length": state["content_text_length"],
+            "verified_content_text_length": state["content_text_length"],
+            "chars": state["content_text_length"],
+            "quiz_status": state["quiz_status"],
+            "verified_quiz_status": state["quiz_status"],
+            "extraction_status": state["extraction_status"],
+            "verified_extraction_status": state["extraction_status"],
+            "ready_for_quiz": state["ready_for_quiz"],
+            "probe_question_count": state.get("probe_question_count"),
+            "reason": state.get("reason"),
+            "source_url": state.get("source_url"),
+            "resolved_url": state.get("resolved_url"),
+            "download_url_used": upload_audit.get("download_url_used"),
+            "attempted": attempted,
+            "backend_called": True,
+            "verification_audit": verification_audit,
+            **flags,
+            "ok": flags["verified_ok"],
+        }
+    )
+    return body
+
+
 def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Upsert material metadata + extracted text from extension upload.
@@ -1748,6 +2024,26 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     title = (payload.get("title") or "Untitled Material").strip()
     file_type = payload.get("file_type") or payload.get("fileType") or "unknown"
 
+    target_db_id, target_doc, reject = _resolve_preflight_upload_target(
+        course_id, payload, title, str(file_type)
+    )
+    if reject:
+        return reject
+
+    material_id = str(target_doc.get("material_id") or raw_material_id)
+    stable_key = target_doc.get("stable_material_key") or _compute_stable_material_key(
+        course_id,
+        {
+            "title": title,
+            "file_type": file_type,
+            "activity_url": source_url,
+            "resolved_url": resolved_url_payload,
+            "raw_material_id": raw_material_id,
+            "material_id": material_id,
+        },
+    )
+    identity_before = _identity_result(target_doc, "preflight_db_id", stable_key)
+
     norm = _normalize_incoming_material_item(
         {
             "title": title,
@@ -1755,25 +2051,23 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
             "url": source_url,
             "source_url": source_url,
             "resolved_url": resolved_url_payload,
-            "material_id": raw_material_id,
-            "id": raw_material_id,
+            "material_id": material_id,
+            "id": material_id,
+            "raw_material_id": raw_material_id,
         }
     )
-    identity_before = resolve_material_identity(
-        course_id,
-        norm,
-        db_id=str(payload.get("db_id") or payload.get("matched_db_id") or "").strip() or None,
-        stable_material_key=str(payload.get("stable_material_key") or "").strip() or None,
-        matched_material_id=str(
-            payload.get("matched_material_id")
-            or payload.get("db_material_id")
-            or raw_material_id
-        ).strip()
-        or None,
-    )
-    material_id = identity_before["material_id"]
     if not course_id or not material_id:
-        raise ValueError("course_id and material_id are required")
+        return _package_upload_response(
+            course_id,
+            target_db_id,
+            False,
+            payload,
+            {
+                "status": "rejected",
+                "reason": "course_id_and_material_id_required",
+                "extraction_error": "course_id_and_material_id_required",
+            },
+        )
 
     course_name = payload.get("course_name")
     material_type = payload.get("material_type") or payload.get("type")
@@ -1805,24 +2099,29 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
             if existing_doc.get("processed_at") or (
                 existing_doc.get("extraction_status") in _TERMINAL_EXTRACTION_STATUSES
             ):
-                return {
-                    "status": "skipped_existing",
-                    "already_ready": False,
-                    "course_id": course_id,
-                    "material_id": material_id,
-                    "resolved_from_material_id": (
-                        raw_material_id if raw_material_id != material_id else None
-                    ),
-                    "title": existing_doc.get("title", title),
-                    "chars": _content_chars_from_doc(existing_doc),
-                    "ready_for_quiz": bool(existing_doc.get("ready_for_quiz")),
-                    "hasContent": _content_chars_from_doc(existing_doc) >= MIN_QUIZ_CONTENT_CHARS,
-                    "extraction_status": existing_doc.get("extraction_status"),
-                    "extraction_error": existing_doc.get("extraction_error"),
-                    "content_note": "Previously processed — download not retried",
-                    "inserted": False,
-                    "ok": True,
-                }
+                return _package_upload_response(
+                    course_id,
+                    target_db_id,
+                    True,
+                    payload,
+                    {
+                        "status": "skipped_existing",
+                        "already_ready": False,
+                        "course_id": course_id,
+                        "material_id": material_id,
+                        "resolved_from_material_id": (
+                            raw_material_id if raw_material_id != material_id else None
+                        ),
+                        "title": existing_doc.get("title", title),
+                        "chars": _content_chars_from_doc(existing_doc),
+                        "ready_for_quiz": bool(existing_doc.get("ready_for_quiz")),
+                        "hasContent": _content_chars_from_doc(existing_doc) >= MIN_QUIZ_CONTENT_CHARS,
+                        "extraction_status": existing_doc.get("extraction_status"),
+                        "extraction_error": existing_doc.get("extraction_error"),
+                        "content_note": "Previously processed — download not retried",
+                        "inserted": False,
+                    },
+                )
         fail_doc: Dict[str, Any] = {
             "course_id": course_id,
             "material_id": material_id,
@@ -1868,24 +2167,31 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         fail_doc["last_upload_audit"] = fail_audit
         fail_doc["last_upload_audit_at"] = now
         inserted = material_repository.upsert(fail_doc)
-        return {
-            "status": "stored_failed",
-            "already_ready": False,
-            "course_id": course_id,
-            "material_id": material_id,
-            "resolved_from_material_id": (
-                raw_material_id if raw_material_id != material_id else None
-            ),
-            "title": title,
-            "chars": 0,
-            "ready_for_quiz": False,
-            "hasContent": False,
-            "extraction_status": "extraction_failed",
-            "extraction_error": fail_doc["extraction_error"],
-            "content_note": f"Download failed: {extraction_error}",
-            "inserted": inserted,
-            "ok": True,
-        }
+        return _package_upload_response(
+            course_id,
+            target_db_id,
+            True,
+            payload,
+            {
+                "status": "stored_failed",
+                "already_ready": False,
+                "course_id": course_id,
+                "material_id": material_id,
+                "resolved_from_material_id": (
+                    raw_material_id if raw_material_id != material_id else None
+                ),
+                "title": title,
+                "chars": 0,
+                "ready_for_quiz": False,
+                "hasContent": False,
+                "extraction_status": "extraction_failed",
+                "extraction_error": fail_doc["extraction_error"],
+                "quiz_status": "extraction_failed",
+                "content_note": f"Download failed: {extraction_error}",
+                "inserted": inserted,
+                "identity_audit": fail_audit,
+            },
+        )
 
     # ── Step 1: classify by title/type before any extraction work ────────────
     is_non_quiz, non_quiz_reason = classify_non_quiz_material(title, str(file_type))
@@ -1895,22 +2201,30 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     if is_non_quiz:
         existing_doc = material_repository.get(course_id, material_id)
         if existing_doc and existing_doc.get("extraction_status") == "not_quiz_material":
-            # Already classified — return immediately without touching the DB
-            return {
-                "status": "already_classified",
-                "already_ready": False,
-                "course_id": course_id,
-                "material_id": material_id,
-                "resolved_from_material_id": raw_material_id if raw_material_id != material_id else None,
-                "title": existing_doc.get("title", title),
-                "chars": 0,
-                "ready_for_quiz": False,
-                "hasContent": False,
-                "extraction_status": "not_quiz_material",
-                "extraction_error": non_quiz_reason,
-                "content_note": f"Not quiz material: {non_quiz_reason}",
-                "inserted": False,
-            }
+            return _package_upload_response(
+                course_id,
+                target_db_id,
+                False,
+                payload,
+                {
+                    "status": "already_classified",
+                    "already_ready": False,
+                    "course_id": course_id,
+                    "material_id": material_id,
+                    "resolved_from_material_id": (
+                        raw_material_id if raw_material_id != material_id else None
+                    ),
+                    "title": existing_doc.get("title", title),
+                    "chars": 0,
+                    "ready_for_quiz": False,
+                    "hasContent": False,
+                    "extraction_status": "not_quiz_material",
+                    "extraction_error": non_quiz_reason,
+                    "quiz_status": "not_quiz_material",
+                    "content_note": f"Not quiz material: {non_quiz_reason}",
+                    "inserted": False,
+                },
+            )
         # Store minimal record so the material is visible in the UI
         minimal_doc = {
             "course_id": course_id,
@@ -1929,21 +2243,30 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         if source_url:
             minimal_doc["url"] = source_url
         material_repository.upsert(minimal_doc)
-        return {
-            "status": "classified",
-            "already_ready": False,
-            "course_id": course_id,
-            "material_id": material_id,
-            "resolved_from_material_id": raw_material_id if raw_material_id != material_id else None,
-            "title": title,
-            "chars": 0,
-            "ready_for_quiz": False,
-            "hasContent": False,
-            "extraction_status": "not_quiz_material",
-            "extraction_error": non_quiz_reason,
-            "content_note": f"Not quiz material: {non_quiz_reason}",
-            "inserted": True,
-        }
+        return _package_upload_response(
+            course_id,
+            target_db_id,
+            False,
+            payload,
+            {
+                "status": "classified",
+                "already_ready": False,
+                "course_id": course_id,
+                "material_id": material_id,
+                "resolved_from_material_id": (
+                    raw_material_id if raw_material_id != material_id else None
+                ),
+                "title": title,
+                "chars": 0,
+                "ready_for_quiz": False,
+                "hasContent": False,
+                "extraction_status": "not_quiz_material",
+                "extraction_error": non_quiz_reason,
+                "quiz_status": "not_quiz_material",
+                "content_note": f"Not quiz material: {non_quiz_reason}",
+                "inserted": True,
+            },
+        )
 
     # ── Step 2: caching — skip re-extraction if already processed ───────────
     existing_doc = material_repository.get(course_id, material_id)
@@ -1952,24 +2275,30 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         existing_chars = _content_chars_from_doc(existing_doc)
 
         if existing_status in _TERMINAL_EXTRACTION_STATUSES:
-            return {
-                "status": "already_classified",
-                "already_ready": False,
-                "course_id": course_id,
-                "material_id": material_id,
-                "resolved_from_material_id": (
-                    raw_material_id if raw_material_id != material_id else None
-                ),
-                "title": existing_doc.get("title", title),
-                "chars": existing_chars,
-                "ready_for_quiz": False,
-                "hasContent": False,
-                "extraction_status": existing_status,
-                "extraction_error": existing_doc.get("extraction_error"),
-                "content_note": f"Previously processed: {existing_status}",
-                "inserted": False,
-                "ok": True,
-            }
+            return _package_upload_response(
+                course_id,
+                target_db_id,
+                False,
+                payload,
+                {
+                    "status": "already_classified",
+                    "already_ready": False,
+                    "course_id": course_id,
+                    "material_id": material_id,
+                    "resolved_from_material_id": (
+                        raw_material_id if raw_material_id != material_id else None
+                    ),
+                    "title": existing_doc.get("title", title),
+                    "chars": existing_chars,
+                    "ready_for_quiz": False,
+                    "hasContent": False,
+                    "extraction_status": existing_status,
+                    "extraction_error": existing_doc.get("extraction_error"),
+                    "quiz_status": existing_status,
+                    "content_note": f"Previously processed: {existing_status}",
+                    "inserted": False,
+                },
+            )
 
         if existing_doc.get("processed_at") or existing_chars > 0:
             probe_fields = _derive_readiness_from_probe(
@@ -1988,25 +2317,31 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
                     }
                 )
             already_ready = probe_fields["ready_for_quiz"]
-            return {
-                "status": "skipped_existing",
-                "already_ready": already_ready,
-                "course_id": course_id,
-                "material_id": material_id,
-                "resolved_from_material_id": (
-                    raw_material_id if raw_material_id != material_id else None
-                ),
-                "title": existing_doc.get("title", title),
-                "chars": existing_chars,
-                "ready_for_quiz": already_ready,
-                "hasContent": already_ready,
-                "extraction_status": probe_fields["extraction_status"],
-                "extraction_error": probe_fields["extraction_error"],
-                "probe_question_count": probe_fields.get("probe_question_count"),
-                "content_note": "Previously processed — not re-extracted",
-                "inserted": False,
-                "ok": True,
-            }
+            return _package_upload_response(
+                course_id,
+                target_db_id,
+                False,
+                payload,
+                {
+                    "status": "skipped_existing",
+                    "already_ready": already_ready,
+                    "course_id": course_id,
+                    "material_id": material_id,
+                    "resolved_from_material_id": (
+                        raw_material_id if raw_material_id != material_id else None
+                    ),
+                    "title": existing_doc.get("title", title),
+                    "chars": existing_chars,
+                    "ready_for_quiz": already_ready,
+                    "hasContent": already_ready,
+                    "extraction_status": probe_fields["extraction_status"],
+                    "extraction_error": probe_fields["extraction_error"],
+                    "probe_question_count": probe_fields.get("probe_question_count"),
+                    "quiz_status": probe_fields.get("quiz_probe_status"),
+                    "content_note": "Previously processed — not re-extracted",
+                    "inserted": False,
+                },
+            )
 
     # ── Extract text ─────────────────────────────────────────────────────────
     text = (payload.get("content_text") or "").strip()
@@ -2158,23 +2493,28 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         else:
             content_note = "No readable text could be extracted from this file."
 
-    return {
-        "status": "stored",
-        "course_id": course_id,
-        "material_id": material_id,
-        "resolved_from_material_id": raw_material_id if raw_material_id != material_id else None,
-        "title": title,
-        "chars": chars,
-        "ready_for_quiz": ready_for_quiz,
-        "hasContent": ready_for_quiz,
-        "extraction_status": extraction_status,
-        "extraction_error": extraction_error,
-        "probe_question_count": probe_count,
-        "quiz_status": probe_fields.get("quiz_probe_status") if chars > 0 else extraction_status,
-        "download_attempted": True,
-        "download_status": "extracted" if chars > 0 else extraction_status,
-        "content_note": content_note,
-        "inserted": inserted,
-        "ok": True,
-        "identity_audit": identity_audit,
-    }
+    return _package_upload_response(
+        course_id,
+        target_db_id,
+        True,
+        payload,
+        {
+            "status": "stored",
+            "course_id": course_id,
+            "material_id": material_id,
+            "resolved_from_material_id": raw_material_id if raw_material_id != material_id else None,
+            "title": title,
+            "chars": chars,
+            "ready_for_quiz": ready_for_quiz,
+            "hasContent": ready_for_quiz,
+            "extraction_status": extraction_status,
+            "extraction_error": extraction_error,
+            "probe_question_count": probe_count,
+            "quiz_status": probe_fields.get("quiz_probe_status") if chars > 0 else extraction_status,
+            "download_attempted": True,
+            "download_status": "extracted" if chars > 0 else extraction_status,
+            "content_note": content_note,
+            "inserted": inserted,
+            "identity_audit": identity_audit,
+        },
+    )

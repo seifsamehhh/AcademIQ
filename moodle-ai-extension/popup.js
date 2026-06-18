@@ -708,8 +708,11 @@ const formatQuizUploadSummary = ({
     courseId,
     courseName,
     detected = 0,
+    uniqueMaterials = 0,
     metadataSaved = 0,
     preflightChecked = 0,
+    preflightInputCount = 0,
+    dbRetryAdded = 0,
     dbFound = 0,
     uploadAttempted = 0,
     uploaded = 0,
@@ -730,6 +733,9 @@ const formatQuizUploadSummary = ({
         `Course ${courseId}${courseName ? ` · ${courseName}` : ""}`,
         `Detected ${detected}`,
     ];
+    if (uniqueMaterials > 0 && uniqueMaterials !== detected) {
+        parts.push(`Unique materials ${uniqueMaterials}`);
+    }
     if (metadataSaved > 0 || detected > 0) {
         parts.push(`Saved metadata ${metadataSaved || detected}`);
     }
@@ -737,7 +743,13 @@ const formatQuizUploadSummary = ({
         parts.push(`DB has ${dbFound} unique rows`);
     }
     if (preflightChecked > 0) {
-        parts.push(`Preflight checked ${preflightChecked}`);
+        const preflightLabel =
+            preflightInputCount > 0 && preflightInputCount !== preflightChecked
+                ? `Preflight checked ${preflightChecked} (${preflightInputCount} scraped${
+                      dbRetryAdded > 0 ? ` + ${dbRetryAdded} DB retry` : ""
+                  })`
+                : `Preflight checked ${preflightChecked}`;
+        parts.push(preflightLabel);
         if (dbFound > 0) parts.push(`DB has ${dbFound} for course`);
     }
     if (uploadAttempted > 0 || total > 0) {
@@ -802,6 +814,31 @@ const logRetryExtractionAudit = (tabResult, courseId) => {
         console.table(identityRows);
         console.groupEnd();
     }
+    const verificationAudit =
+        tabResult?.failed_or_unchanged_audit ||
+        tabResult?.verification_audit ||
+        (tabResult?.results || []).map((row) => row.verification_audit).filter(Boolean);
+    if (verificationAudit.length) {
+        console.group(`[AcademIQ] Verified upload audit — course ${courseId}`);
+        console.table(
+            verificationAudit.map((row) => ({
+                title: row.title,
+                db_id: row.db_id,
+                material_id: row.material_id,
+                source_url: row.source_url,
+                resolved_url: row.resolved_url,
+                download_url_used: row.download_url_used,
+                attempted: row.attempted,
+                backend_called: row.backend_called,
+                verified_content_text_length: row.verified_content_text_length,
+                verified_quiz_status: row.verified_quiz_status,
+                verified_extraction_status: row.verified_extraction_status,
+                verified_ok: row.verified_ok,
+                reason: row.reason,
+            }))
+        );
+        console.groupEnd();
+    }
     const audit =
         tabResult?.targeted_retry_audit ||
         tabResult?.retry_audit ||
@@ -849,6 +886,9 @@ const runQuizMaterialUpload = async () => {
     // All materials visible on the page (metadata only, no downloads yet)
     const scrapedMaterials = tabSync.materials || [];
     const detected = scrapedMaterials.length;
+    const uniqueMaterials = new Set(
+        scrapedMaterials.map((m) => String(m.material_id || m.id || "")).filter(Boolean)
+    ).size;
     const downloadable = scrapedMaterials.filter(isDownloadableMaterial);
     const excludedFromDownload = detected - downloadable.length;
 
@@ -898,6 +938,8 @@ const runQuizMaterialUpload = async () => {
     let skippedExtractionFailed = 0;
     let reprocessing = 0;
     let preflightChecked = 0;
+    let preflightInputCount = 0;
+    let dbRetryAdded = 0;
     let onlyMaterialIds = null;
     let preflightItems = null;
 
@@ -919,7 +961,10 @@ const runQuizMaterialUpload = async () => {
             return;
         }
 
-        preflightChecked = (pf.data.materials || []).length;
+        preflightChecked = pf.data.checked || (pf.data.materials || []).length;
+        preflightInputCount =
+            pf.data.preflight_unique_input_count || pf.data.preflight_input_count || uniqueMaterials;
+        dbRetryAdded = pf.data.db_retry_rows_added || 0;
         dbFound = pf.data.db_materials_found_for_course || 0;
 
         console.group(`[AcademIQ] Preflight response — course ${courseId}`);
@@ -962,8 +1007,11 @@ const runQuizMaterialUpload = async () => {
                 courseId,
                 courseName,
                 detected,
+                uniqueMaterials,
                 metadataSaved,
                 preflightChecked,
+                preflightInputCount,
+                dbRetryAdded,
                 dbFound,
                 uploadAttempted: 0,
                 uploaded: 0,
@@ -994,8 +1042,11 @@ const runQuizMaterialUpload = async () => {
             courseId,
             courseName,
             detected,
+            uniqueMaterials,
             metadataSaved,
             preflightChecked,
+            preflightInputCount,
+            dbRetryAdded,
             dbFound,
             uploadAttempted: 0,
             uploaded: 0,
@@ -1030,8 +1081,11 @@ const runQuizMaterialUpload = async () => {
             courseId,
             courseName: tabResult.course_name || courseName,
             detected,
+            uniqueMaterials,
             metadataSaved,
             preflightChecked,
+            preflightInputCount,
+            dbRetryAdded,
             dbFound,
             uploadAttempted: total,
             uploaded,
@@ -1046,6 +1100,10 @@ const runQuizMaterialUpload = async () => {
             excludedFromDownload,
             excludedReason: "url/html/link — metadata saved only",
             endpoint: tabResult.backend_endpoint || UPLOAD_QUIZ_URL,
+            extra:
+                tabResult.failed_or_unchanged_audit?.length
+                    ? `${tabResult.failed_or_unchanged_audit.length} failed/unchanged — see console audit`
+                    : "",
         });
         return;
     }
@@ -1068,8 +1126,11 @@ const runQuizMaterialUpload = async () => {
             btn.textContent = `Uploading ${i + 1}/${stored.length}...`;
             try {
                 const result = await uploadStoredMaterial(stored[i], identity);
-                if (result.ok) uploaded += 1; else failed += 1;
-                if (result.ready_for_quiz) ready += 1;
+                if (result.verified_uploaded) uploaded += 1;
+                else if (result.verified_failed || (result.attempted && !result.verified_ok)) failed += 1;
+                else if (result.ok) uploaded += 1;
+                else failed += 1;
+                if (result.verified_ready || result.ready_for_quiz) ready += 1;
             } catch (_error) {
                 failed += 1;
             }
@@ -1122,9 +1183,11 @@ const bindQuizUploadControls = () => {
         refs.uploadQuizBtn.disabled = true;
         const identity = currentData?.student || {};
         const results = await uploadPickedFiles(files, currentCourseId, identity);
-        const uploaded = results.filter((row) => row.ok).length;
-        const ready = results.filter((row) => row.ready_for_quiz).length;
-        const failed = results.length - uploaded;
+        const uploaded = results.filter((row) => row.verified_uploaded).length;
+        const ready = results.filter((row) => row.verified_ready || row.ready_for_quiz).length;
+        const failed = results.filter(
+            (row) => row.verified_failed || (row.attempted && !row.verified_ok)
+        ).length;
         refs.uploadQuizBtn.disabled = false;
         refs.uploadMeta.textContent = formatQuizUploadSummary({
             courseId: currentCourseId,

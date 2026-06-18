@@ -1151,6 +1151,70 @@
         return value;
     };
 
+    const buildVerificationAuditRow = (row) => ({
+        title: row.title,
+        db_id: row.db_id,
+        material_id: row.material_id,
+        source_url: row.source_url,
+        resolved_url: row.resolved_url,
+        download_url_used: row.download_url_used || row.verification_audit?.download_url_used,
+        attempted: row.attempted,
+        backend_called: row.backend_called,
+        verified_content_text_length: row.verified_content_text_length,
+        verified_quiz_status: row.verified_quiz_status,
+        verified_extraction_status: row.verified_extraction_status,
+        reason: row.reason || row.error,
+        verified_ok: row.verified_ok,
+        verified_uploaded: row.verified_uploaded,
+        verified_ready: row.verified_ready,
+        verified_failed: row.verified_failed,
+    });
+
+    const TARGET_VERIFICATION_TITLES =
+        /lecture\s*#?\s*2|lecture\s*#?\s*3|lecture\s*#?\s*4|lecture\s*#?\s*6|lecture\s*#?\s*7|lecture\s*#?\s*8|lab\s*#?\s*6|lecture2|lecture3|lecture4/i;
+
+    const countVerifiedUploadResults = (results) => {
+        const uploaded = results.filter((row) => row.verified_uploaded).length;
+        const ready = results.filter((row) => row.verified_ready).length;
+        const failed = results.filter(
+            (row) => row.verified_failed || (row.attempted && !row.verified_ok)
+        ).length;
+        return { uploaded, ready, failed };
+    };
+
+    const finalizeUploadBackendResult = (basePayload, workingMaterial, fetched, res, data) => ({
+        material_id: data.material_id || basePayload.material_id,
+        title: data.title || basePayload.title,
+        ok: Boolean(data.verified_ok),
+        verified_ok: Boolean(data.verified_ok),
+        verified_uploaded: Boolean(data.verified_uploaded),
+        verified_ready: Boolean(data.verified_ready),
+        verified_failed: Boolean(data.verified_failed),
+        attempted: Boolean(data.attempted),
+        backend_called: Boolean(data.backend_called),
+        ...data,
+        audit: buildUploadAuditRow(workingMaterial, fetched, data),
+        identity_audit: data.identity_audit || null,
+        verification_audit: data.verification_audit || buildVerificationAuditRow({
+            title: data.title || basePayload.title,
+            db_id: data.db_id || basePayload.db_id,
+            material_id: data.material_id || basePayload.material_id,
+            source_url: data.source_url || basePayload.source_url,
+            resolved_url: data.resolved_url || basePayload.resolved_url,
+            download_url_used: data.download_url_used,
+            attempted: data.attempted,
+            backend_called: data.backend_called,
+            verified_content_text_length: data.verified_content_text_length,
+            verified_quiz_status: data.verified_quiz_status,
+            verified_extraction_status: data.verified_extraction_status,
+            reason: data.reason,
+            verified_ok: data.verified_ok,
+            verified_uploaded: data.verified_uploaded,
+            verified_ready: data.verified_ready,
+            verified_failed: data.verified_failed,
+        }),
+    });
+
     const uploadMaterialToBackend = async (backendUploadUrl, material, identity) => {
         const basePayload = {
             course_id: material.course_id || material.courseId,
@@ -1171,6 +1235,33 @@
             resolved_url: material.resolvedUrl || material.resolved_url || null,
             user_email: identity?.email || null
         };
+
+        if (!basePayload.db_id) {
+            return {
+                material_id: basePayload.material_id,
+                title: basePayload.title,
+                ok: false,
+                verified_ok: false,
+                verified_uploaded: false,
+                verified_ready: false,
+                verified_failed: false,
+                attempted: true,
+                backend_called: false,
+                error: "missing_db_id_from_preflight",
+                reason: "missing_db_id_from_preflight",
+                verification_audit: buildVerificationAuditRow({
+                    title: basePayload.title,
+                    db_id: null,
+                    material_id: basePayload.material_id,
+                    source_url: basePayload.source_url,
+                    resolved_url: basePayload.resolved_url,
+                    attempted: true,
+                    backend_called: false,
+                    reason: "missing_db_id_from_preflight",
+                    verified_ok: false,
+                }),
+            };
+        }
 
         const postUploadPayload = async (body) => {
             const res = await fetch(backendUploadUrl, {
@@ -1225,14 +1316,13 @@
                         was_in_extension_upload_queue: true,
                     },
                 });
-                const result = {
-                    material_id: basePayload.material_id,
-                    title: basePayload.title,
-                    ok: res.ok,
-                    ...data,
-                    audit: buildUploadAuditRow(workingMaterial, fetched, data),
-                    identity_audit: data.identity_audit || null,
-                };
+                const result = finalizeUploadBackendResult(
+                    basePayload,
+                    workingMaterial,
+                    fetched,
+                    res,
+                    data
+                );
                 return result;
             }
         }
@@ -1251,14 +1341,13 @@
                     was_in_extension_upload_queue: true,
                 },
             });
-            return {
-                material_id: basePayload.material_id,
-                title: basePayload.title,
-                ok: res.ok,
-                ready_for_quiz: data.ready_for_quiz,
-                ...data,
-                audit: buildUploadAuditRow(workingMaterial, fetched, data, true)
-            };
+            return finalizeUploadBackendResult(
+                basePayload,
+                workingMaterial,
+                { ok: true, download_attempted: true },
+                res,
+                data
+            );
         }
 
         const failureReason = normalizeUploadFailureReason(
@@ -1277,16 +1366,16 @@
                 was_in_extension_upload_queue: true,
             },
         });
-        return {
-            material_id: basePayload.material_id,
-            title: basePayload.title,
-            ok: false,
-            recorded_on_backend: res.ok,
-            error: failureReason,
-            ...data,
-            audit: buildUploadAuditRow(workingMaterial, fetched, data),
-            identity_audit: data.identity_audit || null,
-        };
+        return finalizeUploadBackendResult(
+            basePayload,
+            workingMaterial,
+            fetched,
+            res,
+            {
+                ...data,
+                error: failureReason,
+            }
+        );
     };
 
     /**
@@ -1450,12 +1539,19 @@
             results.push(await uploadMaterialToBackend(backendUploadUrl, material, identity));
         }
 
-        const uploaded = results.filter((row) => row.ok).length;
-        const ready = results.filter((row) => row.ready_for_quiz).length;
-        const failed = results.length - uploaded;
+        const { uploaded, ready, failed } = countVerifiedUploadResults(results);
         const retryAudit = results.map((row) => row.audit).filter(Boolean);
+        const verificationAudit = results.map((row) => row.verification_audit).filter(Boolean);
         const targetTitles = /lecture\s*#?\d|lecture\d|lab\s*#?\d|\blab\b/i;
-        const targetedAudit = retryAudit.filter((row) => targetTitles.test(row.title || ""));
+        const targetedAudit = verificationAudit.filter((row) =>
+            TARGET_VERIFICATION_TITLES.test(row.title || "")
+        );
+        const failedOrUnchangedAudit = verificationAudit.filter(
+            (row) =>
+                !row.verified_ok ||
+                row.verified_failed ||
+                TARGET_VERIFICATION_TITLES.test(row.title || "")
+        );
 
         return {
             status: "done",
@@ -1470,6 +1566,8 @@
             results,
             retry_audit: retryAudit,
             targeted_retry_audit: targetedAudit,
+            verification_audit: verificationAudit,
+            failed_or_unchanged_audit: failedOrUnchangedAudit,
         };
     };
 
