@@ -25,6 +25,7 @@ def upsert_record(
     course_name: str,
     grade_percentage: float,
     created_by: str,
+    grade_label: Optional[str] = None,
 ) -> Dict[str, Any]:
     _ensure()
     now = datetime.utcnow()
@@ -32,13 +33,15 @@ def upsert_record(
     if pct < 0 or pct > 100:
         raise ValueError("grade_percentage must be between 0 and 100")
 
+    label = (grade_label or "").strip() or LABEL_UPLOADED
+
     doc = {
         "academiq_user_id": academiq_user_id,
         "user_email": user_email.strip().lower(),
         "course_id": str(course_id).strip(),
         "course_name": (course_name or "").strip(),
         "grade_percentage": pct,
-        "grade_label": LABEL_UPLOADED,
+        "grade_label": label,
         "source": SOURCE_UPLOADED,
         "uploaded_at": now,
         "created_by": created_by,

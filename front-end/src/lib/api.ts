@@ -203,6 +203,7 @@ export const api = {
     course_id: string;
     course_name: string;
     grade_percentage: number;
+    grade_label?: string;
   }): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>("/grades/manual-upsert", {
       method: "POST",

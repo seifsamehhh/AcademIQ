@@ -17,6 +17,7 @@ class ManualGradePayload(BaseModel):
     course_id: str
     course_name: str = ""
     grade_percentage: float = Field(..., ge=0, le=100)
+    grade_label: str = LABEL_UPLOADED
 
 
 class BulkGradePayload(BaseModel):
@@ -40,12 +41,13 @@ def manual_grade_upsert(
         course_name=payload.course_name,
         grade_percentage=payload.grade_percentage,
         created_by=email,
+        grade_label=payload.grade_label,
     )
     return {
         "ok": True,
         "courseId": doc["course_id"],
         "gradePercentage": doc["grade_percentage"],
-        "gradeLabel": LABEL_UPLOADED,
+        "gradeLabel": doc.get("grade_label") or LABEL_UPLOADED,
         "source": doc["source"],
     }
 
@@ -69,6 +71,7 @@ def bulk_grade_upsert(
             course_name=row.course_name,
             grade_percentage=row.grade_percentage,
             created_by=email,
+            grade_label=row.grade_label,
         )
         saved.append(
             {

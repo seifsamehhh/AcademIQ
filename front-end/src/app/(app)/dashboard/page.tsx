@@ -46,7 +46,6 @@ export default function DashboardPage() {
   const [courses, setCourses] = useState<Course[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const showGradeImport = process.env.NEXT_PUBLIC_SHOW_GRADE_IMPORT === "true";
 
   useEffect(() => {
     const token = getAccessToken();
@@ -84,7 +83,7 @@ export default function DashboardPage() {
   }, [router]);
 
   useEffect(() => {
-    if (!showGradeImport) return;
+    if (!studentId) return;
     let active = true;
     api
       .getCourses()
@@ -97,7 +96,7 @@ export default function DashboardPage() {
     return () => {
       active = false;
     };
-  }, [showGradeImport, results?.lastSync]);
+  }, [studentId, results?.lastSync]);
 
   if (!studentId) {
     return (
@@ -233,9 +232,19 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
 
-          {showGradeImport && courses.length ? (
-            <GradeImportPanel courses={courses} onSaved={reloadResults} />
-          ) : null}
+          <GradeImportPanel
+            courses={
+              courses.length
+                ? courses
+                : (results!.courses ?? []).map((c) => ({
+                    id: String(c.courseId ?? c.name),
+                    name: c.name,
+                    code: c.code ?? "",
+                  }))
+            }
+            courseResults={results!.courses}
+            onSaved={reloadResults}
+          />
         </>
       ) : (
         <Card>
