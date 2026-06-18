@@ -1143,12 +1143,37 @@
         };
     };
 
-    const normalizeUploadFailureReason = (reason) => {
+    const normalizeUploadFailureReason = (reason, downloadStatus = "") => {
         const value = String(reason || "").trim();
-        if (value === "no_download_link_on_page") {
-            return "no_download_link_found_on_resource_page";
+        const lowered = value.toLowerCase();
+        const dl = String(downloadStatus || "").toLowerCase();
+        if (
+            value === "no_download_link_on_page" ||
+            value === "no_download_link_found_on_resource_page"
+        ) {
+            return "no_pluginfile_found_on_resource_page";
         }
-        return value;
+        if (lowered.startsWith("http_")) {
+            const code = lowered.replace("http_", "").split(":")[0];
+            if (code === "401" || code === "403") return "permission_or_session_error";
+            return `download_failed_http_${code}`;
+        }
+        if (lowered.includes("unexpected_content_type") && (lowered.includes("html") || dl.includes("html"))) {
+            return "html_returned_instead_of_pdf";
+        }
+        if (lowered.includes("empty")) return "empty_response";
+        if (lowered.includes("permission") || lowered.includes("session")) {
+            return "permission_or_session_error";
+        }
+        if (lowered.includes("unsupported")) return "unsupported_file_type";
+        if (lowered.includes("parser") || lowered.includes("invalid_base64")) return "parser_failed";
+        if (lowered.includes("not_enough") || lowered.includes("insufficient")) {
+            return "content_extracted_but_not_enough_readable_text";
+        }
+        if (lowered.includes("pluginfile") || lowered.includes("no_download")) {
+            return "no_pluginfile_found_on_resource_page";
+        }
+        return value || "download_failed_unknown";
     };
 
     const buildVerificationAuditRow = (row) => ({
@@ -1158,6 +1183,10 @@
         source_url: row.source_url,
         resolved_url: row.resolved_url,
         download_url_used: row.download_url_used || row.verification_audit?.download_url_used,
+        backend_response_status:
+            row.backend_response_status ||
+            row.status ||
+            row.verification_audit?.backend_response_status,
         attempted: row.attempted,
         backend_called: row.backend_called,
         verified_content_text_length: row.verified_content_text_length,
@@ -1177,7 +1206,7 @@
         const uploaded = results.filter((row) => row.verified_uploaded).length;
         const ready = results.filter((row) => row.verified_ready).length;
         const failed = results.filter(
-            (row) => row.verified_failed || (row.attempted && !row.verified_ok)
+            (row) => row.verified_failure || row.verified_failed || (row.attempted && !row.verified_ok)
         ).length;
         return { uploaded, ready, failed };
     };
@@ -1190,6 +1219,7 @@
         verified_uploaded: Boolean(data.verified_uploaded),
         verified_ready: Boolean(data.verified_ready),
         verified_failed: Boolean(data.verified_failed),
+        verified_failure: Boolean(data.verified_failure),
         attempted: Boolean(data.attempted),
         backend_called: Boolean(data.backend_called),
         ...data,
@@ -1237,30 +1267,9 @@
         };
 
         if (!basePayload.db_id) {
-            return {
-                material_id: basePayload.material_id,
-                title: basePayload.title,
-                ok: false,
-                verified_ok: false,
-                verified_uploaded: false,
-                verified_ready: false,
-                verified_failed: false,
-                attempted: true,
-                backend_called: false,
-                error: "missing_db_id_from_preflight",
-                reason: "missing_db_id_from_preflight",
-                verification_audit: buildVerificationAuditRow({
-                    title: basePayload.title,
-                    db_id: null,
-                    material_id: basePayload.material_id,
-                    source_url: basePayload.source_url,
-                    resolved_url: basePayload.resolved_url,
-                    attempted: true,
-                    backend_called: false,
-                    reason: "missing_db_id_from_preflight",
-                    verified_ok: false,
-                }),
-            };
+            console.warn(
+                `[AcademIQ] Missing db_id for ${basePayload.title} — backend will resolve row by material_id`
+            );
         }
 
         const postUploadPayload = async (body) => {
@@ -1353,7 +1362,8 @@
         const failureReason = normalizeUploadFailureReason(
             fetched.error ||
                 resolveError ||
-                (canFetchFile ? "download_or_page_text_failed" : "no_downloadable_file_or_page_text")
+                (canFetchFile ? "download_or_page_text_failed" : "no_downloadable_file_or_page_text"),
+            fetched?.error || resolveError
         );
         const { res, data } = await postUploadPayload({
             ...basePayload,

@@ -483,20 +483,21 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
     quiz_status = "not_uploaded"
 
     if extraction_status == "extraction_failed":
-        err = (doc.get("extraction_error") or "").lower()
-        if (
-            matches_educational_title(title)
-            and content_len == 0
-            and any(k in err for k in ("unsupported", "download", "link", "url"))
-        ):
-            quiz_status = "not_uploaded"
-            content_note = "File detected from Moodle but content was not extracted yet"
-        else:
-            quiz_status = "extraction_failed"
-            content_note = (
-                doc.get("extraction_error")
-                or "No readable text could be extracted. Try re-uploading a text-based PDF."
-            )
+        quiz_status = "extraction_failed"
+        content_note = (
+            doc.get("extraction_error")
+            or "No readable text could be extracted. Try re-uploading a text-based PDF."
+        )
+    elif (
+        extraction_status in ("", "not_uploaded")
+        and not doc.get("last_attempted_at")
+        and not doc.get("processed_at")
+        and content_len == 0
+        and matches_educational_title(title)
+        and raw_file_type in ("pdf", "pptx", "ppt", "docx", "doc")
+    ):
+        quiz_status = "not_uploaded"
+        content_note = "File detected from Moodle but content was not extracted yet"
     elif content_len == 0 and extraction_status not in _PROCESSED_EXTRACTION_STATUSES:
         quiz_status = "not_uploaded"
         if raw_file_type in _LINK_FILE_TYPES or raw_file_type in ("page", "book"):

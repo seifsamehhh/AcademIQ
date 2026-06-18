@@ -33,6 +33,20 @@ def upsert(material_doc: Dict[str, Any]) -> bool:
     return result.upserted_id is not None
 
 
+def update_by_object_id(object_id: str, fields: Dict[str, Any]) -> bool:
+    """Update the exact MongoDB row by _id (preflight db_id)."""
+    if not object_id:
+        return False
+    try:
+        oid = ObjectId(str(object_id))
+    except Exception:
+        return False
+    payload = {k: v for k, v in fields.items() if v is not None}
+    payload["last_seen"] = datetime.utcnow()
+    result = course_materials_collection.update_one({"_id": oid}, {"$set": payload})
+    return result.matched_count > 0
+
+
 def list_by_course(course_id: str) -> List[Dict[str, Any]]:
     return list(course_materials_collection.find({"course_id": str(course_id)}))
 

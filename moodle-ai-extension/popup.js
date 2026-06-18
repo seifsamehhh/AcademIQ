@@ -776,7 +776,7 @@ const formatQuizUploadSummary = ({
         parts.push(`Uploaded ${uploaded}/${total}`);
     }
     if (ready > 0) parts.push(`Ready ${ready}`);
-    if (failed > 0) parts.push(`Failed ${failed}`);
+    if (failed > 0) parts.push(`Failed ${failed} verified`);
     parts.push(`API ${endpoint || UPLOAD_QUIZ_URL}`);
     if (extra) parts.push(extra);
     parts.push("Open Quiz Generation for the same course in AcademIQ.");
@@ -833,7 +833,9 @@ const logRetryExtractionAudit = (tabResult, courseId) => {
                 verified_content_text_length: row.verified_content_text_length,
                 verified_quiz_status: row.verified_quiz_status,
                 verified_extraction_status: row.verified_extraction_status,
+                backend_response_status: row.backend_response_status,
                 verified_ok: row.verified_ok,
+                verified_failure: row.verified_failure,
                 reason: row.reason,
             }))
         );
@@ -1072,7 +1074,14 @@ const runQuizMaterialUpload = async () => {
         logRetryExtractionAudit(tabResult, courseId);
         const uploaded = tabResult.uploaded || 0;
         const ready = tabResult.ready || 0;
-        const failed = tabResult.failed ?? Math.max(0, (tabResult.total || 0) - uploaded);
+        const failed =
+            tabResult.failed ??
+            (tabResult.results || []).filter(
+                (row) =>
+                    row.verified_failure ||
+                    row.verified_failed ||
+                    (row.attempted && !row.verified_ok)
+            ).length;
         const total = tabResult.total || 0;
         await refreshData();
         btn.textContent = "Upload materials for quiz";

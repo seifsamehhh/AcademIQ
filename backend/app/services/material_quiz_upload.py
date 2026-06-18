@@ -1744,40 +1744,174 @@ _TERMINAL_QUIZ_DISPLAY_STATUSES = frozenset(
 )
 
 
+def _normalize_upload_failure_reason(
+    raw: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Map extension/backend errors to specific persisted failure reasons."""
+    value = str(raw or "").strip()
+    lowered = value.lower()
+    audit = (payload or {}).get("upload_audit") or {}
+    download_status = str(audit.get("download_status") or "").lower()
+
+    if value in (
+        "no_download_link_on_page",
+        "no_download_link_found_on_resource_page",
+        "no_pluginfile_found_on_resource_page",
+    ):
+        return "no_pluginfile_found_on_resource_page"
+
+    if lowered.startswith("http_"):
+        code = lowered.replace("http_", "").split(":")[0]
+        if code in ("401", "403"):
+            return "permission_or_session_error"
+        return f"download_failed_http_{code}"
+
+    if "unexpected_content_type" in lowered and "html" in lowered:
+        return "html_returned_instead_of_pdf"
+    if "unexpected_content_type" in download_status and "html" in download_status:
+        return "html_returned_instead_of_pdf"
+
+    if lowered in ("empty_response", "empty_file", "no_content"):
+        return "empty_response"
+    if "empty" in lowered and "content" in lowered:
+        return "empty_response"
+
+    if "permission" in lowered or "session" in lowered or lowered in ("401", "403"):
+        return "permission_or_session_error"
+
+    if lowered.startswith("invalid_base64") or lowered.startswith("parser"):
+        return "parser_failed"
+
+    if lowered in ("unsupported_file_type", "unsupported") or "unsupported" in lowered:
+        return "unsupported_file_type"
+
+    if (
+        "not_enough" in lowered
+        or "insufficient_text" in lowered
+        or "too_short" in lowered
+        or lowered == "content_extracted_but_not_enough_readable_text"
+    ):
+        return "content_extracted_but_not_enough_readable_text"
+
+    if lowered.startswith("download_failed:"):
+        inner = lowered.replace("download_failed:", "", 1)
+        return _normalize_upload_failure_reason(inner, payload)
+
+    if "pluginfile" in lowered or "no_download" in lowered:
+        return "no_pluginfile_found_on_resource_page"
+
+    if lowered in ("missing_db_id_from_preflight", "db_id_required_from_preflight"):
+        return "db_id_required_from_preflight"
+
+    if lowered == "upload_verification_failed_still_not_uploaded":
+        return "upload_verification_failed_still_not_uploaded"
+
+    return value or "download_failed_unknown"
+
+
+def _persist_terminal_upload_failure(
+    course_id: str,
+    target_db_id: str,
+    reason: str,
+    source_url: Optional[str] = None,
+    resolved_url: Optional[str] = None,
+) -> bool:
+    """Write terminal extraction_failed to the exact preflight db_id row."""
+    doc = material_repository.get_by_object_id(target_db_id)
+    if not doc:
+        return False
+
+    now = datetime.utcnow()
+    normalized_reason = _normalize_upload_failure_reason(reason)
+    fields: Dict[str, Any] = {
+        "course_id": course_id,
+        "material_id": str(doc.get("material_id") or ""),
+        "title": doc.get("title"),
+        "file_type": doc.get("file_type"),
+        "extraction_status": "extraction_failed",
+        "extraction_error": normalized_reason,
+        "ready_for_quiz": False,
+        "metadata_only": False,
+        "last_attempted_at": now,
+        "processed_at": now,
+        "extractor_version": CURRENT_EXTRACTOR_VERSION,
+    }
+    if source_url:
+        fields["url"] = source_url
+    if resolved_url:
+        fields["resolved_url"] = resolved_url
+
+    updated = material_repository.update_by_object_id(target_db_id, fields)
+    if not updated:
+        material_repository.upsert(fields)
+    return True
+
+
+def _display_quiz_status_for_doc(doc: Dict[str, Any]) -> str:
+    """Quiz status for verification — raw DB status, not soft not_uploaded remap."""
+    extraction_status = str(doc.get("extraction_status") or "not_uploaded")
+    if extraction_status == "extraction_failed":
+        return "extraction_failed"
+    if extraction_status in ("not_enough_readable_text", "too_short", "insufficient_text"):
+        return "not_enough_readable_text"
+    if extraction_status == "not_quiz_material":
+        return "not_quiz_material"
+    content_len = _content_chars_from_doc(doc)
+    if content_len > 0:
+        displays, _ = resolve_quiz_material_display([doc])
+        if displays:
+            return str(displays[0].get("quiz_status") or "not_uploaded")
+    if doc.get("last_attempted_at") or doc.get("processed_at"):
+        if extraction_status not in ("", "not_uploaded"):
+            return extraction_status
+    return "not_uploaded"
+
+
 def _resolve_preflight_upload_target(
     course_id: str,
     payload: Dict[str, Any],
     title: str,
     file_type: str,
+    norm: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
     Resolve the exact Mongo row Quiz Generation displays for this upload.
-    Requires db_id from preflight; aligns to canonical file row when applicable.
+    Prefers db_id from preflight; falls back to identity resolution when missing.
     """
     target_db_id = str(
         payload.get("db_id") or payload.get("matched_db_id") or ""
     ).strip()
-    if not target_db_id:
+    target_doc: Optional[Dict[str, Any]] = None
+
+    if target_db_id:
+        target_doc = material_repository.get_by_object_id(target_db_id)
+
+    if not target_doc and norm:
+        identity = resolve_material_identity(
+            course_id,
+            norm,
+            matched_material_id=str(
+                payload.get("matched_material_id")
+                or payload.get("material_id")
+                or payload.get("id")
+                or ""
+            ).strip()
+            or None,
+            stable_material_key=str(payload.get("stable_material_key") or "").strip() or None,
+        )
+        target_doc = identity.get("existing_doc")
+        if target_doc:
+            target_db_id = _mongo_id_str(target_doc) or ""
+
+    if not target_db_id or not target_doc:
         return None, None, {
             "status": "rejected",
             "reason": "db_id_required_from_preflight",
             "extraction_error": "db_id_required_from_preflight",
             "ok": False,
             "verified_ok": False,
-            "attempted": False,
-            "backend_called": True,
-        }
-
-    target_doc = material_repository.get_by_object_id(target_db_id)
-    if not target_doc:
-        return None, None, {
-            "status": "rejected",
-            "reason": "db_id_not_found",
-            "extraction_error": "db_id_not_found",
-            "db_id": target_db_id,
-            "ok": False,
-            "verified_ok": False,
-            "attempted": False,
+            "attempted": True,
             "backend_called": True,
         }
 
@@ -1789,7 +1923,7 @@ def _resolve_preflight_upload_target(
             "db_id": target_db_id,
             "ok": False,
             "verified_ok": False,
-            "attempted": False,
+            "attempted": True,
             "backend_called": True,
         }
 
@@ -1819,12 +1953,12 @@ def _read_verified_upload_state(
     displays, _ = resolve_quiz_material_display([doc])
     display = displays[0] if displays else {}
     content_len = int(display.get("content_text_length") or 0) or _content_chars_from_doc(doc)
-    quiz_status = str(display.get("quiz_status") or "not_uploaded")
     extraction_status = str(doc.get("extraction_status") or "not_uploaded")
+    quiz_status = _display_quiz_status_for_doc(doc)
     reason = (
-        display.get("reason")
+        doc.get("extraction_error")
+        or display.get("reason")
         or display.get("why_not_ready")
-        or doc.get("extraction_error")
         or ""
     )
 
@@ -1879,6 +2013,7 @@ def _compute_verified_upload_flags(
         "verified_uploaded": verified_uploaded,
         "verified_ready": verified_ready,
         "verified_failed": verified_failed,
+        "verified_failure": verified_failed and attempted,
     }
 
 
@@ -1886,23 +2021,15 @@ def _repair_still_not_uploaded_row(
     course_id: str,
     target_db_id: str,
     reason: str,
+    source_url: Optional[str] = None,
+    resolved_url: Optional[str] = None,
 ) -> None:
-    doc = material_repository.get_by_object_id(target_db_id)
-    if not doc:
-        return
-    now = datetime.utcnow()
-    material_repository.upsert(
-        {
-            "course_id": course_id,
-            "material_id": str(doc.get("material_id") or ""),
-            "title": doc.get("title"),
-            "extraction_status": "extraction_failed",
-            "extraction_error": reason,
-            "ready_for_quiz": False,
-            "last_attempted_at": now,
-            "processed_at": now,
-            "metadata_only": False,
-        }
+    _persist_terminal_upload_failure(
+        course_id,
+        target_db_id,
+        reason,
+        source_url=source_url,
+        resolved_url=resolved_url,
     )
 
 
@@ -1941,13 +2068,20 @@ def _package_upload_response(
         and state["content_text_length"] == 0
         and state["extraction_status"] == "not_uploaded"
     ):
-        repair_reason = (
+        repair_reason = _normalize_upload_failure_reason(
             body.get("extraction_error")
             or upload_audit.get("failure_reason")
             or upload_audit.get("download_status")
-            or "upload_verification_failed_still_not_uploaded"
+            or "upload_verification_failed_still_not_uploaded",
+            payload,
         )
-        _repair_still_not_uploaded_row(course_id, target_db_id, repair_reason)
+        _repair_still_not_uploaded_row(
+            course_id,
+            target_db_id,
+            repair_reason,
+            source_url=state.get("source_url"),
+            resolved_url=state.get("resolved_url"),
+        )
         state = _read_verified_upload_state(course_id, target_db_id)
 
     flags = _compute_verified_upload_flags(state, attempted)
@@ -1958,6 +2092,7 @@ def _package_upload_response(
         "source_url": state.get("source_url"),
         "resolved_url": state.get("resolved_url"),
         "download_url_used": upload_audit.get("download_url_used"),
+        "backend_response_status": body.get("status"),
         "attempted": attempted,
         "backend_called": True,
         "verified_content_text_length": state["content_text_length"],
@@ -2024,8 +2159,20 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     title = (payload.get("title") or "Untitled Material").strip()
     file_type = payload.get("file_type") or payload.get("fileType") or "unknown"
 
+    norm = _normalize_incoming_material_item(
+        {
+            "title": title,
+            "file_type": file_type,
+            "url": source_url,
+            "source_url": source_url,
+            "resolved_url": resolved_url_payload,
+            "material_id": raw_material_id,
+            "id": raw_material_id,
+        }
+    )
+
     target_db_id, target_doc, reject = _resolve_preflight_upload_target(
-        course_id, payload, title, str(file_type)
+        course_id, payload, title, str(file_type), norm
     )
     if reject:
         return reject
@@ -2083,22 +2230,14 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     force = _is_force_reprocess(payload)
     now = datetime.utcnow()
 
-    # Extension could not download bytes — record terminal failure so preflight skips retry.
+    # Extension could not download bytes — record terminal failure on exact db_id row.
     if payload.get("upload_attempt_failed"):
-        extraction_error = str(payload.get("extraction_error") or "download_failed")
-        if extraction_error == "no_download_link_on_page":
-            extraction_error = "no_download_link_found_on_resource_page"
-        stored_error = (
-            extraction_error
-            if extraction_error.startswith("download_failed:")
-            or extraction_error == "no_download_link_found_on_resource_page"
-            else f"download_failed:{extraction_error}"
-        )
-        existing_doc = material_repository.get(course_id, material_id)
+        raw_error = str(payload.get("extraction_error") or "download_failed_unknown")
+        stored_error = _normalize_upload_failure_reason(raw_error, payload)
+        existing_doc = material_repository.get_by_object_id(target_db_id) or target_doc
+        existing_status = str((existing_doc or {}).get("extraction_status") or "not_uploaded")
         if existing_doc and not force:
-            if existing_doc.get("processed_at") or (
-                existing_doc.get("extraction_status") in _TERMINAL_EXTRACTION_STATUSES
-            ):
+            if existing_status == "extraction_failed" and existing_doc.get("last_attempted_at"):
                 return _package_upload_response(
                     course_id,
                     target_db_id,
@@ -2114,34 +2253,48 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
                         ),
                         "title": existing_doc.get("title", title),
                         "chars": _content_chars_from_doc(existing_doc),
-                        "ready_for_quiz": bool(existing_doc.get("ready_for_quiz")),
-                        "hasContent": _content_chars_from_doc(existing_doc) >= MIN_QUIZ_CONTENT_CHARS,
-                        "extraction_status": existing_doc.get("extraction_status"),
+                        "ready_for_quiz": False,
+                        "hasContent": False,
+                        "extraction_status": existing_status,
                         "extraction_error": existing_doc.get("extraction_error"),
-                        "content_note": "Previously processed — download not retried",
+                        "quiz_status": "extraction_failed",
+                        "content_note": "Previously recorded extraction failure",
                         "inserted": False,
                     },
                 )
-        fail_doc: Dict[str, Any] = {
-            "course_id": course_id,
-            "material_id": material_id,
-            "title": title,
-            "file_type": file_type,
-            "source": "moodle_sync",
-            "ready_for_quiz": False,
-            "extraction_status": "extraction_failed",
-            "extraction_error": stored_error,
-            "processed_at": now,
-            "last_attempted_at": now,
-            "metadata_only": False,
-            "extractor_version": CURRENT_EXTRACTOR_VERSION,
-        }
-        if course_name:
-            fail_doc["course_name"] = course_name
-        if source_url:
-            fail_doc["url"] = source_url
-        if resolved_url_payload:
-            fail_doc["resolved_url"] = resolved_url_payload
+            if existing_status in _TERMINAL_EXTRACTION_STATUSES and existing_status != "not_uploaded":
+                if _content_chars_from_doc(existing_doc) > 0 or existing_status != "extraction_failed":
+                    return _package_upload_response(
+                        course_id,
+                        target_db_id,
+                        True,
+                        payload,
+                        {
+                            "status": "skipped_existing",
+                            "already_ready": bool(existing_doc.get("ready_for_quiz")),
+                            "course_id": course_id,
+                            "material_id": material_id,
+                            "resolved_from_material_id": (
+                                raw_material_id if raw_material_id != material_id else None
+                            ),
+                            "title": existing_doc.get("title", title),
+                            "chars": _content_chars_from_doc(existing_doc),
+                            "ready_for_quiz": bool(existing_doc.get("ready_for_quiz")),
+                            "hasContent": _content_chars_from_doc(existing_doc) >= MIN_QUIZ_CONTENT_CHARS,
+                            "extraction_status": existing_status,
+                            "extraction_error": existing_doc.get("extraction_error"),
+                            "content_note": "Previously processed — download not retried",
+                            "inserted": False,
+                        },
+                    )
+
+        _persist_terminal_upload_failure(
+            course_id,
+            target_db_id,
+            stored_error,
+            source_url=str(source_url or "") or None,
+            resolved_url=resolved_url_payload,
+        )
         fail_audit = _build_upload_identity_audit(
             norm,
             identity_before,
@@ -2159,14 +2312,19 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
             {
                 "backend_upload_called": True,
                 "backend_response_status": "stored_failed",
-                "failure_reason": extraction_error,
+                "failure_reason": stored_error,
                 "final_content_text_length": 0,
                 "final_quiz_status": "extraction_failed",
             }
         )
-        fail_doc["last_upload_audit"] = fail_audit
-        fail_doc["last_upload_audit_at"] = now
-        inserted = material_repository.upsert(fail_doc)
+        if existing_doc:
+            material_repository.update_by_object_id(
+                target_db_id,
+                {
+                    "last_upload_audit": fail_audit,
+                    "last_upload_audit_at": now,
+                },
+            )
         return _package_upload_response(
             course_id,
             target_db_id,
@@ -2185,10 +2343,10 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "ready_for_quiz": False,
                 "hasContent": False,
                 "extraction_status": "extraction_failed",
-                "extraction_error": fail_doc["extraction_error"],
+                "extraction_error": stored_error,
                 "quiz_status": "extraction_failed",
-                "content_note": f"Download failed: {extraction_error}",
-                "inserted": inserted,
+                "content_note": f"Download failed: {stored_error}",
+                "inserted": True,
                 "identity_audit": fail_audit,
             },
         )
@@ -2430,6 +2588,26 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         material_doc["normalized_resolved_url"] = _normalize_source_url(resolved_url_payload)
 
     inserted = material_repository.upsert(material_doc)
+
+    mirror_error = (
+        _normalize_upload_failure_reason(str(extraction_error or ""), payload)
+        if extraction_status == "extraction_failed"
+        else extraction_error
+    )
+    material_repository.update_by_object_id(
+        target_db_id,
+        {
+            "content_text": text,
+            "content_chars": chars,
+            "ready_for_quiz": ready_for_quiz,
+            "extraction_status": extraction_status,
+            "extraction_error": mirror_error,
+            "processed_at": now,
+            "last_attempted_at": now,
+            "metadata_only": False,
+            "extractor_version": CURRENT_EXTRACTOR_VERSION,
+        },
+    )
 
     if chars > 0:
         sync_fields = {
