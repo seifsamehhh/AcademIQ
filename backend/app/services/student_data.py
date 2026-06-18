@@ -29,6 +29,7 @@ from app.services.moodle_course_display import (
     get_visible_synced_courses_for_user,
     should_use_visible_moodle_courses,
 )
+from app.services.course_activity_stats import build_course_activity_statistics
 from app.services.performance_prediction import (
     build_guidance_factors,
     resolve_course_performance,
@@ -786,87 +787,248 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
     return out
 
 
-def get_performance(
+NOT_ENOUGH_DATA_MESSAGE = (
+    "More course-specific Moodle activity is needed before a reliable prediction can be generated."
+)
+
+
+def _empty_activity_statistics() -> Dict[str, Any]:
+    unavailable_task = {
+        "attempted": None,
+        "total": None,
+        "averageScore": None,
+        "valueSource": "unavailable",
+        "available": False,
+    }
+    return {
+        "quizzes": dict(unavailable_task),
+        "assignments": dict(unavailable_task),
+        "totalTimeHours": None,
+        "totalTimeValueSource": "unavailable",
+        "totalTimeAvailable": False,
+        "weeklyAverageHours": None,
+        "weeklyAverageValueSource": "unavailable",
+        "weeklyAverageAvailable": False,
+        "weeklyAverageEstimated": False,
+        "hasMissingFields": True,
+    }
+
+
+def _safe_course_obj(
     user_id: str, course_id: str, student_id: str | None = None
 ) -> Dict[str, Any]:
-    metrics = (metrics_repository.get(user_id, course_id) or {}).get("metrics", {}) or {}
-    grade_rows = _grades(user_id)
-    resolved = _resolve_display_grade_for_course(user_id, course_id, grade_rows=grade_rows)
-    course_avg = resolved.get("displayGrade")
-    has_grade_data = bool(resolved.get("gradeAvailable"))
-    grade_source_label = resolved.get("gradeLabel")
-    quiz_avg = _avg_percentage(grade_rows, course_id, "quiz")
-    assign_avg = _avg_percentage(grade_rows, course_id, "assignment")
+    try:
+        return _course_obj(user_id, course_id, student_id)
+    except Exception:
+        logger.exception("Failed to resolve course object for course %s", course_id)
+        return {
+            "id": course_id,
+            "name": "Course",
+            "code": _course_code("Course", course_id),
+        }
 
-    feats, feat_debug = resolve_course_features(user_id, course_id, student_id)
-    raw_feats = dict(feats)
-    feats = _apply_course_scoped_behavioral_features(user_id, course_id, feats, feat_debug)
-    if not _has_ml_feature_data(feats):
-        log_missing_feature_vector(
-            student_id=student_id,
-            course_id=course_id,
-            debug=feat_debug,
-        )
 
-    bundle = _resolve_performance_bundle(
-        user_id, course_id, student_id, feats, raw_feats, feat_debug, metrics, resolved
-    )
-    prediction_verified = bundle["predictionVerified"]
-    predicted = bundle["predictedGrade"]
-    status = bundle["status"]
-    probability = bundle["probability"]
-    confidence = bundle["confidence"]
-    performance_mode = bundle["performanceMode"]
-    message = bundle.get("message")
-
-    total_seconds = metrics.get("total_time_spent_seconds", 0) or 0
-    total_hours = round(total_seconds / 3600, 1)
-    activity_source = _resolve_activity_source(user_id, metrics)
-    activity_stats = build_course_activity_statistics(
-        user_id,
-        metrics,
-        feats,
-        feat_debug,
-        quiz_avg,
-        assign_avg,
-        activity_source,
-        performance_mode,
-    )
+def build_safe_performance_response(
+    user_id: str,
+    course_id: str,
+    student_id: str | None = None,
+    *,
+    performance_mode: str = "not_enough_data",
+    message: str | None = None,
+    course_obj: Dict[str, Any] | None = None,
+    course_avg: Any = None,
+    has_grade_data: bool = False,
+    grade_source: str | None = None,
+    grade_label: str | None = None,
+    activity_source: str = "none",
+    activity_stats: Dict[str, Any] | None = None,
+    predicted: Any = None,
+    status: str | None = None,
+    prediction_confidence: str | None = None,
+    insights: List[Any] | None = None,
+) -> Dict[str, Any]:
+    course = course_obj or _safe_course_obj(user_id, course_id, student_id)
+    stats = activity_stats or _empty_activity_statistics()
+    mode = performance_mode or "not_enough_data"
+    prediction_available = predicted is not None
+    if mode == "not_enough_data":
+        prediction_available = False
+        predicted = None
+        status = status or "Not enough data"
+        message = message or NOT_ENOUGH_DATA_MESSAGE
+        prediction_confidence = prediction_confidence or None
+    elif mode == "limited_insight":
+        status = status or "Room to improve"
+        prediction_confidence = prediction_confidence or "Limited"
     activity_note = _activity_stats_note(activity_source)
-    if activity_stats.get("hasMissingFields") and activity_source != "none":
-        activity_note = (
-            f"{activity_note} Some Moodle activity fields are not available yet."
-        )
 
     return {
-        "course": _course_obj(user_id, course_id, student_id),
+        "course": course,
+        "course_id": str(course_id),
+        "course_name": course.get("name"),
         "predictedGrade": predicted,
         "status": status,
         "courseAverage": course_avg,
         "hasGradeData": has_grade_data,
-        "gradeSource": resolved.get("gradeSource"),
-        "gradeLabel": grade_source_label,
+        "gradeSource": grade_source,
+        "gradeLabel": grade_label,
         "activityDataSource": activity_source,
         "activityStatsNote": activity_note,
-        "statistics": activity_stats,
-        "engine": "ml" if prediction_verified else "fallback",
-        "mlAvailable": predicted is not None,
-        "predictionVerified": prediction_verified,
-        "predictionSource": bundle.get("predictionSource"),
-        "predictionConfidence": bundle.get("predictionConfidence"),
-        "classificationSource": bundle.get("classificationSource"),
-        "featureVectorSource": feat_debug.get("feature_source"),
-        "featureVectorComplete": _is_feature_vector_complete(
-            feats, feat_debug, metrics, resolved
-        ),
-        "mlServiceCalled": bundle.get("mlServiceCalled"),
-        "probability": probability,
-        "confidence": confidence,
+        "statistics": stats,
+        "activityStats": stats,
+        "engine": "fallback",
+        "mlAvailable": prediction_available,
+        "predictionAvailable": prediction_available,
+        "predictionVerified": False,
+        "predictionSource": None,
+        "predictionConfidence": prediction_confidence,
+        "classificationSource": None,
+        "performanceStatus": status,
+        "courseAverageSource": grade_source,
+        "featureVectorSource": None,
+        "featureVectorComplete": False,
+        "mlServiceCalled": False,
+        "probability": None,
+        "confidence": None,
         "message": message,
-        "statusNote": bundle.get("statusNote"),
-        "heuristic": bundle.get("predictionSource") == "rule_adjusted_prediction",
-        "performanceMode": performance_mode,
+        "statusNote": None,
+        "heuristic": False,
+        "performanceMode": mode,
+        "insights": insights or [],
     }
+
+
+def get_performance(
+    user_id: str, course_id: str, student_id: str | None = None
+) -> Dict[str, Any]:
+    try:
+        metrics = (metrics_repository.get(user_id, course_id) or {}).get("metrics", {}) or {}
+        grade_rows = _grades(user_id)
+        resolved = _resolve_display_grade_for_course(
+            user_id, course_id, grade_rows=grade_rows
+        )
+        course_avg = resolved.get("displayGrade")
+        has_grade_data = bool(resolved.get("gradeAvailable"))
+        grade_source_label = resolved.get("gradeLabel")
+        grade_source = resolved.get("gradeSource")
+        quiz_avg = _avg_percentage(grade_rows, course_id, "quiz")
+        assign_avg = _avg_percentage(grade_rows, course_id, "assignment")
+
+        feats, feat_debug = resolve_course_features(user_id, course_id, student_id)
+        raw_feats = dict(feats)
+        feats = _apply_course_scoped_behavioral_features(
+            user_id, course_id, feats, feat_debug
+        )
+        if not _has_ml_feature_data(feats):
+            log_missing_feature_vector(
+                student_id=student_id,
+                course_id=course_id,
+                debug=feat_debug,
+            )
+
+        bundle = _resolve_performance_bundle(
+            user_id,
+            course_id,
+            student_id,
+            feats,
+            raw_feats,
+            feat_debug,
+            metrics,
+            resolved,
+        )
+        prediction_verified = bool(bundle.get("predictionVerified"))
+        predicted = bundle.get("predictedGrade")
+        status = bundle.get("status")
+        probability = bundle.get("probability")
+        confidence = bundle.get("confidence")
+        performance_mode = bundle.get("performanceMode") or "not_enough_data"
+        message = bundle.get("message")
+        prediction_confidence = bundle.get("predictionConfidence")
+
+        if performance_mode == "not_enough_data":
+            predicted = None
+            status = status or "Not enough data"
+            message = message or NOT_ENOUGH_DATA_MESSAGE
+        elif performance_mode == "limited_insight":
+            prediction_confidence = prediction_confidence or "Limited"
+
+        activity_source = _resolve_activity_source(user_id, metrics)
+        try:
+            activity_stats = build_course_activity_statistics(
+                user_id,
+                metrics,
+                feats,
+                feat_debug,
+                quiz_avg,
+                assign_avg,
+                activity_source,
+                performance_mode,
+            )
+        except Exception:
+            logger.exception(
+                "build_course_activity_statistics failed for course %s", course_id
+            )
+            activity_stats = _empty_activity_statistics()
+
+        activity_note = _activity_stats_note(activity_source)
+        if activity_stats.get("hasMissingFields") and activity_source != "none":
+            activity_note = (
+                f"{activity_note} Some Moodle activity fields are not available yet."
+            )
+
+        insights: List[Any] = []
+        if performance_mode != "not_enough_data":
+            try:
+                trust_context = bundle.get("trustContext") or {}
+                factors = build_guidance_factors(
+                    feats, metrics, trust_context, resolved, predicted
+                )
+                insights = factors[:3]
+            except Exception:
+                logger.exception("build_guidance_factors failed for course %s", course_id)
+
+        course_obj = _safe_course_obj(user_id, course_id, student_id)
+        prediction_available = predicted is not None
+
+        return {
+            "course": course_obj,
+            "course_id": str(course_id),
+            "course_name": course_obj.get("name"),
+            "predictedGrade": predicted,
+            "status": status,
+            "courseAverage": course_avg,
+            "hasGradeData": has_grade_data,
+            "gradeSource": grade_source,
+            "gradeLabel": grade_source_label,
+            "activityDataSource": activity_source,
+            "activityStatsNote": activity_note,
+            "statistics": activity_stats,
+            "activityStats": activity_stats,
+            "engine": "ml" if prediction_verified else "fallback",
+            "mlAvailable": prediction_available,
+            "predictionAvailable": prediction_available,
+            "predictionVerified": prediction_verified,
+            "predictionSource": bundle.get("predictionSource"),
+            "predictionConfidence": prediction_confidence,
+            "classificationSource": bundle.get("classificationSource"),
+            "performanceStatus": status,
+            "courseAverageSource": grade_source,
+            "featureVectorSource": feat_debug.get("feature_source"),
+            "featureVectorComplete": _is_feature_vector_complete(
+                feats, feat_debug, metrics, resolved
+            ),
+            "mlServiceCalled": bundle.get("mlServiceCalled"),
+            "probability": probability,
+            "confidence": confidence,
+            "message": message,
+            "statusNote": bundle.get("statusNote"),
+            "heuristic": bundle.get("predictionSource") == "rule_adjusted_prediction",
+            "performanceMode": performance_mode,
+            "insights": insights,
+        }
+    except Exception:
+        logger.exception("get_performance failed for course %s", course_id)
+        return build_safe_performance_response(user_id, course_id, student_id)
 
 
 def get_insights(

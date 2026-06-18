@@ -51,7 +51,31 @@ export default function PerformancePage() {
     api
       .getPerformance(selectedId)
       .then((data) => {
-        if (active) setAnalysis(data);
+        if (!active) return;
+        if (data?.course?.id) {
+          setAnalysis(data);
+          return;
+        }
+        setAnalysis({
+          course: {
+            id: selectedId,
+            name: data?.course_name ?? "Course",
+            code: selectedId,
+          },
+          predictedGrade: data?.predictedGrade ?? null,
+          status: data?.status ?? data?.performanceStatus ?? null,
+          courseAverage: data?.courseAverage ?? null,
+          statistics: data?.statistics ?? data?.activityStats,
+          performanceMode: data?.performanceMode ?? "not_enough_data",
+          message: data?.message ?? null,
+          hasGradeData: data?.hasGradeData ?? false,
+          gradeLabel: data?.gradeLabel ?? null,
+          activityDataSource: data?.activityDataSource ?? "none",
+          activityStatsNote: data?.activityStatsNote,
+          predictionConfidence: data?.predictionConfidence ?? null,
+          classificationSource: data?.classificationSource ?? null,
+          statusNote: data?.statusNote ?? null,
+        });
       })
       .catch(() => {
         if (active) {

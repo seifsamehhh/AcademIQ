@@ -46,11 +46,19 @@ def dashboard(user: Dict[str, Any] = Depends(get_current_user)):
 
 @router.get("/courses/{course_id}/performance")
 def performance(course_id: str, user: Dict[str, Any] = Depends(get_current_user)):
-    return student_data.get_performance(
-        str(user["_id"]),
-        course_id,
-        _student_id_from_user(user),
-    )
+    try:
+        return student_data.get_performance(
+            str(user["_id"]),
+            course_id,
+            _student_id_from_user(user),
+        )
+    except Exception:
+        logger.exception("Performance route failed for course %s", course_id)
+        return student_data.build_safe_performance_response(
+            str(user["_id"]),
+            course_id,
+            _student_id_from_user(user),
+        )
 
 
 @router.get("/courses/{course_id}/insights")

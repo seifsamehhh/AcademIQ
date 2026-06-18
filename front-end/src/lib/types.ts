@@ -242,6 +242,14 @@ export interface PerformanceAnalysis {
   activityDataSource?: ActivityDataSource;
   /** Human-readable note about the activity stats data source. */
   activityStatsNote?: string;
+  /** Flat aliases returned by the performance API (optional). */
+  course_id?: string;
+  course_name?: string;
+  predictionAvailable?: boolean;
+  performanceStatus?: PerformanceStatus | null;
+  courseAverageSource?: string | null;
+  activityStats?: CourseStatistics;
+  insights?: RiskFactor[];
 }
 
 /**
