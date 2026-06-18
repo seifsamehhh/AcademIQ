@@ -216,10 +216,16 @@ const addEvent = (data, event) => {
 
 const mergeGrades = (data, grades) => {
     grades.forEach((grade) => {
-        const key = `${grade.course_id}-${grade.item_name}-${grade.item_type}-${grade.submission_time || ""}`;
-        const isNewGrade = !data.grades.some((existing) => existing._key === key);
+        const key = `${grade.course_id}-${grade.item_name}-${grade.item_type}-${grade.source_url || grade.submission_time || ""}`;
+        const existingIndex = data.grades.findIndex((existing) => existing._key === key);
+        const isNewGrade = existingIndex === -1;
         if (isNewGrade) {
             data.grades.push({ ...grade, _key: key });
+        } else {
+            const existing = data.grades[existingIndex];
+            if (grade.percentage != null && existing.percentage == null) {
+                data.grades[existingIndex] = { ...existing, ...grade, _key: key };
+            }
         }
 
         if (!grade.course_id || !data.metricsByCourse[grade.course_id]) return;

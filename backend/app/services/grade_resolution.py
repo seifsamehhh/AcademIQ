@@ -49,6 +49,7 @@ _NAME_FIELD_NAMES = (
 _REASON_CASE: Dict[str, str] = {
     "no_grade_rows_synced_for_course": "case_4_no_sync",
     "synced_grade_rows_have_no_numeric_scores": "case_3_non_numeric",
+    "ungraded_in_moodle": "case_3_non_numeric",
     "senior_project_no_synced_grade": "case_5_senior_project",
     "parse_failure": "case_1_parse_failure",
 }
@@ -77,6 +78,26 @@ def _is_senior_project_course(course_name: Optional[str], course_id: str) -> boo
     if course_name and _SENIOR_PROJECT_RE.search(course_name):
         return True
     return False
+
+
+def _gpa_flags(
+    course_name: Optional[str],
+    course_id: str,
+    grade_available: bool,
+) -> Dict[str, bool]:
+    senior = _is_senior_project_course(course_name, course_id)
+    return {
+        "gpaEligible": grade_available and not senior,
+        "excludeFromGpa": senior or not grade_available,
+    }
+
+
+def _base_resolve_fields(
+    course_name: Optional[str],
+    course_id: str,
+    grade_available: bool,
+) -> Dict[str, bool]:
+    return _gpa_flags(course_name, course_id, grade_available)
 
 
 def _parse_max_points(max_grade: Any) -> Optional[float]:
@@ -249,6 +270,7 @@ def resolve_course_grade(
             "computedAverage": None,
             "computedAverageAvailable": False,
             "allCandidateGradeFields": [row_candidate_fields(r) for r in course_rows[:8]],
+            **_base_resolve_fields(course_name, course_id, True),
         }
 
     if graded_items:
@@ -278,15 +300,16 @@ def resolve_course_grade(
             "computedAverage": avg,
             "computedAverageAvailable": True,
             "allCandidateGradeFields": [row_candidate_fields(r) for r in course_rows[:8]],
+            **_base_resolve_fields(course_name, course_id, True),
         }
 
     if course_rows:
         if _is_senior_project_course(course_name, course_id):
             reason = "senior_project_no_synced_grade"
-            note = "No synced Moodle grade is available for this project course."
+            note = "Project course grade is not available through synced Moodle grades."
         else:
-            reason = "synced_grade_rows_have_no_numeric_scores"
-            note = "No graded scores are available yet for this course in Moodle."
+            reason = "ungraded_in_moodle"
+            note = "No numeric grade is currently published in Moodle for this course."
     else:
         reason = "no_grade_rows_synced_for_course"
         note = "Moodle grade data has not been synced yet."
@@ -313,6 +336,7 @@ def resolve_course_grade(
         "computedAverage": None,
         "computedAverageAvailable": False,
         "allCandidateGradeFields": [row_candidate_fields(r) for r in course_rows[:8]],
+        **_base_resolve_fields(course_name, course_id, False),
     }
 
 

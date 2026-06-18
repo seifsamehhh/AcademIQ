@@ -211,6 +211,8 @@ def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
                 "gradeSource": resolved["gradeSource"],
                 "gradeLabel": resolved["gradeLabel"],
                 "gradeNote": _course_grade_note(resolved),
+                "gpaEligible": resolved.get("gpaEligible", False),
+                "excludeFromGpa": resolved.get("excludeFromGpa", True),
                 "courseId": cid,
                 "code": course.get("code") or _course_code(course["name"], cid),
                 "source": course.get("source", "moodle_sync"),
@@ -220,7 +222,11 @@ def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
-    graded = [c["grade"] for c in courses_out if c.get("gradeAvailable") and c["grade"] is not None]
+    graded = [
+        c["grade"]
+        for c in courses_out
+        if c.get("gpaEligible") and c["grade"] is not None
+    ]
     overall_avg = round(sum(graded) / len(graded), 1) if graded else None
     gpa_available = len(graded) >= 2
     risk_payload = _derive_synced_risk(user_id, student_id, overall_avg)
@@ -231,17 +237,9 @@ def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
         "gpa": _gpa_from_percentages(graded) if gpa_available else None,
         "gpaAvailable": gpa_available,
         "gpaSource": (
-            "Calculated from synced Moodle grades" if gpa_available else None
+            "Calculated from synced Moodle numeric grades" if gpa_available else None
         ),
-        "gpaNote": (
-            None
-            if gpa_available
-            else (
-                "GPA will appear after Moodle grade data is synced."
-                if len(graded) == 0
-                else "GPA requires at least two courses with synced grades."
-            )
-        ),
+        "gpaNote": None if gpa_available else "GPA not available yet.",
         "risk": risk_payload["risk"],
         "riskAvailable": risk_payload["riskAvailable"],
         "riskSource": risk_payload["riskSource"],
@@ -299,6 +297,8 @@ def build_student_results(user: Dict[str, Any]) -> Dict[str, Any]:
                 "gradeSource": resolved["gradeSource"],
                 "gradeLabel": resolved["gradeLabel"],
                 "gradeNote": _course_grade_note(resolved),
+                "gpaEligible": resolved.get("gpaEligible", False),
+                "excludeFromGpa": resolved.get("excludeFromGpa", True),
                 "courseId": str(cid),
                 "code": _course_code(name, str(cid)),
                 "activity": _course_activity_summary(user_id, str(cid)),
@@ -306,7 +306,11 @@ def build_student_results(user: Dict[str, Any]) -> Dict[str, Any]:
         )
     courses_out.sort(key=lambda c: c["name"])
 
-    graded = [c["grade"] for c in courses_out if c.get("gradeAvailable") and c["grade"] is not None]
+    graded = [
+        c["grade"]
+        for c in courses_out
+        if c.get("gpaEligible") and c["grade"] is not None
+    ]
     overall_avg = round(sum(graded) / len(graded), 1) if graded else None
     gpa_available = len(graded) >= 2
 
@@ -316,17 +320,9 @@ def build_student_results(user: Dict[str, Any]) -> Dict[str, Any]:
         "gpa": _gpa_from_percentages(graded) if gpa_available else None,
         "gpaAvailable": gpa_available,
         "gpaSource": (
-            "Calculated from synced Moodle grades" if gpa_available else None
+            "Calculated from synced Moodle numeric grades" if gpa_available else None
         ),
-        "gpaNote": (
-            None
-            if gpa_available
-            else (
-                "GPA will appear after Moodle grade data is synced."
-                if len(graded) == 0
-                else "GPA requires at least two courses with synced grades."
-            )
-        ),
+        "gpaNote": None if gpa_available else "GPA not available yet.",
         "risk": _derive_demo_risk(overall_avg),
         "riskAvailable": overall_avg is not None,
         "riskSource": "Based on synced course grades" if overall_avg is not None else None,

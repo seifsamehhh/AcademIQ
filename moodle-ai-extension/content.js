@@ -872,32 +872,239 @@
         return Number.isFinite(n) ? n : null;
     };
 
-    const extractGradesFromTable = (courseId, doc = document) => {
+    const COURSE_TOTAL_ITEM_RE = /(?:^|\b)(?:course\s+total|aggregation\s*course\s+total)/i;
+    const CATEGORY_TOTAL_ITEM_RE = /\bcategory\s+total\b/i;
+
+    const isCourseTotalItemName = (itemName) => COURSE_TOTAL_ITEM_RE.test(itemName || "");
+    const isCategoryTotalItemName = (itemName) => CATEGORY_TOTAL_ITEM_RE.test(itemName || "");
+
+    const inferGradeItemType = (itemName, isCourseTotal, isCategoryTotal) => {
+        if (isCourseTotal) return "course_total";
+        if (isCategoryTotal) return "category_total";
+        const lower = (itemName || "").toLowerCase();
+        if (lower.includes("quiz")) return "quiz";
+        if (lower.includes("assignment") || lower.includes("turnitin")) return "assignment";
+        return "assignment";
+    };
+
+    const extractGradesFromTable = (courseId, doc = document, meta = {}) => {
         const grades = [];
+        const sourceUrl = meta.sourceUrl || null;
+        const courseName = meta.courseName || null;
         doc.querySelectorAll("table.user-grade tbody tr").forEach((row) => {
             const itemName = cleanText(row.querySelector("th.column-itemname")?.textContent);
             const gradeText = cleanText(row.querySelector("td.column-grade")?.textContent);
             const rangeText = cleanText(row.querySelector("td.column-range")?.textContent);
             if (!itemName || !gradeText) return;
 
+            const isCourseTotal = isCourseTotalItemName(itemName);
+            const isCategoryTotal = isCategoryTotalItemName(itemName);
             const gradeNumber = parseGradePoints(gradeText);
             const maxNumber = parseMaxPoints(rangeText);
             const percentage =
                 Number.isFinite(gradeNumber) && Number.isFinite(maxNumber) && maxNumber > 0
                     ? Math.round((gradeNumber / maxNumber) * 100)
                     : null;
+            const ungradedInMoodle =
+                gradeNumber === null &&
+                (gradeText === "-" || gradeText.startsWith("- "));
 
             grades.push({
                 course_id: String(courseId),
+                course_name: courseName,
                 item_name: itemName,
-                item_type: itemName.toLowerCase().includes("quiz") ? "quiz" : "assignment",
+                item_type: inferGradeItemType(itemName, isCourseTotal, isCategoryTotal),
                 grade: gradeText,
                 max_grade: rangeText,
                 percentage,
+                is_course_total: isCourseTotal,
+                grade_source: "gradebook",
+                source_url: sourceUrl,
+                ungraded_in_moodle: ungradedInMoodle,
                 submission_status: cleanText(row.querySelector("td.column-status")?.textContent),
                 submission_time: cleanText(row.querySelector("td.column-lastaccess")?.textContent)
             });
         });
+        return grades;
+    };
+
+    const extractGradesFromOverview = (courseId, doc = document, meta = {}) => {
+        const grades = [];
+        const cid = String(courseId);
+        const sourceUrl = meta.sourceUrl || null;
+        const courseName = meta.courseName || null;
+        doc.querySelectorAll("table tbody tr").forEach((row) => {
+            const link = row.querySelector(
+                `a[href*="course/view.php?id=${cid}"], a[href*="id=${cid}"]`
+            );
+            if (!link) return;
+            const cells = row.querySelectorAll("td");
+            if (!cells.length) return;
+            const gradeText = cleanText(cells[cells.length - 1]?.textContent);
+            if (!gradeText) return;
+            const gradeNumber = parseGradePoints(gradeText);
+            const maxNumber = parseMaxPoints(gradeText);
+            const percentage =
+                Number.isFinite(gradeNumber) && Number.isFinite(maxNumber) && maxNumber > 0
+                    ? Math.round((gradeNumber / maxNumber) * 100)
+                    : null;
+            grades.push({
+                course_id: cid,
+                course_name: courseName,
+                item_name: `Overview ${cleanText(link.textContent) || "Course total"}`,
+                item_type: "course_total",
+                grade: gradeText,
+                max_grade: null,
+                percentage,
+                is_course_total: true,
+                source_url: sourceUrl,
+                ungraded_in_moodle: gradeNumber === null,
+                submission_status: null,
+                submission_time: null
+            });
+        });
+        return grades;
+    };
+
+    const hasNumericGradeRows = (grades) =>
+        grades.some((g) => {
+            if (typeof g.percentage === "number" && Number.isFinite(g.percentage)) return true;
+            const gn = parseGradePoints(g.grade);
+            const mx = parseMaxPoints(g.max_grade);
+            return Number.isFinite(gn) && Number.isFinite(mx) && mx > 0;
+        });
+
+    const extractGradeFromActivityDocument = (doc, pageUrl, course, activityType, fallbackTitle) => {
+        const title = cleanText(doc.querySelector("h1")?.textContent) || fallbackTitle || "Activity";
+        const gradeSelectors = [
+            ".gradingtable .grade",
+            ".quizgradefeedback",
+            ".quizinfo",
+            "#feedback .grade",
+            ".submissionstatustable .grade",
+            "table.user-grade td.column-grade",
+            ".quizreviewsummary"
+        ];
+
+        let gradeText = null;
+        let rangeText = null;
+        for (const selector of gradeSelectors) {
+            const el = doc.querySelector(selector);
+            if (!el) continue;
+            const t = cleanText(el.textContent);
+            if (t && t !== "-" && !t.startsWith("- ")) {
+                gradeText = t;
+                break;
+            }
+        }
+
+        if (!gradeText) {
+            const body = doc.body?.innerText || "";
+            const patterns = [
+                /(?:grade|score|mark|result)[:\s]+(\d+(?:\.\d+)?)\s*(?:\/|out of)\s*(\d+(?:\.\d+)?)/i,
+                /(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\s*(?:points?|marks?)?/i
+            ];
+            for (const pattern of patterns) {
+                const match = body.match(pattern);
+                if (match) {
+                    gradeText = `${match[1]} / ${match[2]}`;
+                    rangeText = match[2];
+                    break;
+                }
+            }
+        }
+
+        if (!gradeText) return null;
+
+        const gradeNumber = parseGradePoints(gradeText);
+        const maxNumber = parseMaxPoints(rangeText || gradeText);
+        const percentage =
+            Number.isFinite(gradeNumber) && Number.isFinite(maxNumber) && maxNumber > 0
+                ? Math.round((gradeNumber / maxNumber) * 100)
+                : null;
+
+        if (percentage === null && gradeNumber === null) return null;
+
+        return {
+            course_id: String(course.course_id),
+            course_name: course.course_name,
+            item_name: title,
+            activity_title: title,
+            activity_type: activityType,
+            item_type: activityType,
+            grade: gradeText,
+            max_grade: rangeText,
+            percentage,
+            grade_source: "activity_page",
+            source_url: pageUrl,
+            is_course_total: false,
+            ungraded_in_moodle: percentage === null,
+            submission_status: cleanText(doc.querySelector(".submissionstatustable")?.textContent),
+            submission_time: null
+        };
+    };
+
+    const extractActivityGradesFromCourse = async (course, courseDoc, origin) => {
+        const grades = [];
+        const activityLinks = [];
+        courseDoc.querySelectorAll("a[href]").forEach((anchor) => {
+            const href = anchor.getAttribute("href") || "";
+            if (!/\/mod\/(quiz|assign)\/view\.php/i.test(href)) return;
+            try {
+                const url = new URL(href, course.url || origin).href;
+                const type = /\/mod\/quiz\//i.test(href) ? "quiz" : "assignment";
+                activityLinks.push({
+                    url,
+                    type,
+                    label: cleanText(anchor.textContent)
+                });
+            } catch (_error) {
+                /* skip bad href */
+            }
+        });
+
+        const seen = new Set();
+        const unique = activityLinks.filter((link) => {
+            if (seen.has(link.url)) return false;
+            seen.add(link.url);
+            return true;
+        });
+
+        const MAX_ACTIVITY_PAGES = 25;
+        for (const link of unique.slice(0, MAX_ACTIVITY_PAGES)) {
+            try {
+                const doc = await fetchDocument(link.url);
+                const row = extractGradeFromActivityDocument(
+                    doc,
+                    link.url,
+                    course,
+                    link.type,
+                    link.label
+                );
+                if (row) grades.push(row);
+
+                if (link.type === "quiz") {
+                    const reviewAnchor = doc.querySelector("a[href*='mod/quiz/review.php']");
+                    if (reviewAnchor) {
+                        const reviewUrl = new URL(
+                            reviewAnchor.getAttribute("href"),
+                            link.url
+                        ).href;
+                        const reviewDoc = await fetchDocument(reviewUrl);
+                        const reviewRow = extractGradeFromActivityDocument(
+                            reviewDoc,
+                            reviewUrl,
+                            course,
+                            "quiz",
+                            link.label
+                        );
+                        if (reviewRow) grades.push(reviewRow);
+                    }
+                }
+            } catch (_error) {
+                /* optional per-activity */
+            }
+        }
         return grades;
     };
 
@@ -1050,9 +1257,34 @@
 
                 // Per-course grades from the user grade report (best-effort).
                 try {
-                    const gradeUrl = new URL(`/grade/report/user/index.php?id=${course.course_id}`, origin).href;
+                    const gradeUrl = new URL(
+                        `/grade/report/user/index.php?id=${course.course_id}`,
+                        origin
+                    ).href;
+                    const gradeMeta = {
+                        sourceUrl: gradeUrl,
+                        courseName: course.course_name
+                    };
                     const gradeDoc = await fetchDocument(gradeUrl);
-                    const grades = extractGradesFromTable(course.course_id, gradeDoc);
+                    let grades = extractGradesFromTable(course.course_id, gradeDoc, gradeMeta);
+                    if (!grades.length) {
+                        const overviewUrl = new URL("/grade/report/overview/index.php", origin).href;
+                        const overviewDoc = await fetchDocument(overviewUrl);
+                        grades = extractGradesFromOverview(course.course_id, overviewDoc, {
+                            sourceUrl: overviewUrl,
+                            courseName: course.course_name
+                        });
+                    }
+                    if (!hasNumericGradeRows(grades)) {
+                        const activityGrades = await extractActivityGradesFromCourse(
+                            course,
+                            courseDoc,
+                            origin
+                        );
+                        if (activityGrades.length) {
+                            grades = [...grades, ...activityGrades];
+                        }
+                    }
                     if (grades.length) sendMessage("grades", grades);
                 } catch (_error) {
                     /* grades are optional */
@@ -1707,17 +1939,25 @@
         }
 
         if (pageType === "assignment") {
-            const grades = extractAssignmentDetails(course.course_id);
-            if (grades.length) {
-                sendMessage("grades", grades);
-            }
+            const row = extractGradeFromActivityDocument(
+                document,
+                window.location.href,
+                course,
+                "assignment",
+                null
+            );
+            if (row) sendMessage("grades", [row]);
         }
 
         if (pageType === "quiz") {
-            const grades = extractQuizDetails(course.course_id);
-            if (grades.length) {
-                sendMessage("grades", grades);
-            }
+            const row = extractGradeFromActivityDocument(
+                document,
+                window.location.href,
+                course,
+                "quiz",
+                null
+            );
+            if (row) sendMessage("grades", [row]);
         }
     };
 
