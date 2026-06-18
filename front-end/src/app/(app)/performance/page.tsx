@@ -105,19 +105,9 @@ export default function PerformancePage() {
               />
             </div>
           ) : limitedInsight ? (
-            <LimitedInsightCard
-              message={
-                ready.message ??
-                "Rule-based performance insight is available from synced activity. No numeric ML prediction is shown."
-              }
-            />
+            <LimitedInsightCard message={ready.message ?? ""} />
           ) : (
-            <MlUnavailableCard
-              message={
-                ready.message ??
-                "The model needs complete synced Moodle activity features before it can generate a reliable prediction."
-              }
-            />
+            <MlUnavailableCard message={ready.message ?? ""} />
           )}
 
           {mlReady || limitedInsight ? (

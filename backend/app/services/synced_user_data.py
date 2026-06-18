@@ -19,8 +19,6 @@ from app.config.database import (
 )
 from app.repositories import metrics_repository, user_repository
 from app.demo_data import DEMO_RESULTS, DEMO_STUDENT_IDS
-from app.services.feature_vector_lookup import find_feature_vector_doc
-from app.services.ml_service_client import ml_service_configured, predict_performance_remote
 from app.services.moodle_course_display import (
     get_visible_synced_courses_for_user,
     resolve_display_name,
@@ -91,96 +89,73 @@ def _derive_demo_risk(avg_grade: Optional[float]) -> str:
     return "High"
 
 
-def _has_synced_activity_features(feats: Dict[str, Any]) -> bool:
-    if not feats:
-        return False
-    keys = (
-        "all_clicks",
-        "active_days",
-        "quiz_attempts",
-        "assignment_submissions",
-        "total_time_spent",
-        "material_clicks",
-        "procrastination_index",
-        "late_submission_count",
-    )
-    return any((feats.get(k) or 0) > 0 for k in keys)
-
-
 def _derive_synced_risk(
     user_id: str,
     student_id: Optional[str],
     overall_avg: Optional[float],
 ) -> Dict[str, Any]:
-    """Activity / ML based risk label for synced Moodle users."""
-    doc, _matched = find_feature_vector_doc(user_id, student_id)
-    feats = (doc or {}).get("features") or {}
-    synced_feats = bool(doc and doc.get("feature_source") == "synced" and feats)
+    """Risk label aligned with per-course performance modes — no global ML fallback."""
+    from app.services.moodle_course_display import get_visible_synced_courses_for_user
+    from app.services.performance_feature_trust import (
+        LIMITED_INSIGHT_MESSAGE,
+        NOT_ENOUGH_DATA_MESSAGE,
+    )
+    from app.services.student_data import get_course_performance_mode
 
-    if synced_feats and ml_service_configured():
-        remote = predict_performance_remote(feats)
-        if remote:
-            status = (remote.get("status") or "").strip()
-            if status == "Good":
-                return {
-                    "risk": "Low risk",
-                    "riskAvailable": True,
-                    "riskSource": "Based on synced Moodle activity features",
-                    "riskNote": None,
-                }
-            if status == "Average":
-                return {
-                    "risk": "Medium risk",
-                    "riskAvailable": True,
-                    "riskSource": "Based on synced Moodle activity features",
-                    "riskNote": None,
-                }
-            if status == "At Risk":
-                return {
-                    "risk": "At risk",
-                    "riskAvailable": True,
-                    "riskSource": "Based on synced Moodle activity features",
-                    "riskNote": None,
-                }
+    course_ids = [
+        str(c["id"]) for c in get_visible_synced_courses_for_user(user_id)
+    ]
+    if not course_ids:
+        return {
+            "risk": "Not enough data",
+            "riskAvailable": False,
+            "riskSource": None,
+            "riskNote": NOT_ENOUGH_DATA_MESSAGE,
+        }
 
-    if synced_feats and _has_synced_activity_features(feats):
-        late = int(feats.get("late_submission_count") or 0)
-        proc = float(feats.get("procrastination_index") or 0)
-        active = int(feats.get("active_days") or 0)
-        if late >= 2 or proc >= 5:
+    modes: List[str] = []
+    verified_statuses: List[str] = []
+    for cid in course_ids:
+        snap = get_course_performance_mode(user_id, cid, student_id)
+        modes.append(snap.get("performanceMode") or "not_enough_data")
+        if snap.get("predictionVerified") and snap.get("status"):
+            verified_statuses.append(str(snap["status"]))
+
+    if verified_statuses:
+        if any(s == "At Risk" for s in verified_statuses):
             label = "At risk"
-        elif late >= 1 or proc >= 3 or active < 8:
+        elif any(s == "Average" for s in verified_statuses):
             label = "Medium risk"
-        elif active >= 8:
-            label = "Low risk"
         else:
-            label = "Medium risk"
+            label = "Low risk"
         return {
             "risk": label,
             "riskAvailable": True,
-            "riskSource": "Based on synced Moodle activity features",
+            "riskSource": "Based on verified ML performance prediction",
             "riskNote": None,
         }
 
-    if overall_avg is not None:
-        if overall_avg >= 80:
-            label = "Low risk"
-        elif overall_avg >= 65:
-            label = "Medium risk"
-        else:
-            label = "At risk"
+    if all(m == "not_enough_data" for m in modes):
         return {
-            "risk": label,
+            "risk": "Not enough data",
+            "riskAvailable": False,
+            "riskSource": None,
+            "riskNote": NOT_ENOUGH_DATA_MESSAGE,
+        }
+
+    if all(m in ("limited_insight", "not_enough_data") for m in modes):
+        return {
+            "risk": "Medium risk",
             "riskAvailable": True,
-            "riskSource": "Based on synced course grades",
-            "riskNote": None,
+            "riskSource": "Based on current grade records and limited activity signals",
+            "riskNote": LIMITED_INSIGHT_MESSAGE,
         }
 
     return {
         "risk": "Not enough data",
         "riskAvailable": False,
         "riskSource": None,
-        "riskNote": "Risk analysis requires synced grades or activity data.",
+        "riskNote": NOT_ENOUGH_DATA_MESSAGE,
     }
 
 

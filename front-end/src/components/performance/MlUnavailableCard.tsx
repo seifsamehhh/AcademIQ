@@ -4,9 +4,10 @@ export function MlUnavailableCard({ message }: { message: string }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>ML prediction not available yet</CardTitle>
+        <CardTitle>Prediction not available yet</CardTitle>
         <CardDescription>
-          Predictions appear only when synced Moodle activity supports a reliable model run.
+          More course-specific Moodle activity is needed before a reliable prediction
+          can be generated.
         </CardDescription>
       </CardHeader>
       <CardContent>

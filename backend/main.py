@@ -152,6 +152,19 @@ def debug_data_foundation_audit(email: str):
     return audit_data_foundation_for_email(email)
 
 
+@app.get("/debug/performance-feature-audit/{email}")
+def debug_performance_feature_audit(email: str):
+    """
+    Per-course ML feature sources, trust flags, and prediction eligibility.
+    No passwords, tokens, or raw document bodies.
+    """
+    from app.services.performance_feature_audit import audit_performance_features_for_email
+
+    if not connect_database():
+        raise HTTPException(status_code=503, detail="Database unreachable")
+    return audit_performance_features_for_email(email)
+
+
 @app.get("/debug/user-data/{email}")
 def debug_user_data(email: str):
     """

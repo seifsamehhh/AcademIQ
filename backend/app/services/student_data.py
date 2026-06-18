@@ -29,6 +29,13 @@ from app.services.moodle_course_display import (
     get_visible_synced_courses_for_user,
     should_use_visible_moodle_courses,
 )
+from app.services.performance_feature_trust import (
+    LIMITED_INSIGHT_MESSAGE,
+    NOT_ENOUGH_DATA_MESSAGE,
+    build_feature_trust_context,
+    derive_performance_mode_from_trust,
+    is_numeric_ml_prediction_trustworthy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -290,8 +297,13 @@ def _data_backed_heuristic_factors(
             continue
         if key == "procrastination_index" and assign_sub <= 0 and int(feats.get("late_submission_count") or 0) <= 0:
             continue
-        if key == "low_engagement" and int(feats.get("active_days") or 0) <= 0:
-            continue
+        if key == "low_engagement":
+            metrics_active = metrics.get("active_days_count")
+            vector_active = int(feats.get("active_days") or 0)
+            if metrics_active is not None and int(metrics_active) != vector_active:
+                continue
+            if vector_active <= 0:
+                continue
         description = spec["description"]
         if limited or (
             key in ("late_submission_count", "procrastination_index", "low_engagement")
@@ -355,19 +367,24 @@ def _is_feature_vector_complete(
     return has_grade or quiz > 0 or assign > 0 or active > 0 or time_spent > 0
 
 
-def _is_prediction_trustworthy(
-    predicted: Optional[int],
+def _derive_performance_mode(
+    ml_bundle: Dict[str, Any],
     resolved_grade: Dict[str, Any],
+    feats: Dict[str, Any],
     feat_debug: Dict[str, Any],
-) -> bool:
-    if predicted is None:
-        return False
-    if feat_debug.get("used_overall_synced"):
-        return False
-    display = resolved_grade.get("displayGrade")
-    if display is not None and predicted <= 10 and float(display) >= 40:
-        return False
-    return True
+    metrics: Dict[str, Any],
+    trust_context: Dict[str, Any],
+) -> str:
+    factors = _data_backed_heuristic_factors(feats, metrics, feat_debug)
+    return derive_performance_mode_from_trust(
+        ml_bundle.get("predictionVerified"),
+        resolved_grade,
+        feat_debug,
+        trust_context,
+        feats,
+        metrics,
+        bool(factors),
+    )
 
 
 def _can_attempt_ml_prediction(
@@ -394,6 +411,7 @@ def _run_ml_prediction(
     metrics: Dict[str, Any],
     resolved_grade: Dict[str, Any],
     include_debug: bool = False,
+    raw_feats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     empty: Dict[str, Any] = {
         "predictedGrade": None,
@@ -469,19 +487,35 @@ def _run_ml_prediction(
                     "Good" if predicted >= 75 else "Average" if predicted >= 60 else "At Risk"
                 )
 
-    verified = (
-        used_model
-        and _is_prediction_trustworthy(predicted, resolved_grade, feat_debug)
+    trust_context = build_feature_trust_context(
+        user_id,
+        course_id,
+        student_id,
+        feats,
+        raw_feats or feats,
+        feat_debug,
+        metrics,
+        resolved_grade,
     )
-    if used_model and not verified:
-        reason = (
-            "Model output withheld — insufficient verified per-course features "
-            "or inconsistent with resolved course grade."
+
+    verified = False
+    if used_model:
+        verified, trust_reason = is_numeric_ml_prediction_trustworthy(
+            predicted,
+            resolved_grade,
+            feat_debug,
+            trust_context,
+            feats,
         )
-        predicted = None
-        status = None
-        probability = None
-        confidence = None
+        if not verified:
+            reason = trust_reason or (
+                "Model output withheld — insufficient verified per-course features "
+                "or inconsistent with resolved course grade."
+            )
+            predicted = None
+            status = None
+            probability = None
+            confidence = None
 
     out = {
         "predictedGrade": predicted if verified else None,
@@ -496,24 +530,6 @@ def _run_ml_prediction(
         "usedModel": used_model,
     }
     return out
-
-
-def _derive_performance_mode(
-    ml_bundle: Dict[str, Any],
-    resolved_grade: Dict[str, Any],
-    feats: Dict[str, Any],
-    feat_debug: Dict[str, Any],
-    metrics: Dict[str, Any],
-) -> str:
-    if ml_bundle.get("predictionVerified"):
-        return "ml_prediction"
-    if (
-        _is_feature_vector_complete(feats, feat_debug, metrics, resolved_grade)
-        or resolved_grade.get("gradeAvailable")
-        or _data_backed_heuristic_factors(feats, metrics, feat_debug)
-    ):
-        return "limited_insight"
-    return "not_enough_data"
 
 
 def _grades(user_id: str) -> List[Dict[str, Any]]:
@@ -846,7 +862,11 @@ def get_performance(
     assign_avg = _avg_percentage(grade_rows, course_id, "assignment")
 
     feats, feat_debug = resolve_course_features(user_id, course_id, student_id)
+    raw_feats = dict(feats)
     feats = _apply_course_scoped_behavioral_features(user_id, course_id, feats, feat_debug)
+    trust_context = build_feature_trust_context(
+        user_id, course_id, student_id, feats, raw_feats, feat_debug, metrics, resolved
+    )
     has_feature_data = _has_ml_feature_data(feats)
     if not has_feature_data:
         log_missing_feature_vector(
@@ -856,7 +876,14 @@ def get_performance(
         )
 
     ml_bundle = _run_ml_prediction(
-        user_id, course_id, student_id, feats, feat_debug, metrics, resolved
+        user_id,
+        course_id,
+        student_id,
+        feats,
+        feat_debug,
+        metrics,
+        resolved,
+        raw_feats=raw_feats,
     )
     prediction_verified = ml_bundle["predictionVerified"]
     predicted = ml_bundle["predictedGrade"]
@@ -864,7 +891,7 @@ def get_performance(
     probability = ml_bundle["probability"]
     confidence = ml_bundle["confidence"]
     performance_mode = _derive_performance_mode(
-        ml_bundle, resolved, feats, feat_debug, metrics
+        ml_bundle, resolved, feats, feat_debug, metrics, trust_context
     )
 
     classification_source = (
@@ -875,16 +902,9 @@ def get_performance(
 
     message: str | None = None
     if performance_mode == "not_enough_data":
-        message = (
-            _ML_INCOMPLETE_MESSAGE
-            if feat_debug.get("feature_source") == "synced"
-            else _ML_NO_FEATURES_MESSAGE
-        )
+        message = NOT_ENOUGH_DATA_MESSAGE
     elif performance_mode == "limited_insight":
-        message = (
-            "Rule-based performance insight is available. "
-            "A numeric ML prediction requires complete per-course synced features."
-        )
+        message = LIMITED_INSIGHT_MESSAGE
 
     total_seconds = metrics.get("total_time_spent_seconds", 0) or 0
     total_hours = round(total_seconds / 3600, 1)
@@ -942,10 +962,21 @@ def get_insights(
     has_grade_data = bool(resolved.get("gradeAvailable"))
 
     feats, feat_debug = resolve_course_features(user_id, course_id, student_id)
+    raw_feats = dict(feats)
     feats = _apply_course_scoped_behavioral_features(user_id, course_id, feats, feat_debug)
+    trust_context = build_feature_trust_context(
+        user_id, course_id, student_id, feats, raw_feats, feat_debug, metrics, resolved
+    )
 
     ml_bundle = _run_ml_prediction(
-        user_id, course_id, student_id, feats, feat_debug, metrics, resolved
+        user_id,
+        course_id,
+        student_id,
+        feats,
+        feat_debug,
+        metrics,
+        resolved,
+        raw_feats=raw_feats,
     )
 
     if ml_bundle.get("predictionVerified"):
@@ -998,15 +1029,33 @@ def get_insights(
     )
     if not factors:
         summary += " Limited synced activity is available for detailed guidance."
-    perf_status = (
-        "Good"
-        if is_high
-        else "At Risk"
-        if has_grade_data and course_avg is not None and course_avg < 60
-        else "Average"
-    )
     mode = _derive_performance_mode(
-        ml_bundle, resolved, feats, feat_debug, metrics
+        ml_bundle, resolved, feats, feat_debug, metrics, trust_context
+    )
+    if mode == "not_enough_data":
+        summary = NOT_ENOUGH_DATA_MESSAGE
+        perf_status = "Average"
+    elif mode == "limited_insight":
+        summary = LIMITED_INSIGHT_MESSAGE
+        perf_status = (
+            "Good"
+            if is_high
+            else "Average"
+        )
+    else:
+        perf_status = (
+            "Good"
+            if is_high
+            else "At Risk"
+            if has_grade_data and course_avg is not None and course_avg < 60
+            else "Average"
+        )
+    classification_source = (
+        "ML prediction based on verified course features"
+        if mode == "ml_prediction"
+        else LIMITED_INSIGHT_MESSAGE
+        if mode == "limited_insight"
+        else NOT_ENOUGH_DATA_MESSAGE
     )
     return {
         "course": _course_obj(user_id, course_id, student_id),
@@ -1015,8 +1064,44 @@ def get_insights(
         "classificationSummary": summary,
         "riskFactors": factors,
         "heuristic": True,
-        "classificationSource": "Rule-based performance insight from limited synced activity",
+        "classificationSource": classification_source,
         "performanceMode": mode,
+    }
+
+
+def get_course_performance_mode(
+    user_id: str,
+    course_id: str,
+    student_id: str | None = None,
+) -> Dict[str, Any]:
+    """Lightweight mode + verified status for dashboard risk aggregation."""
+    metrics = (metrics_repository.get(user_id, course_id) or {}).get("metrics", {}) or {}
+    grade_rows = _grades(user_id)
+    resolved = _resolve_display_grade_for_course(user_id, course_id, grade_rows=grade_rows)
+    raw_feats, feat_debug = resolve_course_features(user_id, course_id, student_id)
+    feats = _apply_course_scoped_behavioral_features(user_id, course_id, dict(raw_feats), feat_debug)
+    trust_context = build_feature_trust_context(
+        user_id, course_id, student_id, feats, raw_feats, feat_debug, metrics, resolved
+    )
+    ml_bundle = _run_ml_prediction(
+        user_id,
+        course_id,
+        student_id,
+        feats,
+        feat_debug,
+        metrics,
+        resolved,
+        raw_feats=raw_feats,
+    )
+    mode = _derive_performance_mode(
+        ml_bundle, resolved, feats, feat_debug, metrics, trust_context
+    )
+    return {
+        "course_id": course_id,
+        "performanceMode": mode,
+        "predictionVerified": ml_bundle.get("predictionVerified"),
+        "status": ml_bundle.get("status"),
+        "gradeAvailable": bool(resolved.get("gradeAvailable")),
     }
 
 

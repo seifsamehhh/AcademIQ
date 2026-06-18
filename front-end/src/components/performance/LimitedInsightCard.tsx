@@ -4,9 +4,9 @@ export function LimitedInsightCard({ message }: { message: string }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Rule-based performance insight</CardTitle>
+        <CardTitle>Performance insight</CardTitle>
         <CardDescription>
-          Guidance from synced activity — no numeric ML prediction is shown.
+          Based on current grade records and available activity signals.
         </CardDescription>
       </CardHeader>
       <CardContent>
