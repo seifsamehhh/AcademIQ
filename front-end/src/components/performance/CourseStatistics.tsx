@@ -1,5 +1,5 @@
 import { ClipboardList, Clock, FileCheck2, CalendarClock } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import type {
   ActivityValueSource,
   CourseStatistics as Stats,
@@ -9,13 +9,13 @@ import type {
 type TaskLabel = "Quizzes" | "Assignments";
 
 const TASK_UNAVAILABLE_HINT: Record<TaskLabel, string> = {
-  Quizzes: "No synced quiz activity is available for this course yet.",
-  Assignments: "No synced assignment activity is available for this course yet.",
+  Quizzes: "No synced quiz activity data is available for this course yet.",
+  Assignments: "No synced assignment activity data is available for this course yet.",
 };
 
-function valueSourceHint(source: ActivityValueSource): string | undefined {
+function activityFeatureHint(source: ActivityValueSource): string | undefined {
   if (source === "feature_vector") {
-    return "Source: synced activity feature";
+    return "From synced activity feature";
   }
   if (source === "estimated_from_synced_activity") {
     return "Estimated from synced Moodle activity";
@@ -23,25 +23,55 @@ function valueSourceHint(source: ActivityValueSource): string | undefined {
   return undefined;
 }
 
-function formatAttempted(
+function formatTaskDisplay(
   breakdown: TaskBreakdown,
   label: TaskLabel,
-): { primary: string; hint?: string } {
+): {
+  countPrimary: string;
+  countHint?: string;
+  avgPrimary: string;
+  avgLabel: string;
+} {
   if (!breakdown.available) {
     return {
-      primary: "Not available",
-      hint: TASK_UNAVAILABLE_HINT[label],
+      countPrimary: "Not available",
+      countHint: TASK_UNAVAILABLE_HINT[label],
+      avgPrimary: "—",
+      avgLabel: "avg score",
     };
   }
-  if (breakdown.total != null) {
-    return {
-      primary: `${breakdown.attempted ?? 0} of ${breakdown.total} recorded`,
-      hint: valueSourceHint(breakdown.valueSource),
-    };
+
+  const syncedMoodle = breakdown.valueSource === "synced_moodle";
+  const hasAvg =
+    breakdown.averageScore !== null && breakdown.averageScore !== undefined;
+  const attempted = breakdown.attempted;
+  const confirmedZero = syncedMoodle && attempted === 0;
+  const countUncertain =
+    hasAvg &&
+    !confirmedZero &&
+    (attempted === null || attempted === 0);
+
+  let countPrimary: string;
+  if (countUncertain) {
+    countPrimary = "Count not available";
+  } else if (confirmedZero) {
+    countPrimary =
+      breakdown.total != null
+        ? `0 of ${breakdown.total} recorded`
+        : "0 recorded";
+  } else if (breakdown.total != null) {
+    countPrimary = `${attempted ?? 0} of ${breakdown.total} recorded`;
+  } else {
+    countPrimary = `${attempted ?? 0} recorded`;
   }
+
+  const featureHint = activityFeatureHint(breakdown.valueSource);
+
   return {
-    primary: `${breakdown.attempted ?? 0} recorded`,
-    hint: valueSourceHint(breakdown.valueSource),
+    countPrimary,
+    countHint: featureHint,
+    avgPrimary: hasAvg ? `${breakdown.averageScore}%` : "—",
+    avgLabel: hasAvg && countUncertain ? "Synced grade data" : "avg score",
   };
 }
 
@@ -54,7 +84,10 @@ function TaskRow({
   label: TaskLabel;
   breakdown: TaskBreakdown;
 }) {
-  const { primary, hint } = formatAttempted(breakdown, label);
+  const { countPrimary, countHint, avgPrimary, avgLabel } = formatTaskDisplay(
+    breakdown,
+    label,
+  );
 
   return (
     <div className="flex items-center justify-between rounded-lg border border-border bg-background p-4">
@@ -64,19 +97,15 @@ function TaskRow({
         </div>
         <div>
           <p className="text-sm font-medium text-foreground">{label}</p>
-          <p className="text-xs text-muted-foreground">{primary}</p>
-          {hint ? (
-            <p className="mt-1 text-xs text-muted-foreground/80">{hint}</p>
+          <p className="text-xs text-muted-foreground">{countPrimary}</p>
+          {countHint ? (
+            <p className="mt-1 text-xs text-muted-foreground/80">{countHint}</p>
           ) : null}
         </div>
       </div>
       <div className="text-right">
-        <p className="text-lg font-semibold text-foreground">
-          {breakdown.averageScore !== null && breakdown.averageScore !== undefined
-            ? `${breakdown.averageScore}%`
-            : "—"}
-        </p>
-        <p className="text-xs text-muted-foreground">avg score</p>
+        <p className="text-lg font-semibold text-foreground">{avgPrimary}</p>
+        <p className="text-xs text-muted-foreground">{avgLabel}</p>
       </div>
     </div>
   );
@@ -113,20 +142,22 @@ function TimeRow({
 
 export function CourseStatistics({ stats }: { stats: Stats }) {
   const weeklyEstimated = stats.weeklyAverageEstimated ?? false;
-  const totalTimeHint =
-    stats.totalTimeAvailable
-      ? valueSourceHint(stats.totalTimeValueSource)
-      : undefined;
+  const totalTimeHint = stats.totalTimeAvailable
+    ? activityFeatureHint(stats.totalTimeValueSource)
+    : undefined;
   const weeklyHint = stats.weeklyAverageAvailable
     ? weeklyEstimated
-      ? valueSourceHint("estimated_from_synced_activity")
-      : valueSourceHint(stats.weeklyAverageValueSource)
+      ? activityFeatureHint("estimated_from_synced_activity")
+      : activityFeatureHint(stats.weeklyAverageValueSource)
     : undefined;
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Course Activity Records</CardTitle>
+        <CardDescription>
+          Synced course activity signals — not grades.
+        </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4 sm:grid-cols-2">
         <TaskRow icon={ClipboardList} label="Quizzes" breakdown={stats.quizzes} />

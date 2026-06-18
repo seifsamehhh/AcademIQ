@@ -31,7 +31,9 @@ export function PerformanceStatusCard({
           <Award className={cn("h-5 w-5", style.text)} />
           <CardTitle>Performance Status</CardTitle>
         </div>
-        <CardDescription>Classification from available course signals</CardDescription>
+        <CardDescription>
+          Classification based on the expected performance estimate
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <Badge variant={style.variant} className="text-sm">

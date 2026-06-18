@@ -66,11 +66,6 @@ function InsightsContent() {
             ? `${insights.course.code} — ${insights.course.name}`
             : "Loading course guidance..."}
         </p>
-        {insights ? (
-          <p className="mt-2 text-sm text-muted-foreground">
-            Recommendations based on the strongest available course signals.
-          </p>
-        ) : null}
       </div>
 
       {error ? <ApiErrorAlert message={error} /> : null}
@@ -82,7 +77,6 @@ function InsightsContent() {
             summary={insights.classificationSummary}
             ruleBased={ruleBased}
             performanceStatus={insights.performanceStatus}
-            classificationSource={insights.classificationSource}
           />
           <RiskFactors factors={insights.riskFactors} ruleBased={ruleBased} />
         </>

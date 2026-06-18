@@ -507,9 +507,9 @@ GUIDANCE_STRENGTH_SPECS: List[Dict[str, Any]] = [
         "feature": "active_days",
     },
     {
-        "title": "Good grade position",
-        "description": "Your current course grade is in a solid range.",
-        "recommendation": "Protect your position by maintaining submissions before deadlines.",
+        "title": "Good current score",
+        "description": "Your current course score is in a solid range.",
+        "recommendation": "Keep your current study rhythm.",
         "severity": "Low",
         "test": lambda f, m, a, g: g is not None and g >= 70,
         "impact": lambda f, m, a, g: 40,
@@ -518,7 +518,7 @@ GUIDANCE_STRENGTH_SPECS: List[Dict[str, Any]] = [
     {
         "title": "Keep current rhythm",
         "description": "Study time and material engagement are supporting your progress.",
-        "recommendation": "Continue reviewing materials before each new topic week.",
+        "recommendation": "Continue reviewing course materials weekly.",
         "severity": "Low",
         "test": lambda f, m, a, g: int(f.get("total_time_spent") or m.get("total_time_spent_seconds") or 0) >= 600
         and int(f.get("material_clicks") or m.get("number_of_resources_clicked") or 0) >= 2,
@@ -528,7 +528,7 @@ GUIDANCE_STRENGTH_SPECS: List[Dict[str, Any]] = [
     {
         "title": "Continue early submissions",
         "description": "No late submissions are recorded for this course.",
-        "recommendation": "Maintain early submission habits to avoid end-of-term pressure.",
+        "recommendation": "Maintain early submissions.",
         "severity": "Low",
         "test": lambda f, m, a, g: int(f.get("late_submission_count") or 0) == 0
         and int(f.get("assignment_submissions") or m.get("assignment_submissions") or 0) > 0,

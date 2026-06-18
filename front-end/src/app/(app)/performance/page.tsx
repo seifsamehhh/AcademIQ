@@ -122,20 +122,15 @@ export default function PerformancePage() {
             <div className="grid gap-6 md:grid-cols-2">
               <PredictedGradeCard
                 grade={ready.predictedGrade}
-                source={ready.classificationSource}
+                predictionSource={ready.predictionSource}
                 confidence={ready.predictionConfidence}
               />
               <PerformanceStatusCard
                 status={ready.status}
-                source={
-                  ready.predictionConfidence === "high"
-                    ? ready.classificationSource
-                    : undefined
-                }
                 statusNote={
                   ready.statusNote ??
                   (ready.predictionConfidence === "limited"
-                    ? "Status based on limited available data."
+                    ? "Based on limited synced activity and grade records."
                     : undefined)
                 }
               />
@@ -165,6 +160,7 @@ export default function PerformancePage() {
             hasGradeData={ready.hasGradeData ?? ready.courseAverage !== null}
             predictedGrade={hasPrediction ? ready.predictedGrade : null}
             gradeLabel={ready.gradeLabel}
+            gradeSource={ready.gradeSource}
             predictionConfidence={ready.predictionConfidence}
           />
           <ActivityStatsNotice

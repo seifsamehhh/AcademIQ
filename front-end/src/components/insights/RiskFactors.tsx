@@ -18,9 +18,8 @@ export function RiskFactors({
           <CardTitle>{ruleBased ? "Guidance Factors" : "Risk Factors"}</CardTitle>
         </div>
         <CardDescription>
-          {ruleBased
-            ? "Activity patterns that may affect course performance, ranked by estimated impact — each with a suggested next step"
-            : "Factors most negatively affecting your predicted performance, ranked by impact — each with a recommended next step"}
+          Insights source: available course signals. Ranked by estimated impact on
+          performance — each with a suggested next step.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">

@@ -28,8 +28,7 @@ interface Props {
 }
 
 /**
- * A single risk-factor card: title, risk level/score, explanation, and a
- * visually separated, model-generated recommendation.
+ * A single insight card: title, reason, impact/severity, and recommendation.
  */
 export function RiskFactorCard({ rank, factor }: Props) {
   const { level, badge, indicator } = riskLevel(factor.impact);
@@ -48,9 +47,12 @@ export function RiskFactorCard({ rank, factor }: Props) {
         </Badge>
       </div>
 
-      <p className="mt-2 text-sm text-muted-foreground sm:ml-9">
-        {factor.description}
-      </p>
+      <div className="mt-2 space-y-1 sm:ml-9">
+        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Reason
+        </p>
+        <p className="text-sm text-muted-foreground">{factor.description}</p>
+      </div>
 
       <Progress
         value={factor.impact}

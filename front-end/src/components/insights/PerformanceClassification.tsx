@@ -8,7 +8,6 @@ interface Props {
   summary: string;
   ruleBased?: boolean;
   performanceStatus?: PerformanceStatus | null;
-  classificationSource?: string | null;
 }
 
 const STATUS_LABEL: Partial<Record<string, string>> = {
@@ -24,7 +23,6 @@ export function PerformanceClassification({
   summary,
   ruleBased = true,
   performanceStatus,
-  classificationSource,
 }: Props) {
   const Icon = isHighPerformer ? CheckCircle2 : AlertCircle;
   const badgeLabel = performanceStatus
@@ -43,7 +41,7 @@ export function PerformanceClassification({
           <CardTitle>Performance guidance</CardTitle>
         </div>
         <CardDescription>
-          {classificationSource ?? "Recommendations based on the strongest available course signals."}
+          Insights source: available course signals
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">

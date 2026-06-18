@@ -4,18 +4,39 @@ import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import type { PredictionConfidence } from "@/lib/types";
 
+const LIMITED_SOURCE_NOTE =
+  "Prediction based on current grade records and limited synced activity features.";
+
+function predictionSourceLabel(
+  predictionSource?: string | null,
+  confidence?: PredictionConfidence | null,
+): string | null {
+  if (confidence === "limited") {
+    return LIMITED_SOURCE_NOTE;
+  }
+  if (predictionSource === "rule_adjusted_prediction") {
+    return "Limited activity estimate";
+  }
+  if (predictionSource === "ml_service" || predictionSource === "local_ml") {
+    return "ML prediction";
+  }
+  return null;
+}
+
 export function PredictedGradeCard({
   grade,
-  source,
+  predictionSource,
   confidence,
 }: {
   grade: number | null;
-  source?: string | null;
+  predictionSource?: string | null;
   confidence?: PredictionConfidence | null;
 }) {
   if (grade === null) return null;
   const confidenceLabel =
     confidence === "high" ? "High" : confidence === "limited" ? "Limited" : null;
+  const sourceLabel = predictionSourceLabel(predictionSource, confidence);
+
   return (
     <Card>
       <CardHeader>
@@ -24,7 +45,7 @@ export function PredictedGradeCard({
           <CardTitle>Predicted Grade</CardTitle>
         </div>
         <CardDescription>
-          Expected performance estimate — not your official Moodle or midterm grade.
+          Expected performance estimate — not your official Moodle grade or midterm score.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -40,8 +61,8 @@ export function PredictedGradeCard({
             Confidence: {confidenceLabel}
           </Badge>
         ) : null}
-        {source ? (
-          <p className="text-xs text-muted-foreground">{source}</p>
+        {sourceLabel ? (
+          <p className="text-xs text-muted-foreground">{sourceLabel}</p>
         ) : null}
       </CardContent>
     </Card>

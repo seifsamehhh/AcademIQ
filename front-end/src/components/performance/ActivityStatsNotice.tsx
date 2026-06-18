@@ -7,9 +7,9 @@ interface ActivityStatsNoticeProps {
 }
 
 const SOURCE_LABEL: Record<ActivityDataSource, string> = {
-  seeded: "Moodle activity records",
-  synced: "Synced Moodle activity",
-  none: "Limited activity data",
+  seeded: "Activity source: Moodle activity records",
+  synced: "Activity source: synced Moodle activity",
+  none: "Activity source: limited activity data",
 };
 
 export function ActivityStatsNotice({ source, note }: ActivityStatsNoticeProps) {
