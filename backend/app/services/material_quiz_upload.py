@@ -19,7 +19,9 @@ from app.services.material_quiz_display import (
     detect_link_wrapper,
     is_educational_material,
     matches_educational_title,
+    resolve_material_display,
     resolve_quiz_material_display,
+    was_upload_attempted,
     _LAB_NUM_RE,
     _LECTURE_NUM_RE,
 )
@@ -249,11 +251,40 @@ def _preflight_upload_decision(
             downloadable,
         )
 
+    display = resolve_material_display(existing_doc)
+    display_status = str(display.get("quiz_status") or "")
+    if display_status in ("ready", "limited_ready"):
+        return (
+            False,
+            "already_ready",
+            f"Already {display_status.replace('_', ' ')}",
+            existing_chars,
+            downloadable,
+        )
+
     if existing_status in _TERMINAL_EXTRACTION_STATUSES and not force:
         return (
             False,
             "already_classified",
             existing_doc.get("extraction_error") or f"Terminal status: {existing_status}",
+            existing_chars,
+            downloadable,
+        )
+
+    if was_upload_attempted(existing_doc) and existing_chars == 0:
+        if existing_status == "extraction_failed":
+            return (
+                False,
+                "extraction_failed",
+                existing_doc.get("extraction_error") or "Extraction failed",
+                existing_chars,
+                downloadable,
+            )
+        return (
+            False,
+            "already_classified",
+            existing_doc.get("extraction_error")
+            or "Upload attempted — content could not be extracted",
             existing_chars,
             downloadable,
         )

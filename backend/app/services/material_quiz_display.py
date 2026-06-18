@@ -6,8 +6,10 @@ classification, visibility, sort order, and quiz readiness.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from app.repositories import material_repository
 from app.services.quiz_material_eligibility import (
     assess_quiz_eligibility,
     reason_message,
@@ -24,6 +26,125 @@ LIMITED_QUIZ_NOTE = (
     "Limited quiz generated because the material has limited readable content."
 )
 LINK_WRAPPER_REASON = "Link / wrapper item, not quiz material"
+
+# Demo stabilization: attempted materials with no content become extraction_failed.
+STABILIZE_FAILURE_REASON = "content_could_not_be_extracted_from_moodle_resource"
+
+_FAILURE_REASON_UI: Dict[str, str] = {
+    STABILIZE_FAILURE_REASON: (
+        "Content could not be extracted from this Moodle resource. "
+        "The file may require a direct Moodle login or is not available as readable text."
+    ),
+    "no_pluginfile_found_on_resource_page": (
+        "No downloadable file link was found on the Moodle resource page."
+    ),
+    "no_download_link_found_on_resource_page": (
+        "No downloadable file link was found on the Moodle resource page."
+    ),
+    "html_returned_instead_of_pdf": (
+        "Moodle returned a web page instead of a PDF file."
+    ),
+    "empty_response": "The download returned an empty file.",
+    "permission_or_session_error": (
+        "Download failed — please open the course in Moodle while logged in, then retry."
+    ),
+    "unsupported_file_type": "This file type is not supported for quiz extraction.",
+    "parser_failed": "The file could not be parsed for readable text.",
+    "content_extracted_but_not_enough_readable_text": (
+        "Some text was extracted, but not enough for quiz generation."
+    ),
+}
+
+
+def _format_failure_reason_for_ui(reason: Optional[str]) -> str:
+    raw = (reason or "").strip()
+    if not raw:
+        return _FAILURE_REASON_UI[STABILIZE_FAILURE_REASON]
+    if raw in _FAILURE_REASON_UI:
+        return _FAILURE_REASON_UI[raw]
+    if raw.startswith("download_failed_http_"):
+        code = raw.rsplit("_", 1)[-1]
+        return f"Download failed (HTTP {code}). Open the course in Moodle while logged in."
+    if raw.startswith("download_failed:"):
+        inner = raw.split(":", 1)[1].strip()
+        return _format_failure_reason_for_ui(inner)
+    return raw.replace("_", " ").strip().capitalize() + "."
+
+
+def was_upload_attempted(doc: Dict[str, Any]) -> bool:
+    """True when extension/backend recorded an upload attempt on this row."""
+    if doc.get("last_attempted_at"):
+        return True
+    audit = doc.get("last_upload_audit") or {}
+    if audit.get("attempted") or audit.get("was_attempted_by_extension"):
+        return True
+    if audit.get("backend_called") and audit.get("backend_response_status"):
+        return True
+    err = str(doc.get("extraction_error") or "").lower()
+    if err.startswith(
+        ("download_failed", "no_pluginfile", "permission_or", "html_returned", "content_could_not")
+    ):
+        return True
+    return False
+
+
+def stabilize_attempted_empty_materials(course_id: str) -> int:
+    """
+    One-time repair per page load: educational rows that were attempted but still
+    show not_uploaded with zero content become extraction_failed (demo-stable).
+    """
+    course_id = str(course_id or "").strip()
+    if not course_id:
+        return 0
+
+    updated = 0
+    now = datetime.utcnow()
+    for doc in material_repository.list_by_course(course_id):
+        if doc.get("hidden_duplicate"):
+            continue
+        title = str(doc.get("title") or "")
+        ft = str(doc.get("file_type") or "")
+        if not is_educational_material(title, ft) and not matches_educational_title(title):
+            continue
+
+        content_len = _material_stored_content_length(doc)
+        if content_len > 0:
+            continue
+
+        extraction_status = str(doc.get("extraction_status") or "not_uploaded").strip()
+        if extraction_status in (
+            "extraction_failed",
+            "not_quiz_material",
+            "not_enough_readable_text",
+            "too_short",
+            "insufficient_text",
+        ):
+            continue
+
+        if not was_upload_attempted(doc):
+            continue
+
+        material_id = str(doc.get("material_id") or "")
+        if not material_id:
+            continue
+
+        material_repository.upsert(
+            {
+                "course_id": course_id,
+                "material_id": material_id,
+                "title": doc.get("title"),
+                "file_type": doc.get("file_type"),
+                "extraction_status": "extraction_failed",
+                "extraction_error": STABILIZE_FAILURE_REASON,
+                "ready_for_quiz": False,
+                "metadata_only": False,
+                "last_attempted_at": doc.get("last_attempted_at") or now,
+                "processed_at": doc.get("processed_at") or now,
+            }
+        )
+        updated += 1
+    return updated
+
 
 _SORT_GROUP_LABELS = [
     "Lecture",
@@ -484,12 +605,19 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
 
     if extraction_status == "extraction_failed":
         quiz_status = "extraction_failed"
-        content_note = (
-            doc.get("extraction_error")
-            or "No readable text could be extracted. Try re-uploading a text-based PDF."
+        content_note = _format_failure_reason_for_ui(doc.get("extraction_error"))
+    elif (
+        content_len == 0
+        and was_upload_attempted(doc)
+        and extraction_status in ("", "not_uploaded", "no_content")
+    ):
+        quiz_status = "extraction_failed"
+        content_note = _format_failure_reason_for_ui(
+            doc.get("extraction_error") or STABILIZE_FAILURE_REASON
         )
     elif (
         extraction_status in ("", "not_uploaded")
+        and not was_upload_attempted(doc)
         and not doc.get("last_attempted_at")
         and not doc.get("processed_at")
         and content_len == 0
@@ -499,17 +627,23 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
         quiz_status = "not_uploaded"
         content_note = "File detected from Moodle but content was not extracted yet"
     elif content_len == 0 and extraction_status not in _PROCESSED_EXTRACTION_STATUSES:
-        quiz_status = "not_uploaded"
-        if raw_file_type in _LINK_FILE_TYPES or raw_file_type in ("page", "book"):
-            content_note = "File detected from Moodle but content was not extracted yet"
-        else:
-            content_note = (
-                "No readable text extracted yet. "
-                "Use the Chrome extension → 'Upload materials for quiz' on the Moodle course page."
+        if was_upload_attempted(doc):
+            quiz_status = "extraction_failed"
+            content_note = _format_failure_reason_for_ui(
+                doc.get("extraction_error") or STABILIZE_FAILURE_REASON
             )
+        else:
+            quiz_status = "not_uploaded"
+            if raw_file_type in _LINK_FILE_TYPES or raw_file_type in ("page", "book"):
+                content_note = "File detected from Moodle but content was not extracted yet"
+            else:
+                content_note = (
+                    "No readable text extracted yet. "
+                    "Use the Chrome extension → 'Upload materials for quiz' on the Moodle course page."
+                )
     elif content_len == 0 and extraction_status in _PROCESSED_EXTRACTION_STATUSES:
         quiz_status = "extraction_failed"
-        content_note = (
+        content_note = _format_failure_reason_for_ui(
             doc.get("extraction_error")
             or "Material was processed but no readable text was stored."
         )

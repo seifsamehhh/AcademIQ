@@ -460,6 +460,13 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             user_id, None
         ) and not has_synced_moodle_data(user_id)
 
+    from app.services.material_quiz_display import (
+        resolve_quiz_material_display,
+        stabilize_attempted_empty_materials,
+    )
+
+    stabilize_attempted_empty_materials(str(course_id))
+
     docs = [
         doc
         for doc in material_repository.list_by_course(str(course_id))
@@ -470,8 +477,6 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             and _clean_course_name(doc.get("course_name")) != enrolled_name
         )
     ]
-
-    from app.services.material_quiz_display import resolve_quiz_material_display
 
     displays, _meta = resolve_quiz_material_display(docs)
     doc_by_id = {str(doc.get("material_id") or ""): doc for doc in docs}

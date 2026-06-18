@@ -559,6 +559,7 @@ const PREFLIGHT_SKIP_STATUSES = new Set([
     "already_processed",
     "not_quiz_material",
     "extraction_failed",
+    "not_enough_readable_text",
     "metadata_only",
     "extraction_too_short",
     "insufficient_text",
