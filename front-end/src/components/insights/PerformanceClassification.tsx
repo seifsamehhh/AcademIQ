@@ -11,9 +11,11 @@ interface Props {
   classificationSource?: string | null;
 }
 
-const STATUS_LABEL: Record<PerformanceStatus, string> = {
+const STATUS_LABEL: Partial<Record<PerformanceStatus, string>> = {
   Good: "Strong engagement signals",
+  On Track: "On Track",
   Average: "Room to improve",
+  "Room to improve": "Room to improve",
   "At Risk": "At Risk",
 };
 
@@ -26,7 +28,7 @@ export function PerformanceClassification({
 }: Props) {
   const Icon = isHighPerformer ? CheckCircle2 : AlertCircle;
   const badgeLabel = performanceStatus
-    ? STATUS_LABEL[performanceStatus]
+    ? STATUS_LABEL[performanceStatus] ?? performanceStatus
     : isHighPerformer
       ? "Strong engagement signals"
       : "Room to improve";
@@ -38,15 +40,10 @@ export function PerformanceClassification({
           <Icon
             className={isHighPerformer ? "h-5 w-5 text-success" : "h-5 w-5 text-warning"}
           />
-          <CardTitle>
-            {ruleBased ? "Performance guidance" : "Performance classification"}
-          </CardTitle>
+          <CardTitle>Performance guidance</CardTitle>
         </div>
         <CardDescription>
-          {classificationSource ??
-            (ruleBased
-              ? "Rule-based analysis from synced Moodle activity records"
-              : "How the performance model classifies you in this course")}
+          {classificationSource ?? "Recommendations based on the strongest available course signals."}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">

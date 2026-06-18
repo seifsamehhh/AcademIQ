@@ -1,15 +1,21 @@
 import { Target } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import { Badge } from "@/components/ui/badge";
+import type { PredictionConfidence } from "@/lib/types";
 
 export function PredictedGradeCard({
   grade,
   source,
+  confidence,
 }: {
   grade: number | null;
   source?: string | null;
+  confidence?: PredictionConfidence | null;
 }) {
   if (grade === null) return null;
+  const confidenceLabel =
+    confidence === "high" ? "High" : confidence === "limited" ? "Limited" : null;
   return (
     <Card>
       <CardHeader>
@@ -18,7 +24,7 @@ export function PredictedGradeCard({
           <CardTitle>Predicted Grade</CardTitle>
         </div>
         <CardDescription>
-          This is a model prediction, not an official Moodle grade.
+          Expected performance estimate — not your official Moodle or midterm grade.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -29,6 +35,11 @@ export function PredictedGradeCard({
           <span className="text-lg text-muted-foreground">/ 100</span>
         </div>
         <Progress value={grade} />
+        {confidenceLabel ? (
+          <Badge variant={confidence === "high" ? "default" : "secondary"}>
+            Confidence: {confidenceLabel}
+          </Badge>
+        ) : null}
         {source ? (
           <p className="text-xs text-muted-foreground">{source}</p>
         ) : null}

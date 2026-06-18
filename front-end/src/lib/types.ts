@@ -131,7 +131,14 @@ export interface Course {
 export type BurnoutLevel = "Safe" | "Low Risk" | "Medium Risk" | "High Risk";
 
 /** Categorical label from the student-clustering model. */
-export type PerformanceStatus = "Good" | "Average" | "At Risk";
+export type PerformanceStatus =
+  | "Good"
+  | "Average"
+  | "At Risk"
+  | "On Track"
+  | "Room to improve";
+
+export type PredictionConfidence = "high" | "limited";
 
 /** Dashboard quick-statistics card (across ALL enrolled courses). */
 export interface DashboardStats {
@@ -209,7 +216,9 @@ export interface PerformanceAnalysis {
   mlAvailable?: boolean;
   predictionVerified?: boolean;
   predictionSource?: string | null;
+  predictionConfidence?: PredictionConfidence | null;
   classificationSource?: string | null;
+  statusNote?: string | null;
   featureVectorSource?: string | null;
   featureVectorComplete?: boolean;
   message?: string | null;
@@ -241,6 +250,7 @@ export interface RiskFactor {
    * the `action` text from the v4 recommendation map for `feature`.
    */
   recommendation: string;
+  severity?: string;
 }
 
 /** Specific Insights page payload for a course. */

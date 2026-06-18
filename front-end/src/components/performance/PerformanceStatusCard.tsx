@@ -5,18 +5,22 @@ import { performanceStyle } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import type { PerformanceStatus } from "@/lib/types";
 
-const COPY: Record<PerformanceStatus, string> = {
+const COPY: Partial<Record<PerformanceStatus, string>> = {
   Good: "You're tracking well in this course. Keep your current pace.",
-  Average: "Solid footing with room to push into the high-performer band.",
+  On Track: "You're on track in this course. Keep your current pace.",
+  Average: "Solid footing with room to push into a stronger position.",
+  "Room to improve": "There is room to improve — review the guidance below.",
   "At Risk": "This course needs attention. Review the insights for what to fix first.",
 };
 
 export function PerformanceStatusCard({
   status,
   source,
+  statusNote,
 }: {
   status: PerformanceStatus | null;
   source?: string | null;
+  statusNote?: string | null;
 }) {
   if (!status) return null;
   const style = performanceStyle(status);
@@ -27,13 +31,16 @@ export function PerformanceStatusCard({
           <Award className={cn("h-5 w-5", style.text)} />
           <CardTitle>Performance Status</CardTitle>
         </div>
-        <CardDescription>Classification from synced Moodle activity analysis</CardDescription>
+        <CardDescription>Classification from available course signals</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <Badge variant={style.variant} className="text-sm">
           {status}
         </Badge>
         <p className="text-sm text-muted-foreground">{COPY[status]}</p>
+        {statusNote ? (
+          <p className="text-xs text-muted-foreground">{statusNote}</p>
+        ) : null}
         {source ? (
           <p className="text-xs text-muted-foreground">{source}</p>
         ) : null}

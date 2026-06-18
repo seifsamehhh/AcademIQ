@@ -47,7 +47,7 @@ function InsightsContent() {
     };
   }, [courseParam]);
 
-  const ruleBased = insights?.heuristic !== false;
+  const ruleBased = insights?.heuristic === true;
 
   return (
     <div className="space-y-6">
@@ -60,18 +60,15 @@ function InsightsContent() {
       </Link>
 
       <div>
-        <h1 className="text-2xl font-bold text-foreground">
-          {ruleBased ? "Rule-Based Insights" : "Model Insights"}
-        </h1>
+        <h1 className="text-2xl font-bold text-foreground">Performance guidance</h1>
         <p className="text-muted-foreground">
           {insights
             ? `${insights.course.code} — ${insights.course.name}`
             : "Loading course guidance..."}
         </p>
-        {insights && ruleBased ? (
+        {insights ? (
           <p className="mt-2 text-sm text-muted-foreground">
-            These recommendations use rule-based analysis from available activity
-            records. They are not produced by a deployed ML model.
+            Recommendations based on the strongest available course signals.
           </p>
         ) : null}
       </div>

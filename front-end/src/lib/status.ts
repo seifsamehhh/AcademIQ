@@ -34,8 +34,10 @@ export function performanceStyle(status: PerformanceStatus): {
 } {
   switch (status) {
     case "Good":
+    case "On Track":
       return { variant: "success", text: "text-success" };
     case "Average":
+    case "Room to improve":
       return { variant: "warning", text: "text-warning" };
     case "At Risk":
       return { variant: "destructive", text: "text-destructive" };

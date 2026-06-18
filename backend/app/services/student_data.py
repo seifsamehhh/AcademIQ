@@ -29,12 +29,9 @@ from app.services.moodle_course_display import (
     get_visible_synced_courses_for_user,
     should_use_visible_moodle_courses,
 )
-from app.services.performance_feature_trust import (
-    LIMITED_INSIGHT_MESSAGE,
-    NOT_ENOUGH_DATA_MESSAGE,
-    build_feature_trust_context,
-    derive_performance_mode_from_trust,
-    is_numeric_ml_prediction_trustworthy,
+from app.services.performance_prediction import (
+    build_guidance_factors,
+    resolve_course_performance,
 )
 
 logger = logging.getLogger(__name__)
@@ -373,14 +370,18 @@ def _derive_performance_mode(
     feats: Dict[str, Any],
     feat_debug: Dict[str, Any],
     metrics: Dict[str, Any],
-    trust_context: Dict[str, Any],
+    trust_context: Optional[Dict[str, Any]] = None,
 ) -> str:
+    if ml_bundle.get("performanceMode"):
+        return ml_bundle["performanceMode"]
+    from app.services.performance_feature_trust import derive_performance_mode_from_trust
+
     factors = _data_backed_heuristic_factors(feats, metrics, feat_debug)
     return derive_performance_mode_from_trust(
         ml_bundle.get("predictionVerified"),
         resolved_grade,
         feat_debug,
-        trust_context,
+        trust_context or {},
         feats,
         metrics,
         bool(factors),
@@ -402,6 +403,34 @@ def _can_attempt_ml_prediction(
     return quiz > 0 or assign > 0
 
 
+def _resolve_performance_bundle(
+    user_id: str,
+    course_id: str,
+    student_id: str | None,
+    overlay_feats: Dict[str, Any],
+    raw_feats: Dict[str, Any],
+    feat_debug: Dict[str, Any],
+    metrics: Dict[str, Any],
+    resolved_grade: Dict[str, Any],
+    include_debug: bool = False,
+) -> Dict[str, Any]:
+    return resolve_course_performance(
+        user_id,
+        course_id,
+        student_id,
+        overlay_feats,
+        raw_feats,
+        feat_debug,
+        metrics,
+        resolved_grade,
+        stack_predict_fn=_predict,
+        stack_predict_grade_fn=_predict_grade,
+        stack_available_fn=_ml_stack_available,
+        can_attempt_fn=_can_attempt_ml_prediction,
+        include_debug=include_debug,
+    )
+
+
 def _run_ml_prediction(
     user_id: str,
     course_id: str,
@@ -413,81 +442,7 @@ def _run_ml_prediction(
     include_debug: bool = False,
     raw_feats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    empty: Dict[str, Any] = {
-        "predictedGrade": None,
-        "status": None,
-        "probability": None,
-        "confidence": None,
-        "predictionVerified": False,
-        "predictionSource": None,
-        "mlServiceCalled": False,
-        "mlServiceResponse": None,
-        "reason": None,
-        "usedModel": False,
-    }
-    if not _can_attempt_ml_prediction(feats, feat_debug, metrics, resolved_grade):
-        empty["reason"] = (
-            "Incomplete per-course synced features — prediction withheld."
-        )
-        return empty
-    if not _has_ml_feature_data(feats):
-        empty["reason"] = "Feature vector missing required behavioural fields."
-        return empty
-
-    predicted: int | None = None
-    status: str | None = None
-    probability: float | None = None
-    confidence: float | None = None
-    prediction_source: str | None = None
-    ml_service_called = False
-    ml_service_response: Dict[str, Any] | None = None
-    used_model = False
-    reason: str | None = None
-
-    service_ready = ml_service_configured()
-    stack_ready = _ml_stack_available()
-
-    if service_ready:
-        ml_service_called = True
-        remote = predict_performance_remote(feats)
-        if remote:
-            ml_service_response = {
-                "predictedGrade": remote.get("predictedGrade"),
-                "status": remote.get("status"),
-                "probability": remote.get("probability"),
-                "engine": remote.get("engine"),
-            }
-            used_model = True
-            prediction_source = "ml_service"
-            raw_pred = remote.get("predictedGrade")
-            if raw_pred is not None:
-                predicted = int(round(float(raw_pred)))
-            status = remote.get("status")
-            probability = remote.get("probability")
-            confidence = remote.get("confidence")
-    elif stack_ready:
-        perf = _predict(feats)
-        grade_pred = _predict_grade(feats)
-        if perf or grade_pred:
-            used_model = True
-            prediction_source = "local_ml"
-            if grade_pred and grade_pred.get("predicted_grade") is not None:
-                predicted = round(grade_pred["predicted_grade"])
-            elif perf:
-                predicted = round((perf.get("probability", 0) or 0) * 100)
-            if perf:
-                prob = perf.get("probability", 0) or 0
-                probability = prob
-                confidence = round(prob * 100, 1)
-                status = (
-                    "Good" if prob >= 0.5 else "Average" if prob >= 0.4 else "At Risk"
-                )
-            elif predicted is not None:
-                status = (
-                    "Good" if predicted >= 75 else "Average" if predicted >= 60 else "At Risk"
-                )
-
-    trust_context = build_feature_trust_context(
+    bundle = _resolve_performance_bundle(
         user_id,
         course_id,
         student_id,
@@ -496,40 +451,22 @@ def _run_ml_prediction(
         feat_debug,
         metrics,
         resolved_grade,
+        include_debug=include_debug,
     )
-
-    verified = False
-    if used_model:
-        verified, trust_reason = is_numeric_ml_prediction_trustworthy(
-            predicted,
-            resolved_grade,
-            feat_debug,
-            trust_context,
-            feats,
-        )
-        if not verified:
-            reason = trust_reason or (
-                "Model output withheld — insufficient verified per-course features "
-                "or inconsistent with resolved course grade."
-            )
-            predicted = None
-            status = None
-            probability = None
-            confidence = None
-
-    out = {
-        "predictedGrade": predicted if verified else None,
-        "status": status if verified else None,
-        "probability": probability if verified else None,
-        "confidence": confidence if verified else None,
-        "predictionVerified": verified,
-        "predictionSource": prediction_source if verified else None,
-        "mlServiceCalled": ml_service_called,
-        "mlServiceResponse": ml_service_response if include_debug else None,
-        "reason": reason if not verified else None,
-        "usedModel": used_model,
+    return {
+        "predictedGrade": bundle.get("predictedGrade"),
+        "status": bundle.get("status"),
+        "probability": bundle.get("probability"),
+        "confidence": bundle.get("confidence"),
+        "predictionVerified": bundle.get("predictionVerified"),
+        "predictionSource": bundle.get("predictionSource"),
+        "predictionConfidence": bundle.get("predictionConfidence"),
+        "performanceMode": bundle.get("performanceMode"),
+        "mlServiceCalled": bundle.get("mlServiceCalled"),
+        "mlServiceResponse": bundle.get("mlServiceResponse"),
+        "reason": bundle.get("reason"),
+        "usedModel": bundle.get("usedModel"),
     }
-    return out
 
 
 def _grades(user_id: str) -> List[Dict[str, Any]]:
@@ -864,47 +801,23 @@ def get_performance(
     feats, feat_debug = resolve_course_features(user_id, course_id, student_id)
     raw_feats = dict(feats)
     feats = _apply_course_scoped_behavioral_features(user_id, course_id, feats, feat_debug)
-    trust_context = build_feature_trust_context(
-        user_id, course_id, student_id, feats, raw_feats, feat_debug, metrics, resolved
-    )
-    has_feature_data = _has_ml_feature_data(feats)
-    if not has_feature_data:
+    if not _has_ml_feature_data(feats):
         log_missing_feature_vector(
             student_id=student_id,
             course_id=course_id,
             debug=feat_debug,
         )
 
-    ml_bundle = _run_ml_prediction(
-        user_id,
-        course_id,
-        student_id,
-        feats,
-        feat_debug,
-        metrics,
-        resolved,
-        raw_feats=raw_feats,
+    bundle = _resolve_performance_bundle(
+        user_id, course_id, student_id, feats, raw_feats, feat_debug, metrics, resolved
     )
-    prediction_verified = ml_bundle["predictionVerified"]
-    predicted = ml_bundle["predictedGrade"]
-    status = ml_bundle["status"]
-    probability = ml_bundle["probability"]
-    confidence = ml_bundle["confidence"]
-    performance_mode = _derive_performance_mode(
-        ml_bundle, resolved, feats, feat_debug, metrics, trust_context
-    )
-
-    classification_source = (
-        "ML prediction based on verified course features"
-        if prediction_verified
-        else None
-    )
-
-    message: str | None = None
-    if performance_mode == "not_enough_data":
-        message = NOT_ENOUGH_DATA_MESSAGE
-    elif performance_mode == "limited_insight":
-        message = LIMITED_INSIGHT_MESSAGE
+    prediction_verified = bundle["predictionVerified"]
+    predicted = bundle["predictedGrade"]
+    status = bundle["status"]
+    probability = bundle["probability"]
+    confidence = bundle["confidence"]
+    performance_mode = bundle["performanceMode"]
+    message = bundle.get("message")
 
     total_seconds = metrics.get("total_time_spent_seconds", 0) or 0
     total_hours = round(total_seconds / 3600, 1)
@@ -935,19 +848,21 @@ def get_performance(
             "weeklyAverageEstimated": weekly_estimated,
         },
         "engine": "ml" if prediction_verified else "fallback",
-        "mlAvailable": prediction_verified,
+        "mlAvailable": predicted is not None,
         "predictionVerified": prediction_verified,
-        "predictionSource": ml_bundle.get("predictionSource"),
-        "classificationSource": classification_source,
+        "predictionSource": bundle.get("predictionSource"),
+        "predictionConfidence": bundle.get("predictionConfidence"),
+        "classificationSource": bundle.get("classificationSource"),
         "featureVectorSource": feat_debug.get("feature_source"),
         "featureVectorComplete": _is_feature_vector_complete(
             feats, feat_debug, metrics, resolved
         ),
-        "mlServiceCalled": ml_bundle.get("mlServiceCalled"),
+        "mlServiceCalled": bundle.get("mlServiceCalled"),
         "probability": probability,
         "confidence": confidence,
         "message": message,
-        "heuristic": performance_mode == "limited_insight",
+        "statusNote": bundle.get("statusNote"),
+        "heuristic": bundle.get("predictionSource") == "rule_adjusted_prediction",
         "performanceMode": performance_mode,
     }
 
@@ -964,107 +879,59 @@ def get_insights(
     feats, feat_debug = resolve_course_features(user_id, course_id, student_id)
     raw_feats = dict(feats)
     feats = _apply_course_scoped_behavioral_features(user_id, course_id, feats, feat_debug)
-    trust_context = build_feature_trust_context(
+
+    bundle = _resolve_performance_bundle(
         user_id, course_id, student_id, feats, raw_feats, feat_debug, metrics, resolved
     )
-
-    ml_bundle = _run_ml_prediction(
-        user_id,
-        course_id,
-        student_id,
-        feats,
-        feat_debug,
-        metrics,
-        resolved,
-        raw_feats=raw_feats,
+    trust_context = bundle.get("trustContext") or {}
+    predicted = bundle.get("predictedGrade")
+    mode = bundle.get("performanceMode") or "not_enough_data"
+    factors = build_guidance_factors(
+        feats, metrics, trust_context, resolved, predicted
     )
 
-    if ml_bundle.get("predictionVerified"):
+    is_high = bool(
+        predicted is not None and predicted >= 70
+        or (has_grade_data and course_avg is not None and course_avg >= 75)
+    )
+
+    if bundle.get("predictionVerified") and bundle.get("predictionSource") in ("ml_service", "local_ml"):
         result = _predict(feats)
         if result:
             _store_prediction(user_id, result)
             recs = result.get("recommendations", []) or []
-            shaps = [abs(r.get("shap_impact") or 0) for r in recs] or [0]
-            mx = max(shaps) or 1
-            model_factors = []
-            for r in recs:
-                impact = round(min(95, (abs(r.get("shap_impact") or 0) / mx) * 80 + 15))
-                model_factors.append({
-                    "title": r.get("short") or "Recommendation",
-                    "description": r.get("why") or "",
-                    "impact": impact,
-                    "recommendation": r.get("action") or "",
-                    "feature": r.get("feature"),
-                })
-            prob = result.get("probability", 0) or 0
-            status = ml_bundle.get("status") or (
-                "Good" if prob >= 0.5 else "Average" if prob >= 0.4 else "At Risk"
-            )
-            note = result.get("confidence_note")
-            summary = (
-                f"ML prediction based on verified course features. "
-                f"Performance status: {status} ({round(prob * 100)}% confidence)."
-            )
-            if note:
-                summary += f" {note}"
-            return {
-                "course": _course_obj(user_id, course_id, student_id),
-                "isHighPerformer": prob >= 0.5,
-                "performanceStatus": status,
-                "classificationSummary": summary.strip(),
-                "riskFactors": model_factors,
-                "heuristic": False,
-                "classificationSource": "ML prediction based on verified course features",
-                "performanceMode": "ml_prediction",
-            }
+            if recs:
+                shaps = [abs(r.get("shap_impact") or 0) for r in recs] or [0]
+                mx = max(shaps) or 1
+                model_factors = []
+                for r in recs:
+                    impact = round(min(95, (abs(r.get("shap_impact") or 0) / mx) * 80 + 15))
+                    model_factors.append({
+                        "title": r.get("short") or "Recommendation",
+                        "description": r.get("why") or "",
+                        "impact": impact,
+                        "recommendation": r.get("action") or "",
+                        "feature": r.get("feature"),
+                        "severity": "High" if impact >= 60 else "Medium",
+                    })
+                if model_factors:
+                    factors = model_factors[:3]
 
-    factors = _data_backed_heuristic_factors(feats, metrics, feat_debug)
-    is_high = bool(has_grade_data and course_avg is not None and course_avg >= 75)
-    if not has_grade_data and factors:
-        is_high = False
-    summary = (
-        "You are tracking as a strong performer in this course based on your engagement and scores."
-        if is_high
-        else "Your synced activity signals suggest room to improve in this course."
-    )
-    if not factors:
-        summary += " Limited synced activity is available for detailed guidance."
-    mode = _derive_performance_mode(
-        ml_bundle, resolved, feats, feat_debug, metrics, trust_context
-    )
-    if mode == "not_enough_data":
-        summary = NOT_ENOUGH_DATA_MESSAGE
-        perf_status = "Average"
-    elif mode == "limited_insight":
-        summary = LIMITED_INSIGHT_MESSAGE
-        perf_status = (
-            "Good"
-            if is_high
-            else "Average"
-        )
-    else:
-        perf_status = (
-            "Good"
-            if is_high
-            else "At Risk"
-            if has_grade_data and course_avg is not None and course_avg < 60
-            else "Average"
-        )
-    classification_source = (
-        "ML prediction based on verified course features"
-        if mode == "ml_prediction"
-        else LIMITED_INSIGHT_MESSAGE
-        if mode == "limited_insight"
-        else NOT_ENOUGH_DATA_MESSAGE
-    )
+    perf_status = bundle.get("status") or "Room to improve"
+    summary = bundle.get("classificationSource") or "Performance guidance"
+    if bundle.get("message"):
+        summary = f"{summary}. {bundle['message']}"
+
+    heuristic = bundle.get("predictionSource") not in ("ml_service", "local_ml")
+
     return {
         "course": _course_obj(user_id, course_id, student_id),
         "isHighPerformer": is_high,
         "performanceStatus": perf_status,
-        "classificationSummary": summary,
+        "classificationSummary": summary.strip(),
         "riskFactors": factors,
-        "heuristic": True,
-        "classificationSource": classification_source,
+        "heuristic": heuristic,
+        "classificationSource": bundle.get("classificationSource"),
         "performanceMode": mode,
     }
 
@@ -1080,27 +947,15 @@ def get_course_performance_mode(
     resolved = _resolve_display_grade_for_course(user_id, course_id, grade_rows=grade_rows)
     raw_feats, feat_debug = resolve_course_features(user_id, course_id, student_id)
     feats = _apply_course_scoped_behavioral_features(user_id, course_id, dict(raw_feats), feat_debug)
-    trust_context = build_feature_trust_context(
+    bundle = _resolve_performance_bundle(
         user_id, course_id, student_id, feats, raw_feats, feat_debug, metrics, resolved
-    )
-    ml_bundle = _run_ml_prediction(
-        user_id,
-        course_id,
-        student_id,
-        feats,
-        feat_debug,
-        metrics,
-        resolved,
-        raw_feats=raw_feats,
-    )
-    mode = _derive_performance_mode(
-        ml_bundle, resolved, feats, feat_debug, metrics, trust_context
     )
     return {
         "course_id": course_id,
-        "performanceMode": mode,
-        "predictionVerified": ml_bundle.get("predictionVerified"),
-        "status": ml_bundle.get("status"),
+        "performanceMode": bundle.get("performanceMode"),
+        "predictionVerified": bundle.get("predictionVerified"),
+        "status": bundle.get("status"),
+        "predictedGrade": bundle.get("predictedGrade"),
         "gradeAvailable": bool(resolved.get("gradeAvailable")),
     }
 

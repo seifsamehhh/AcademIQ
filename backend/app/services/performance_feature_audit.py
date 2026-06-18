@@ -136,7 +136,7 @@ def audit_performance_features_for_email(
             raw_feats=raw_feats,
         )
         factors = _data_backed_heuristic_factors(overlay_feats, metrics, feat_debug)
-        performance_mode = derive_performance_mode_from_trust(
+        performance_mode = ml_bundle.get("performanceMode") or derive_performance_mode_from_trust(
             ml_bundle.get("predictionVerified"),
             resolved_display,
             feat_debug,

@@ -64,16 +64,17 @@ export default function PerformancePage() {
   }, [selectedId]);
 
   const ready = analysis?.course.id === selectedId ? analysis : null;
-  const mode = ready?.performanceMode ?? (ready?.mlAvailable ? "ml_prediction" : "not_enough_data");
-  const mlReady = mode === "ml_prediction" && ready?.mlAvailable === true;
-  const limitedInsight = mode === "limited_insight";
+  const mode = ready?.performanceMode ?? "not_enough_data";
+  const hasPrediction = ready?.predictedGrade != null;
+  const notEnoughData = mode === "not_enough_data" && !hasPrediction;
+  const limitedInsight = mode === "limited_insight" && hasPrediction;
 
   return (
     <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-bold text-foreground">Performance Analysis</h1>
         <p className="text-muted-foreground">
-          View course activity, resolved grades, and ML predictions when verified.
+          View course activity, resolved grades, and performance predictions with guidance.
         </p>
       </div>
 
@@ -93,24 +94,26 @@ export default function PerformancePage() {
 
       {ready ? (
         <div className="space-y-6">
-          {mlReady ? (
+          {hasPrediction ? (
             <div className="grid gap-6 md:grid-cols-2">
               <PredictedGradeCard
                 grade={ready.predictedGrade}
                 source={ready.classificationSource}
+                confidence={ready.predictionConfidence}
               />
               <PerformanceStatusCard
                 status={ready.status}
                 source={ready.classificationSource}
+                statusNote={ready.statusNote}
               />
             </div>
-          ) : limitedInsight ? (
-            <LimitedInsightCard message={ready.message ?? ""} />
-          ) : (
+          ) : notEnoughData ? (
             <MlUnavailableCard message={ready.message ?? ""} />
+          ) : (
+            <LimitedInsightCard message={ready.message ?? ""} />
           )}
 
-          {mlReady || limitedInsight ? (
+          {hasPrediction ? (
             <Link
               href={`/insights?course=${ready.course.id}`}
               className={buttonVariants({ variant: "default" })}
@@ -123,7 +126,7 @@ export default function PerformancePage() {
           <CourseAverageCard
             courseAverage={ready.courseAverage}
             hasGradeData={ready.hasGradeData ?? ready.courseAverage !== null}
-            predictedGrade={mlReady ? ready.predictedGrade : null}
+            predictedGrade={hasPrediction ? ready.predictedGrade : null}
             gradeLabel={ready.gradeLabel}
           />
           <ActivityStatsNotice

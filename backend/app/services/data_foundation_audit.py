@@ -54,7 +54,9 @@ def audit_data_foundation_for_email(email: str) -> Dict[str, Any]:
             resolved,
             include_debug=True,
         )
-        mode = _derive_performance_mode(ml_bundle, resolved, feats, feat_debug, metrics)
+        mode = ml_bundle.get("performanceMode") or _derive_performance_mode(
+            ml_bundle, resolved, feats, feat_debug, metrics
+        )
 
         moodle_grade = resolved.get("moodleGrade")
         uploaded_grade = resolved.get("uploadedGrade")

@@ -118,20 +118,21 @@ def _derive_synced_risk(
     for cid in course_ids:
         snap = get_course_performance_mode(user_id, cid, student_id)
         modes.append(snap.get("performanceMode") or "not_enough_data")
-        if snap.get("predictionVerified") and snap.get("status"):
-            verified_statuses.append(str(snap["status"]))
+        status = snap.get("status")
+        if status and snap.get("predictedGrade") is not None:
+            verified_statuses.append(str(status))
 
     if verified_statuses:
         if any(s == "At Risk" for s in verified_statuses):
             label = "At risk"
-        elif any(s == "Average" for s in verified_statuses):
+        elif any(s == "Room to improve" for s in verified_statuses):
             label = "Medium risk"
         else:
             label = "Low risk"
         return {
             "risk": label,
             "riskAvailable": True,
-            "riskSource": "Based on verified ML performance prediction",
+            "riskSource": "Based on course performance predictions",
             "riskNote": None,
         }
 
