@@ -11,9 +11,9 @@ interface Props {
   classificationSource?: string | null;
 }
 
-const STATUS_LABEL: Partial<Record<PerformanceStatus, string>> = {
+const STATUS_LABEL: Partial<Record<string, string>> = {
   Good: "Strong engagement signals",
-  On Track: "On Track",
+  "On Track": "On Track",
   Average: "Room to improve",
   "Room to improve": "Room to improve",
   "At Risk": "At Risk",

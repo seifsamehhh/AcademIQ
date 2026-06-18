@@ -36,7 +36,7 @@ export function PredictedGradeCard({
         </div>
         <Progress value={grade} />
         {confidenceLabel ? (
-          <Badge variant={confidence === "high" ? "default" : "secondary"}>
+          <Badge variant={confidence === "high" ? "default" : "muted"}>
             Confidence: {confidenceLabel}
           </Badge>
         ) : null}

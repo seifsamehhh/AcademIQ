@@ -5,9 +5,9 @@ import { performanceStyle } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import type { PerformanceStatus } from "@/lib/types";
 
-const COPY: Partial<Record<PerformanceStatus, string>> = {
+const COPY: Partial<Record<string, string>> = {
   Good: "You're tracking well in this course. Keep your current pace.",
-  On Track: "You're on track in this course. Keep your current pace.",
+  "On Track": "You're on track in this course. Keep your current pace.",
   Average: "Solid footing with room to push into a stronger position.",
   "Room to improve": "There is room to improve — review the guidance below.",
   "At Risk": "This course needs attention. Review the insights for what to fix first.",
