@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import get_current_user
-from app.repositories.uploaded_grade_repository import LABEL_UPLOADED, upsert_record
+from app.repositories.uploaded_grade_repository import LABEL_MIDTERM, upsert_record
 
 router = APIRouter(tags=["Grades"])
 
@@ -17,7 +17,7 @@ class ManualGradePayload(BaseModel):
     course_id: str
     course_name: str = ""
     grade_percentage: float = Field(..., ge=0, le=100)
-    grade_label: str = LABEL_UPLOADED
+    grade_label: str = LABEL_MIDTERM
 
 
 class BulkGradePayload(BaseModel):
@@ -47,7 +47,7 @@ def manual_grade_upsert(
         "ok": True,
         "courseId": doc["course_id"],
         "gradePercentage": doc["grade_percentage"],
-        "gradeLabel": doc.get("grade_label") or LABEL_UPLOADED,
+        "gradeLabel": doc.get("grade_label") or LABEL_MIDTERM,
         "source": doc["source"],
     }
 

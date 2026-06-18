@@ -192,6 +192,24 @@ def _gpa_from_percentages(grades: List[float]) -> Optional[float]:
     return round(min(4.0, avg_pct / 25.0), 2)
 
 
+def _gpa_source_for_courses(courses_out: List[Dict[str, Any]]) -> Optional[str]:
+    eligible = [
+        c
+        for c in courses_out
+        if c.get("gpaEligible") and c.get("grade") is not None
+    ]
+    if len(eligible) < 2:
+        return None
+    if all(c.get("gradeSource") == "midterm_scoring" for c in eligible):
+        return "Calculated from current midterm scoring records."
+    midterm_count = sum(
+        1 for c in eligible if c.get("gradeSource") == "midterm_scoring"
+    )
+    if midterm_count >= 2:
+        return "Calculated from current midterm scoring records."
+    return "Calculated from synced Moodle and uploaded grade records"
+
+
 def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
     """Build dashboard results from synced MongoDB collections."""
     user_id = str(user["_id"])
@@ -230,18 +248,17 @@ def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
         for c in courses_out
         if c.get("gpaEligible") and c["grade"] is not None
     ]
-    overall_avg = round(sum(graded) / len(graded), 1) if graded else None
+    overall_avg = round(sum(graded) / len(graded), 2) if graded else None
     gpa_available = len(graded) >= 2
     risk_payload = _derive_synced_risk(user_id, student_id, overall_avg)
+    gpa_source = _gpa_source_for_courses(courses_out)
 
     return {
         "name": display_name,
         "loginEmail": resolve_login_email(user),
         "gpa": _gpa_from_percentages(graded) if gpa_available else None,
         "gpaAvailable": gpa_available,
-        "gpaSource": (
-            "Calculated from synced Moodle and uploaded grade records" if gpa_available else None
-        ),
+        "gpaSource": gpa_source if gpa_available else None,
         "gpaNote": None if gpa_available else "GPA not available yet.",
         "risk": risk_payload["risk"],
         "riskAvailable": risk_payload["riskAvailable"],

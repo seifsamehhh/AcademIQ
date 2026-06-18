@@ -17,6 +17,10 @@ import { GradeImportPanel } from "@/components/dashboard/GradeImportPanel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
+function formatDisplayGrade(grade: number): string {
+  return String(Number(grade.toFixed(2)));
+}
+
 function courseGradeDisplay(course: DemoCourseResult): {
   primary: string;
   secondary?: string;
@@ -33,7 +37,7 @@ function courseGradeDisplay(course: DemoCourseResult): {
   }
 
   return {
-    primary: String(course.grade),
+    primary: formatDisplayGrade(course.grade!),
     secondary: course.gradeLabel ?? undefined,
   };
 }

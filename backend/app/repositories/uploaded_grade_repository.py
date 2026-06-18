@@ -9,6 +9,7 @@ from app.config.database import connect_database, uploaded_grade_records_collect
 
 SOURCE_UPLOADED = "uploaded_transcript"
 LABEL_UPLOADED = "Uploaded grade transcript"
+LABEL_MIDTERM = "Midterm scoring"
 
 
 def _ensure():
@@ -29,7 +30,7 @@ def upsert_record(
 ) -> Dict[str, Any]:
     _ensure()
     now = datetime.utcnow()
-    pct = round(float(grade_percentage), 1)
+    pct = round(float(grade_percentage), 2)
     if pct < 0 or pct > 100:
         raise ValueError("grade_percentage must be between 0 and 100")
 
