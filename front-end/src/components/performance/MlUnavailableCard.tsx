@@ -1,24 +1,16 @@
-import { BrainCircuit } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
-interface MlUnavailableCardProps {
-  message: string;
-}
-
-export function MlUnavailableCard({ message }: MlUnavailableCardProps) {
+export function MlUnavailableCard({ message }: { message: string }) {
   return (
-    <Card className="border-dashed md:col-span-2">
+    <Card>
       <CardHeader>
-        <div className="flex items-center gap-2">
-          <BrainCircuit className="h-5 w-5 text-muted-foreground" />
-          <CardTitle>ML prediction not available</CardTitle>
-        </div>
+        <CardTitle>ML prediction not available yet</CardTitle>
         <CardDescription>
-          Course activity records below remain available for demo review.
+          Predictions appear only when synced Moodle activity supports a reliable model run.
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <p className="text-sm leading-relaxed text-muted-foreground">{message}</p>
+        <p className="text-sm text-muted-foreground leading-relaxed">{message}</p>
       </CardContent>
     </Card>
   );

@@ -229,6 +229,108 @@ def _has_ml_feature_data(features: Dict[str, Any]) -> bool:
     return any((features.get(k) or 0) > 0 for k in activity_keys)
 
 
+def _apply_course_scoped_behavioral_features(
+    user_id: str,
+    course_id: str,
+    feats: Dict[str, Any],
+    feat_debug: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Recompute late/procrastination per course from synced materials (read-time)."""
+    if feat_debug.get("feature_source") != "synced":
+        return feats
+    doc = raw_moodle_payload_collection.find_one({"academiq_user_id": user_id})
+    if not doc:
+        return feats
+    from app.services.synced_features import compute_course_late_procrastination
+
+    late, proc = compute_course_late_procrastination(doc, str(course_id))
+    updated = dict(feats)
+    updated["late_submission_count"] = late
+    updated["procrastination_index"] = proc
+    return updated
+
+
+def _has_verified_prediction_features(
+    feats: Dict[str, Any],
+    feat_debug: Dict[str, Any],
+    metrics: Dict[str, Any],
+    has_grade_data: bool,
+) -> bool:
+    """Enough course-scoped synced signal to show an ML prediction publicly."""
+    if feat_debug.get("feature_source") != "synced" or not feats:
+        return False
+    if has_grade_data:
+        return True
+    quiz = int(feats.get("quiz_attempts") or metrics.get("quiz_attempts") or 0)
+    assign = int(feats.get("assignment_submissions") or metrics.get("assignment_submissions") or 0)
+    return quiz > 0 or assign > 0
+
+
+def _task_breakdown(
+    metrics: Dict[str, Any],
+    attempted_key: str,
+    viewed_key: str,
+    average_score: Optional[float],
+) -> Dict[str, Any]:
+    attempted = int(metrics.get(attempted_key) or 0)
+    viewed = metrics.get(viewed_key)
+    if viewed is None:
+        total: Optional[int] = None if attempted == 0 else attempted
+    else:
+        viewed_int = int(viewed or 0)
+        if viewed_int == 0 and attempted == 0:
+            total = None
+        else:
+            total = max(viewed_int, attempted)
+    return {
+        "attempted": attempted,
+        "total": total,
+        "averageScore": average_score,
+    }
+
+
+def _data_backed_heuristic_factors(
+    feats: Dict[str, Any],
+    metrics: Dict[str, Any],
+    feat_debug: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    limited = feat_debug.get("feature_source") != "synced"
+    assign_sub = int(feats.get("assignment_submissions") or metrics.get("assignment_submissions") or 0)
+    factors: List[Dict[str, Any]] = []
+
+    for spec in _RISK_LIBRARY:
+        if not spec["test"](feats):
+            continue
+        key = spec["key"]
+        if key == "late_submission_count" and assign_sub <= 0:
+            continue
+        if key == "procrastination_index" and assign_sub <= 0 and int(feats.get("late_submission_count") or 0) <= 0:
+            continue
+        if key == "low_engagement" and int(feats.get("active_days") or 0) <= 0:
+            continue
+        description = spec["description"]
+        if limited or (
+            key in ("late_submission_count", "procrastination_index", "low_engagement")
+            and feat_debug.get("feature_source") == "synced"
+            and assign_sub == 0
+        ):
+            description = (
+                f"{description} "
+                "(Rule-based suggestion based on limited synced activity.)"
+            )
+        factors.append(
+            {
+                "title": spec["title"],
+                "description": description.strip(),
+                "impact": spec["impact"](feats),
+                "recommendation": spec["recommendation"],
+                "feature": key,
+            }
+        )
+    factors.sort(key=lambda f: f["impact"], reverse=True)
+    return factors
+
+
 def _grades(user_id: str) -> List[Dict[str, Any]]:
     doc = raw_moodle_payload_collection.find_one({"academiq_user_id": user_id})
     return (doc or {}).get("grades", []) or []
@@ -256,16 +358,17 @@ _ML_NO_FEATURES_MESSAGE = (
 )
 
 _ACTIVITY_NOTE_SEEDED = (
-    "Activity stats below come from seeded demo records for presentation. "
-    "They are not live Moodle analytics. Sync the Chrome extension to replace "
-    "them with real activity data."
+    "Activity stats are based on synced Moodle records available to AcademIQ."
 )
 _ACTIVITY_NOTE_SYNCED = (
-    "Activity stats below are based on your latest synced Moodle activity records."
+    "Activity stats are based on synced Moodle records available to AcademIQ."
 )
 _ACTIVITY_NOTE_NONE = (
-    "Activity stats are based on available synced records. Live Moodle analytics "
-    "will appear after the extension syncs real activity data."
+    "Some Moodle activity features are not available yet."
+)
+_ML_INCOMPLETE_MESSAGE = (
+    "The model needs complete synced Moodle activity features before it can "
+    "generate a reliable prediction."
 )
 
 _ml_stack_available_cache: bool | None = None
@@ -557,6 +660,7 @@ def get_performance(
     has_grade_data = course_avg is not None
 
     feats, feat_debug = resolve_course_features(user_id, course_id, student_id)
+    feats = _apply_course_scoped_behavioral_features(user_id, course_id, feats, feat_debug)
     has_feature_data = _has_ml_feature_data(feats)
     if not has_feature_data:
         log_missing_feature_vector(
@@ -566,46 +670,70 @@ def get_performance(
         )
     stack_ready = _ml_stack_available()
     service_ready = ml_service_configured()
+    can_predict = _has_verified_prediction_features(
+        feats, feat_debug, metrics, has_grade_data
+    )
 
     predicted: int | None = None
     status: str | None = None
     probability: float | None = None
     confidence: float | None = None
     used_model = False
+    prediction_source: str | None = None
+    ml_service_called = False
+    ml_service_response: Dict[str, Any] | None = None
 
-    if has_feature_data and service_ready:
-        remote = predict_performance_remote(feats)
-        if remote:
-            used_model = True
-            predicted = remote.get("predictedGrade")
-            if predicted is not None:
-                predicted = int(round(float(predicted)))
-            status = remote.get("status")
-            probability = remote.get("probability")
-            confidence = remote.get("confidence")
-    elif has_feature_data and stack_ready:
-        # Local-only fallback when ML_SERVICE_URL is unset (dev with full deps).
-        perf = _predict(feats)
-        grade = _predict_grade(feats)
-        if perf or grade:
-            used_model = True
-            if grade and grade.get("predicted_grade") is not None:
-                predicted = round(grade["predicted_grade"])
-            elif course_avg is not None:
-                predicted = round(course_avg)
-            elif perf:
-                predicted = round((perf.get("probability", 0) or 0) * 100)
-                probability = perf.get("probability")
+    if can_predict and has_feature_data:
+        if service_ready:
+            ml_service_called = True
+            remote = predict_performance_remote(feats)
+            if remote:
+                ml_service_response = {
+                    "predictedGrade": remote.get("predictedGrade"),
+                    "status": remote.get("status"),
+                    "probability": remote.get("probability"),
+                    "engine": remote.get("engine"),
+                }
+                used_model = True
+                prediction_source = "ml_service"
+                predicted = remote.get("predictedGrade")
+                if predicted is not None:
+                    predicted = int(round(float(predicted)))
+                status = remote.get("status")
+                probability = remote.get("probability")
+                confidence = remote.get("confidence")
+        elif stack_ready:
+            perf = _predict(feats)
+            grade = _predict_grade(feats)
+            if perf or grade:
+                used_model = True
+                prediction_source = "local_ml"
+                if grade and grade.get("predicted_grade") is not None:
+                    predicted = round(grade["predicted_grade"])
+                elif perf:
+                    predicted = round((perf.get("probability", 0) or 0) * 100)
+                if perf:
+                    prob = perf.get("probability", 0) or 0
+                    probability = prob
+                    confidence = round(prob * 100, 1)
+                    status = "Good" if prob >= 0.5 else "Average" if prob >= 0.4 else "At Risk"
+                elif predicted is not None:
+                    status = (
+                        "Good" if predicted >= 75 else "Average" if predicted >= 60 else "At Risk"
+                    )
 
-            if perf:
-                prob = perf.get("probability", 0) or 0
-                probability = prob
-                confidence = round(prob * 100, 1)
-                status = "Good" if prob >= 0.5 else "Average" if prob >= 0.4 else "At Risk"
-            elif predicted is not None:
-                status = (
-                    "Good" if predicted >= 75 else "Average" if predicted >= 60 else "At Risk"
-                )
+    prediction_verified = used_model and can_predict and feat_debug.get("feature_source") == "synced"
+    classification_source = (
+        "ML prediction based on synced Moodle activity features"
+        if prediction_verified
+        else None
+    )
+
+    if not prediction_verified:
+        predicted = None
+        status = None
+        probability = None
+        confidence = None
 
     total_seconds = metrics.get("total_time_spent_seconds", 0) or 0
     total_hours = round(total_seconds / 3600, 1)
@@ -623,53 +751,53 @@ def get_performance(
         "activityDataSource": activity_source,
         "activityStatsNote": _activity_stats_note(activity_source),
         "statistics": {
-            "quizzes": {
-                "attempted": metrics.get("quiz_attempts", 0) or 0,
-                "total": max(
-                    metrics.get("number_of_quizzes_viewed", 0) or 0,
-                    metrics.get("quiz_attempts", 0) or 0,
-                ),
-                "averageScore": quiz_avg,
-            },
-            "assignments": {
-                "attempted": metrics.get("assignment_submissions", 0) or 0,
-                "total": max(
-                    metrics.get("number_of_assignments_viewed", 0) or 0,
-                    metrics.get("assignment_submissions", 0) or 0,
-                ),
-                "averageScore": assign_avg,
-            },
+            "quizzes": _task_breakdown(
+                metrics, "quiz_attempts", "number_of_quizzes_viewed", quiz_avg
+            ),
+            "assignments": _task_breakdown(
+                metrics, "assignment_submissions", "number_of_assignments_viewed", assign_avg
+            ),
             "totalTimeHours": total_hours,
             "weeklyAverageHours": weekly_avg,
             "weeklyAverageEstimated": weekly_estimated,
         },
-        "engine": "ml" if used_model else "fallback",
-        "mlAvailable": used_model,
-        "probability": probability,
-        "confidence": confidence,
+        "engine": "ml" if prediction_verified else "fallback",
+        "mlAvailable": prediction_verified,
+        "predictionVerified": prediction_verified,
+        "predictionSource": prediction_source if prediction_verified else None,
+        "classificationSource": classification_source,
+        "featureVectorSource": feat_debug.get("feature_source"),
+        "mlServiceCalled": ml_service_called,
+        "probability": probability if prediction_verified else None,
+        "confidence": confidence if prediction_verified else None,
         "message": (
             None
-            if used_model
+            if prediction_verified
             else (
-                (
-                    "ML prediction requires synced Moodle activity for this course. "
-                    "Re-sync with the Chrome extension, then open Performance again."
-                )
-                if not has_feature_data
-                else _ML_UNAVAILABLE_MESSAGE
+                _ML_INCOMPLETE_MESSAGE
+                if feat_debug.get("feature_source") == "synced"
+                else _ML_NO_FEATURES_MESSAGE
             )
         ),
-        "heuristic": not used_model,
+        "heuristic": not prediction_verified,
     }
 
 
 def get_insights(
     user_id: str, course_id: str, student_id: str | None = None
 ) -> Dict[str, Any]:
-    feats = _latest_features(user_id, course_id, student_id)
+    metrics = (metrics_repository.get(user_id, course_id) or {}).get("metrics", {}) or {}
+    grades = _grades(user_id)
+    course_avg = _avg_percentage(grades, course_id)
+    has_grade_data = course_avg is not None
 
-    # --- Real model path: SHAP-driven risk factors + recommendations --------
-    result = _predict(feats)
+    feats, feat_debug = resolve_course_features(user_id, course_id, student_id)
+    feats = _apply_course_scoped_behavioral_features(user_id, course_id, feats, feat_debug)
+    can_predict = _has_verified_prediction_features(
+        feats, feat_debug, metrics, has_grade_data
+    )
+
+    result = _predict(feats) if can_predict and _has_ml_feature_data(feats) else None
     if result:
         _store_prediction(user_id, result)
         recs = result.get("recommendations", []) or []
@@ -686,44 +814,43 @@ def get_insights(
                 "feature": r.get("feature"),
             })
         prob = result.get("probability", 0) or 0
+        status = "Good" if prob >= 0.5 else "Average" if prob >= 0.4 else "At Risk"
         note = result.get("confidence_note")
-        summary = f"Model classification: {result.get('classification', '')} ({round(prob * 100)}% confidence)."
+        summary = (
+            f"ML prediction based on synced Moodle activity features. "
+            f"Performance status: {status} ({round(prob * 100)}% confidence)."
+        )
         if note:
             summary += f" {note}"
         return {
             "course": _course_obj(user_id, course_id, student_id),
             "isHighPerformer": prob >= 0.5,
+            "performanceStatus": status,
             "classificationSummary": summary.strip(),
             "riskFactors": model_factors,
             "heuristic": False,
+            "classificationSource": "ML prediction based on synced Moodle activity features",
         }
 
-    # --- Heuristic fallback (no ML stack installed) -------------------------
-    course_avg = _avg_percentage(_grades(user_id), course_id) or 0.0
-    is_high = course_avg >= 75
-
-    factors = []
-    for spec in _RISK_LIBRARY:
-        if spec["test"](feats):
-            factors.append({
-                "title": spec["title"],
-                "description": spec["description"],
-                "impact": spec["impact"](feats),
-                "recommendation": spec["recommendation"],
-            })
-    factors.sort(key=lambda f: f["impact"], reverse=True)
-
+    factors = _data_backed_heuristic_factors(feats, metrics, feat_debug)
+    is_high = bool(has_grade_data and course_avg >= 75)
+    if not has_grade_data and factors:
+        is_high = False
     summary = (
         "You are tracking as a strong performer in this course based on your engagement and scores."
-        if is_high else
-        "Your engagement/score signals suggest room to improve in this course. The factors below have the most impact."
+        if is_high
+        else "Your synced activity signals suggest room to improve in this course."
     )
+    if not factors:
+        summary += " Limited synced activity is available for detailed guidance."
     return {
         "course": _course_obj(user_id, course_id, student_id),
         "isHighPerformer": is_high,
+        "performanceStatus": "Good" if is_high else "At Risk" if has_grade_data and course_avg < 60 else "Average",
         "classificationSummary": summary,
         "riskFactors": factors,
-        "heuristic": True,  # heuristic until ML risk model is mounted
+        "heuristic": True,
+        "classificationSource": "Rule-based analysis from limited synced activity",
     }
 
 

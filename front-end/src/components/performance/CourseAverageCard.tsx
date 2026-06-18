@@ -52,8 +52,7 @@ export function CourseAverageCard({
           </>
         ) : (
           <p className="text-sm text-muted-foreground">
-            No grade data available yet. Sync Moodle grades with the Chrome
-            extension to see your course average here.
+            No grade data available yet.
           </p>
         )}
       </CardContent>

@@ -20,7 +20,9 @@ function TaskRow({
         <div>
           <p className="text-sm font-medium text-foreground">{label}</p>
           <p className="text-xs text-muted-foreground">
-            {breakdown.attempted} of {breakdown.total} recorded
+            {breakdown.total != null
+              ? `${breakdown.attempted} of ${breakdown.total} recorded`
+              : "Not available"}
           </p>
         </div>
       </div>

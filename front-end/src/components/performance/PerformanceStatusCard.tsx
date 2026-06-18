@@ -13,8 +13,10 @@ const COPY: Record<PerformanceStatus, string> = {
 
 export function PerformanceStatusCard({
   status,
+  source,
 }: {
   status: PerformanceStatus | null;
+  source?: string | null;
 }) {
   if (!status) return null;
   const style = performanceStyle(status);
@@ -25,13 +27,16 @@ export function PerformanceStatusCard({
           <Award className={cn("h-5 w-5", style.text)} />
           <CardTitle>Performance Status</CardTitle>
         </div>
-        <CardDescription>From the student-clustering model</CardDescription>
+        <CardDescription>Classification from synced Moodle activity analysis</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <Badge variant={style.variant} className="text-sm">
           {status}
         </Badge>
         <p className="text-sm text-muted-foreground">{COPY[status]}</p>
+        {source ? (
+          <p className="text-xs text-muted-foreground">{source}</p>
+        ) : null}
       </CardContent>
     </Card>
   );

@@ -7,9 +7,10 @@ without changing the external ML service API.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from datetime import datetime
+from typing import Any, Dict, Tuple
 
-from app.services.moodle_ingest import is_real_course
+from app.services.moodle_ingest import is_real_course, materials_from_payload
 
 PERFORMANCE_V4_KEYS = (
     "all_clicks",
@@ -22,6 +23,40 @@ PERFORMANCE_V4_KEYS = (
     "procrastination_index",
     "late_submission_count",
 )
+
+
+def _parse_moodle_date(value: Any) -> datetime | None:
+    from app.services.preprocessing import parse_moodle_date
+
+    return parse_moodle_date(value)
+
+
+def compute_course_late_procrastination(
+    payload: Dict[str, Any], course_id: str
+) -> Tuple[int, float]:
+    """Late assignments and procrastination index scoped to one course."""
+    cid = str(course_id)
+    late = 0
+    total_assignments = 0
+    now = datetime.now()
+
+    for material in materials_from_payload(payload):
+        mat_cid = str(material.get("course_id") or material.get("courseId") or "")
+        if mat_cid != cid:
+            continue
+        tags = {str(t).lower() for t in (material.get("semantic_tags") or [])}
+        mtype = str(material.get("material_type") or material.get("type") or "").lower()
+        if "assignment" not in tags and mtype != "assignment":
+            continue
+        total_assignments += 1
+        due_date_str = material.get("due_date")
+        if due_date_str:
+            due = _parse_moodle_date(due_date_str)
+            if due and due < now:
+                late += 1
+
+    procrastination = (late / total_assignments * 10.0) if total_assignments else 0.0
+    return late, round(procrastination, 2)
 
 
 def build_synced_course_features(
@@ -38,10 +73,6 @@ def build_synced_course_features(
                 metrics_by_course[str(cid)] = course
 
     overall_active = int(behavior.get("active_days_count") or overall_features.get("active_days") or 0)
-    overall_procrastination = float(
-        overall_features.get("procrastination_index") or 0.0
-    )
-    overall_late = int(overall_features.get("late_submission_count") or 0)
 
     result: Dict[str, Dict[str, Any]] = {}
     for course_id, metrics in metrics_by_course.items():
@@ -52,6 +83,7 @@ def build_synced_course_features(
         visits = int(m.get("total_visits") or 0)
         clicks = int(m.get("click_count") or 0)
         access_frequency = float(visits / active_days) if active_days > 0 else 0.0
+        late, procrastination = compute_course_late_procrastination(payload, str(course_id))
 
         vector = {
             "all_clicks": clicks,
@@ -61,8 +93,8 @@ def build_synced_course_features(
             "quiz_attempts": int(m.get("quiz_attempts") or 0),
             "assignment_submissions": int(m.get("assignment_submissions") or 0),
             "total_time_spent": int(m.get("total_time_spent_seconds") or 0),
-            "procrastination_index": overall_procrastination,
-            "late_submission_count": overall_late,
+            "procrastination_index": procrastination,
+            "late_submission_count": late,
             "course_id": str(course_id),
             "feature_source": "synced",
         }

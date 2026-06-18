@@ -62,15 +62,15 @@ export default function PerformancePage() {
     };
   }, [selectedId]);
 
-  // Treat data as loading until it matches the currently selected course.
   const ready = analysis?.course.id === selectedId ? analysis : null;
+  const mlReady = ready?.mlAvailable === true;
 
   return (
     <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-bold text-foreground">Performance Analysis</h1>
         <p className="text-muted-foreground">
-          View course activity, stats, and prediction availability.
+          View course activity, actual grades, and ML predictions when available.
         </p>
       </div>
 
@@ -90,21 +90,27 @@ export default function PerformancePage() {
 
       {ready ? (
         <div className="space-y-6">
-          {ready.mlAvailable ? (
+          {mlReady ? (
             <div className="grid gap-6 md:grid-cols-2">
-              <PredictedGradeCard grade={ready.predictedGrade} />
-              <PerformanceStatusCard status={ready.status} />
+              <PredictedGradeCard
+                grade={ready.predictedGrade}
+                source={ready.classificationSource}
+              />
+              <PerformanceStatusCard
+                status={ready.status}
+                source={ready.classificationSource}
+              />
             </div>
           ) : (
             <MlUnavailableCard
               message={
                 ready.message ??
-                "ML prediction is not available yet because model dependencies are not deployed."
+                "The model needs complete synced Moodle activity features before it can generate a reliable prediction."
               }
             />
           )}
 
-          {ready.mlAvailable ? (
+          {mlReady ? (
             <Link
               href={`/insights?course=${ready.course.id}`}
               className={buttonVariants({ variant: "default" })}
@@ -117,11 +123,14 @@ export default function PerformancePage() {
           <CourseAverageCard
             courseAverage={ready.courseAverage}
             hasGradeData={ready.hasGradeData ?? ready.courseAverage !== null}
-            predictedGrade={ready.predictedGrade}
+            predictedGrade={mlReady ? ready.predictedGrade : null}
           />
           <ActivityStatsNotice
             source={ready.activityDataSource ?? "none"}
-            note="Activity stats are based on available synced or seeded records. Live Moodle analytics will appear after the extension syncs real activity data."
+            note={
+              ready.activityStatsNote ??
+              "Activity stats are based on synced Moodle records available to AcademIQ."
+            }
           />
           <CourseStatistics stats={ready.statistics} />
         </div>

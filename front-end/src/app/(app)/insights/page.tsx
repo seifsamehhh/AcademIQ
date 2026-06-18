@@ -84,6 +84,8 @@ function InsightsContent() {
             isHighPerformer={insights.isHighPerformer}
             summary={insights.classificationSummary}
             ruleBased={ruleBased}
+            performanceStatus={insights.performanceStatus}
+            classificationSource={insights.classificationSource}
           />
           <RiskFactors factors={insights.riskFactors} ruleBased={ruleBased} />
         </>

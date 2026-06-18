@@ -154,7 +154,8 @@ export interface DashboardData {
 /** Breakdown of a task type (quizzes or assignments) within a course. */
 export interface TaskBreakdown {
   attempted: number;
-  total: number;
+  /** Null when Moodle did not report a total count. */
+  total: number | null;
   /** Average score on attempted tasks (0-100); null when no graded items yet. */
   averageScore: number | null;
 }
@@ -187,6 +188,10 @@ export interface PerformanceAnalysis {
   /** "ml" when a model produced the prediction; otherwise "fallback". */
   engine?: "ml" | "fallback";
   mlAvailable?: boolean;
+  predictionVerified?: boolean;
+  predictionSource?: string | null;
+  classificationSource?: string | null;
+  featureVectorSource?: string | null;
   message?: string | null;
   heuristic?: boolean;
   /** Whether activity stats are seeded demo data, Moodle sync, or unavailable. */
@@ -227,6 +232,8 @@ export interface CourseInsights {
   riskFactors: RiskFactor[];
   /** True when output is rule-based rather than from a deployed ML model. */
   heuristic?: boolean;
+  performanceStatus?: PerformanceStatus | null;
+  classificationSource?: string | null;
 }
 
 /** A learning material title scraped from Moodle, selectable for quiz gen. */
