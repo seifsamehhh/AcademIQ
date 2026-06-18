@@ -2,17 +2,19 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Progress } from "@/components/ui/progress";
 
 interface CourseAverageCardProps {
-  /** Actual current average (0-100); null when no Moodle grades exist. */
+  /** Actual resolved course grade (0-100); null when unavailable. */
   courseAverage: number | null;
   hasGradeData?: boolean;
   /** Predicted grade from ML; null when ML is unavailable. */
   predictedGrade: number | null;
+  gradeLabel?: string | null;
 }
 
 export function CourseAverageCard({
   courseAverage,
   hasGradeData = courseAverage !== null,
   predictedGrade,
+  gradeLabel,
 }: CourseAverageCardProps) {
   const showComparison =
     hasGradeData && courseAverage !== null && predictedGrade !== null;
@@ -46,6 +48,9 @@ export function CourseAverageCard({
               value={courseAverage}
               indicatorClassName="bg-muted-foreground"
             />
+            {gradeLabel ? (
+              <p className="text-xs text-muted-foreground">{gradeLabel}</p>
+            ) : null}
             {deltaLabel ? (
               <p className="text-sm text-muted-foreground">{deltaLabel}</p>
             ) : null}

@@ -10,6 +10,7 @@ import { ApiErrorAlert } from "@/components/common/ApiErrorAlert";
 import { PredictedGradeCard } from "@/components/performance/PredictedGradeCard";
 import { PerformanceStatusCard } from "@/components/performance/PerformanceStatusCard";
 import { MlUnavailableCard } from "@/components/performance/MlUnavailableCard";
+import { LimitedInsightCard } from "@/components/performance/LimitedInsightCard";
 import { CourseAverageCard } from "@/components/performance/CourseAverageCard";
 import { ActivityStatsNotice } from "@/components/performance/ActivityStatsNotice";
 import { CourseStatistics } from "@/components/performance/CourseStatistics";
@@ -63,14 +64,16 @@ export default function PerformancePage() {
   }, [selectedId]);
 
   const ready = analysis?.course.id === selectedId ? analysis : null;
-  const mlReady = ready?.mlAvailable === true;
+  const mode = ready?.performanceMode ?? (ready?.mlAvailable ? "ml_prediction" : "not_enough_data");
+  const mlReady = mode === "ml_prediction" && ready?.mlAvailable === true;
+  const limitedInsight = mode === "limited_insight";
 
   return (
     <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-bold text-foreground">Performance Analysis</h1>
         <p className="text-muted-foreground">
-          View course activity, actual grades, and ML predictions when available.
+          View course activity, resolved grades, and ML predictions when verified.
         </p>
       </div>
 
@@ -101,6 +104,13 @@ export default function PerformancePage() {
                 source={ready.classificationSource}
               />
             </div>
+          ) : limitedInsight ? (
+            <LimitedInsightCard
+              message={
+                ready.message ??
+                "Rule-based performance insight is available from synced activity. No numeric ML prediction is shown."
+              }
+            />
           ) : (
             <MlUnavailableCard
               message={
@@ -110,7 +120,7 @@ export default function PerformancePage() {
             />
           )}
 
-          {mlReady ? (
+          {mlReady || limitedInsight ? (
             <Link
               href={`/insights?course=${ready.course.id}`}
               className={buttonVariants({ variant: "default" })}
@@ -124,6 +134,7 @@ export default function PerformancePage() {
             courseAverage={ready.courseAverage}
             hasGradeData={ready.hasGradeData ?? ready.courseAverage !== null}
             predictedGrade={mlReady ? ready.predictedGrade : null}
+            gradeLabel={ready.gradeLabel}
           />
           <ActivityStatsNotice
             source={ready.activityDataSource ?? "none"}

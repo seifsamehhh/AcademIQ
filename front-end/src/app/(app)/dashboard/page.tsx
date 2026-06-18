@@ -11,8 +11,9 @@ import {
   getStoredStudentId,
   getStoredStudentName,
 } from "@/lib/api";
-import type { DemoCourseResult, StudentResults } from "@/lib/types";
+import type { DemoCourseResult, StudentResults, Course } from "@/lib/types";
 import { ApiErrorAlert } from "@/components/common/ApiErrorAlert";
+import { GradeImportPanel } from "@/components/dashboard/GradeImportPanel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -42,8 +43,10 @@ export default function DashboardPage() {
   const [studentId, setStudentId] = useState<string | null>(null);
   const [studentName, setStudentName] = useState<string | null>(null);
   const [results, setResults] = useState<StudentResults | null>(null);
+  const [courses, setCourses] = useState<Course[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const showGradeImport = process.env.NEXT_PUBLIC_SHOW_GRADE_IMPORT === "true";
 
   useEffect(() => {
     const token = getAccessToken();
@@ -80,6 +83,22 @@ export default function DashboardPage() {
     };
   }, [router]);
 
+  useEffect(() => {
+    if (!showGradeImport) return;
+    let active = true;
+    api
+      .getCourses()
+      .then((list) => {
+        if (active) setCourses(list);
+      })
+      .catch(() => {
+        if (active) setCourses([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [showGradeImport, results?.lastSync]);
+
   if (!studentId) {
     return (
       <div className="flex flex-1 items-center justify-center py-32">
@@ -97,6 +116,11 @@ export default function DashboardPage() {
     results?.riskAvailable === false
       ? "Not enough data"
       : results?.risk ?? "Not enough data";
+
+  function reloadResults() {
+    if (!studentId) return;
+    api.getStudentResults(studentId).then(setResults).catch(() => undefined);
+  }
 
   return (
     <div className="space-y-8">
@@ -208,6 +232,10 @@ export default function DashboardPage() {
               </ul>
             </CardContent>
           </Card>
+
+          {showGradeImport && courses.length ? (
+            <GradeImportPanel courses={courses} onSaved={reloadResults} />
+          ) : null}
         </>
       ) : (
         <Card>

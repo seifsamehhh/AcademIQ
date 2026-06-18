@@ -199,6 +199,17 @@ export const api = {
     return request<StudentResults>(`/student/${studentId}/results`);
   },
 
+  async upsertManualGrade(payload: {
+    course_id: string;
+    course_name: string;
+    grade_percentage: number;
+  }): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>("/grades/manual-upsert", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
   /* ---------------------------------------------------------------------- */
   /* Legacy auth (admin / mock mode)                                        */
   /* ---------------------------------------------------------------------- */

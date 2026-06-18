@@ -30,6 +30,7 @@ from app.services.moodle_course_display import (
 from app.services.moodle_sync_status import has_synced_moodle_data
 from app.services.moodle_ingest import is_real_course
 from app.services.grade_resolution import resolve_course_grade
+from app.repositories.uploaded_grade_repository import map_by_course_id
 from app.services.student_data import (
     _clean_course_name,
     _course_code,
@@ -197,12 +198,14 @@ def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
     student_id = user.get("student_id")
     display_name = resolve_display_name(user)
     grade_rows = _grades(user_id)
+    uploaded_by_course = map_by_course_id(user_id)
     courses_out: List[Dict[str, Any]] = []
 
     for course in get_visible_synced_courses_for_user(user_id):
         cid = str(course["id"])
         cname = course.get("name")
-        resolved = resolve_course_grade(grade_rows, cid, cname)
+        uploaded = uploaded_by_course.get(cid)
+        resolved = resolve_course_grade(grade_rows, cid, cname, uploaded)
         courses_out.append(
             {
                 "name": cname,
@@ -237,7 +240,7 @@ def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
         "gpa": _gpa_from_percentages(graded) if gpa_available else None,
         "gpaAvailable": gpa_available,
         "gpaSource": (
-            "Calculated from synced Moodle numeric grades" if gpa_available else None
+            "Calculated from synced Moodle and uploaded grade records" if gpa_available else None
         ),
         "gpaNote": None if gpa_available else "GPA not available yet.",
         "risk": risk_payload["risk"],
@@ -320,7 +323,7 @@ def build_student_results(user: Dict[str, Any]) -> Dict[str, Any]:
         "gpa": _gpa_from_percentages(graded) if gpa_available else None,
         "gpaAvailable": gpa_available,
         "gpaSource": (
-            "Calculated from synced Moodle numeric grades" if gpa_available else None
+            "Calculated from synced Moodle and uploaded grade records" if gpa_available else None
         ),
         "gpaNote": None if gpa_available else "GPA not available yet.",
         "risk": _derive_demo_risk(overall_avg),

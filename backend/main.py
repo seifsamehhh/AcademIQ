@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from app.config.database import client, connect_database, ensure_indexes
 from app.config.settings import ALLOWED_ORIGINS
 from app.bootstrap import maybe_run_student_bootstrap
-from app.routes import moodle, auth, admin, student_data
+from app.routes import moodle, auth, admin, student_data, grades
 
 app = FastAPI(title="AcademIQ Backend", version="1.0")
 
@@ -91,6 +91,7 @@ _DEBUG_COLLECTIONS: dict[str, str] = {
     "course_materials": "course_materials",
     "student_metrics": "student_metrics",
     "feature_vectors": "feature_vectors",
+    "uploaded_grade_records": "uploaded_grade_records",
 }
 
 
@@ -136,6 +137,19 @@ def debug_grades_audit(email: str):
     if not connect_database():
         raise HTTPException(status_code=503, detail="Database unreachable")
     return audit_grades_for_email(email)
+
+
+@app.get("/debug/data-foundation-audit/{email}")
+def debug_data_foundation_audit(email: str):
+    """
+    Per-course grade sources, feature vectors, and performance modes.
+    No passwords, tokens, or raw document bodies.
+    """
+    from app.services.data_foundation_audit import audit_data_foundation_for_email
+
+    if not connect_database():
+        raise HTTPException(status_code=503, detail="Database unreachable")
+    return audit_data_foundation_for_email(email)
 
 
 @app.get("/debug/user-data/{email}")
@@ -290,6 +304,7 @@ app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(moodle.router)
 app.include_router(student_data.router)
+app.include_router(grades.router)
 
 from app.routes.student import demo_router as student_demo_router
 

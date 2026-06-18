@@ -13,6 +13,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.repositories import user_repository
 from app.services.student_data import _grades
 
+_SOURCE_MOODLE_TOTAL = "moodle_course_total"
+_SOURCE_UPLOADED = "uploaded_transcript"
+_SOURCE_GRADED_AVG = "graded_items_average"
+
+_LABEL_MOODLE_TOTAL = "Moodle course total"
+_LABEL_UPLOADED = "Uploaded grade transcript"
+_LABEL_GRADED_AVG = "Average from synced graded tasks"
+
 _COURSE_TOTAL_RE = re.compile(
     r"(?:^|\b)(?:course\s+total|aggregation\s*course\s+total|total\s+for\s+course)(?:\b|$)",
     re.I,
@@ -84,8 +92,11 @@ def _gpa_flags(
     course_name: Optional[str],
     course_id: str,
     grade_available: bool,
+    grade_source: Optional[str] = None,
 ) -> Dict[str, bool]:
     senior = _is_senior_project_course(course_name, course_id)
+    if senior and grade_available and grade_source == _SOURCE_UPLOADED:
+        return {"gpaEligible": True, "excludeFromGpa": False}
     return {
         "gpaEligible": grade_available and not senior,
         "excludeFromGpa": senior or not grade_available,
@@ -96,8 +107,9 @@ def _base_resolve_fields(
     course_name: Optional[str],
     course_id: str,
     grade_available: bool,
+    grade_source: Optional[str] = None,
 ) -> Dict[str, bool]:
-    return _gpa_flags(course_name, course_id, grade_available)
+    return _gpa_flags(course_name, course_id, grade_available, grade_source)
 
 
 def _parse_max_points(max_grade: Any) -> Optional[float]:
@@ -229,80 +241,12 @@ def course_total_row(grades: List[Dict[str, Any]], course_id: str) -> Optional[D
     return None
 
 
-def resolve_course_grade(
-    grades: List[Dict[str, Any]],
+def _moodle_unavailable_payload(
+    course_rows: List[Dict[str, Any]],
+    total_row: Optional[Dict[str, Any]],
+    course_name: Optional[str],
     course_id: str,
-    course_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Resolve the best available course grade for dashboard display."""
-    course_rows = _rows_for_course(grades, course_id)
-    total_row = course_total_row(grades, course_id)
-    graded_items = graded_item_rows(grades, course_id)
-
-    available_items = [
-        {
-            "itemName": _row_item_name(r),
-            "itemType": r.get("item_type"),
-            "percentage": r["_resolved_percentage"],
-        }
-        for r in graded_items
-    ]
-
-    if total_row is not None:
-        value = float(total_row["_resolved_percentage"])
-        return {
-            "grade": value,
-            "gradeAvailable": True,
-            "gradeSource": "course_total",
-            "gradeLabel": "Course total",
-            "gradeNote": None,
-            "displayGrade": value,
-            "displaySource": "Course total",
-            "hasCourseGrade": True,
-            "courseGradeValue": value,
-            "courseTotalCandidate": row_candidate_fields(total_row),
-            "hasGradedItems": bool(graded_items),
-            "gradedItemsCount": len(graded_items),
-            "gradedItemsUsed": len(graded_items),
-            "availableGradeItems": available_items,
-            "missingGradeReason": None,
-            "missingCase": None,
-            "computedAverage": None,
-            "computedAverageAvailable": False,
-            "allCandidateGradeFields": [row_candidate_fields(r) for r in course_rows[:8]],
-            **_base_resolve_fields(course_name, course_id, True),
-        }
-
-    if graded_items:
-        avg = round(
-            sum(r["_resolved_percentage"] for r in graded_items) / len(graded_items),
-            1,
-        )
-        return {
-            "grade": avg,
-            "gradeAvailable": True,
-            "gradeSource": "graded_items_average",
-            "gradeLabel": "Average from synced graded tasks",
-            "gradeNote": None,
-            "displayGrade": avg,
-            "displaySource": "Average from synced graded tasks",
-            "hasCourseGrade": False,
-            "courseGradeValue": None,
-            "courseTotalCandidate": (
-                row_candidate_fields(total_row) if total_row else None
-            ),
-            "hasGradedItems": True,
-            "gradedItemsCount": len(graded_items),
-            "gradedItemsUsed": len(graded_items),
-            "availableGradeItems": available_items,
-            "missingGradeReason": None,
-            "missingCase": None,
-            "computedAverage": avg,
-            "computedAverageAvailable": True,
-            "allCandidateGradeFields": [row_candidate_fields(r) for r in course_rows[:8]],
-            **_base_resolve_fields(course_name, course_id, True),
-        }
-
     if course_rows:
         if _is_senior_project_course(course_name, course_id):
             reason = "senior_project_no_synced_grade"
@@ -318,10 +262,13 @@ def resolve_course_grade(
         "grade": None,
         "gradeAvailable": False,
         "gradeSource": None,
-        "gradeLabel": None,
+        "gradeLabel": "Not available",
         "gradeNote": note,
         "displayGrade": None,
-        "displaySource": None,
+        "displaySource": "Not available",
+        "moodleGrade": None,
+        "moodleGradeSource": None,
+        "uploadedGrade": None,
         "hasCourseGrade": False,
         "courseGradeValue": None,
         "courseTotalCandidate": (
@@ -340,8 +287,147 @@ def resolve_course_grade(
     }
 
 
+def resolve_course_grade(
+    grades: List[Dict[str, Any]],
+    course_id: str,
+    course_name: Optional[str] = None,
+    uploaded_record: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Resolve the best display grade for dashboard / GPA / performance.
+
+    Priority:
+    1. Synced Moodle course total
+    2. Uploaded grade transcript
+    3. Average from synced graded Moodle tasks
+    4. Not available
+    """
+    course_rows = _rows_for_course(grades, course_id)
+    total_row = course_total_row(grades, course_id)
+    graded_items = graded_item_rows(grades, course_id)
+
+    available_items = [
+        {
+            "itemName": _row_item_name(r),
+            "itemType": r.get("item_type"),
+            "percentage": r["_resolved_percentage"],
+        }
+        for r in graded_items
+    ]
+
+    moodle_total_pct: Optional[float] = None
+    if total_row is not None:
+        moodle_total_pct = float(total_row["_resolved_percentage"])
+
+    graded_avg: Optional[float] = None
+    if graded_items:
+        graded_avg = round(
+            sum(r["_resolved_percentage"] for r in graded_items) / len(graded_items),
+            1,
+        )
+
+    uploaded_pct: Optional[float] = None
+    if uploaded_record is not None:
+        raw = uploaded_record.get("grade_percentage")
+        if isinstance(raw, (int, float)):
+            uploaded_pct = round(float(raw), 1)
+
+    # Priority 1 — Moodle course total
+    if moodle_total_pct is not None:
+        value = moodle_total_pct
+        return {
+            "grade": value,
+            "gradeAvailable": True,
+            "gradeSource": _SOURCE_MOODLE_TOTAL,
+            "gradeLabel": _LABEL_MOODLE_TOTAL,
+            "gradeNote": None,
+            "displayGrade": value,
+            "displaySource": _LABEL_MOODLE_TOTAL,
+            "moodleGrade": value,
+            "moodleGradeSource": _SOURCE_MOODLE_TOTAL,
+            "uploadedGrade": uploaded_pct,
+            "hasCourseGrade": True,
+            "courseGradeValue": value,
+            "courseTotalCandidate": row_candidate_fields(total_row),
+            "hasGradedItems": bool(graded_items),
+            "gradedItemsCount": len(graded_items),
+            "gradedItemsUsed": len(graded_items),
+            "availableGradeItems": available_items,
+            "missingGradeReason": None,
+            "missingCase": None,
+            "computedAverage": graded_avg,
+            "computedAverageAvailable": graded_avg is not None,
+            "allCandidateGradeFields": [row_candidate_fields(r) for r in course_rows[:8]],
+            **_base_resolve_fields(course_name, course_id, True, _SOURCE_MOODLE_TOTAL),
+        }
+
+    # Priority 2 — uploaded transcript
+    if uploaded_pct is not None:
+        return {
+            "grade": uploaded_pct,
+            "gradeAvailable": True,
+            "gradeSource": _SOURCE_UPLOADED,
+            "gradeLabel": _LABEL_UPLOADED,
+            "gradeNote": None,
+            "displayGrade": uploaded_pct,
+            "displaySource": _LABEL_UPLOADED,
+            "moodleGrade": None,
+            "moodleGradeSource": None,
+            "uploadedGrade": uploaded_pct,
+            "hasCourseGrade": False,
+            "courseGradeValue": None,
+            "courseTotalCandidate": (
+                row_candidate_fields(total_row) if total_row else None
+            ),
+            "hasGradedItems": bool(graded_items),
+            "gradedItemsCount": len(graded_items),
+            "gradedItemsUsed": len(graded_items),
+            "availableGradeItems": available_items,
+            "missingGradeReason": None,
+            "missingCase": None,
+            "computedAverage": graded_avg,
+            "computedAverageAvailable": graded_avg is not None,
+            "allCandidateGradeFields": [row_candidate_fields(r) for r in course_rows[:8]],
+            **_base_resolve_fields(course_name, course_id, True, _SOURCE_UPLOADED),
+        }
+
+    # Priority 3 — graded tasks average
+    if graded_avg is not None:
+        return {
+            "grade": graded_avg,
+            "gradeAvailable": True,
+            "gradeSource": _SOURCE_GRADED_AVG,
+            "gradeLabel": _LABEL_GRADED_AVG,
+            "gradeNote": None,
+            "displayGrade": graded_avg,
+            "displaySource": _LABEL_GRADED_AVG,
+            "moodleGrade": graded_avg,
+            "moodleGradeSource": _SOURCE_GRADED_AVG,
+            "uploadedGrade": None,
+            "hasCourseGrade": False,
+            "courseGradeValue": None,
+            "courseTotalCandidate": (
+                row_candidate_fields(total_row) if total_row else None
+            ),
+            "hasGradedItems": True,
+            "gradedItemsCount": len(graded_items),
+            "gradedItemsUsed": len(graded_items),
+            "availableGradeItems": available_items,
+            "missingGradeReason": None,
+            "missingCase": None,
+            "computedAverage": graded_avg,
+            "computedAverageAvailable": True,
+            "allCandidateGradeFields": [row_candidate_fields(r) for r in course_rows[:8]],
+            **_base_resolve_fields(course_name, course_id, True, _SOURCE_GRADED_AVG),
+        }
+
+    return _moodle_unavailable_payload(course_rows, total_row, course_name, course_id)
+
+
 def resolve_course_grade_for_user(email: str, course_id: str) -> Dict[str, Any]:
     """Entry point: resolve grade for one course by user email."""
+    from app.repositories.uploaded_grade_repository import get_for_course
+
     user = user_repository.find_by_email(email.strip().lower())
     if not user:
         return {
@@ -351,6 +437,7 @@ def resolve_course_grade_for_user(email: str, course_id: str) -> Dict[str, Any]:
         }
     user_id = str(user["_id"])
     grades = _grades(user_id)
+    uploaded = get_for_course(user_id, course_id)
     course_name = None
     from app.services.moodle_course_display import get_visible_synced_courses_for_user
 
@@ -358,7 +445,7 @@ def resolve_course_grade_for_user(email: str, course_id: str) -> Dict[str, Any]:
         if str(course["id"]) == str(course_id):
             course_name = course.get("name")
             break
-    return resolve_course_grade(grades, course_id, course_name)
+    return resolve_course_grade(grades, course_id, course_name, uploaded)
 
 
 def average_percentage(
@@ -387,6 +474,7 @@ def course_display_percentage(
     grades: List[Dict[str, Any]],
     course_id: str,
     course_name: Optional[str] = None,
+    uploaded_record: Optional[Dict[str, Any]] = None,
 ) -> Optional[float]:
-    resolved = resolve_course_grade(grades, course_id, course_name)
+    resolved = resolve_course_grade(grades, course_id, course_name, uploaded_record)
     return resolved["grade"] if resolved.get("gradeAvailable") else None

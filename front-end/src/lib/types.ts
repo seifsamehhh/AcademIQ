@@ -174,6 +174,11 @@ export interface CourseStatistics {
 
 export type ActivityDataSource = "seeded" | "synced" | "none";
 
+export type PerformanceMode =
+  | "ml_prediction"
+  | "limited_insight"
+  | "not_enough_data";
+
 /** Course-scoped output combining grade prediction + clustering + actuals. */
 export interface PerformanceAnalysis {
   course: Course;
@@ -181,9 +186,11 @@ export interface PerformanceAnalysis {
   predictedGrade: number | null;
   /** Categorical status from ML when available; null otherwise. */
   status: PerformanceStatus | null;
-  /** Actual Moodle average (0-100); null when no grade data exists. */
+  /** Actual resolved course grade (0-100); null when no grade data exists. */
   courseAverage: number | null;
   hasGradeData?: boolean;
+  gradeSource?: string | null;
+  gradeLabel?: string | null;
   statistics: CourseStatistics;
   /** "ml" when a model produced the prediction; otherwise "fallback". */
   engine?: "ml" | "fallback";
@@ -192,8 +199,10 @@ export interface PerformanceAnalysis {
   predictionSource?: string | null;
   classificationSource?: string | null;
   featureVectorSource?: string | null;
+  featureVectorComplete?: boolean;
   message?: string | null;
   heuristic?: boolean;
+  performanceMode?: PerformanceMode;
   /** Whether activity stats are seeded demo data, Moodle sync, or unavailable. */
   activityDataSource?: ActivityDataSource;
   /** Human-readable note about the activity stats data source. */
@@ -234,6 +243,7 @@ export interface CourseInsights {
   heuristic?: boolean;
   performanceStatus?: PerformanceStatus | null;
   classificationSource?: string | null;
+  performanceMode?: PerformanceMode;
 }
 
 /** A learning material title scraped from Moodle, selectable for quiz gen. */
