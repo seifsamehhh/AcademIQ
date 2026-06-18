@@ -11,10 +11,31 @@ import {
   getStoredStudentId,
   getStoredStudentName,
 } from "@/lib/api";
-import type { StudentResults } from "@/lib/types";
+import type { DemoCourseResult, StudentResults } from "@/lib/types";
 import { ApiErrorAlert } from "@/components/common/ApiErrorAlert";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+
+function courseGradeDisplay(course: DemoCourseResult): {
+  primary: string;
+  secondary?: string;
+} {
+  const available =
+    course.gradeAvailable === true ||
+    (course.gradeAvailable !== false && course.grade != null);
+
+  if (!available) {
+    return {
+      primary: "Not available",
+      secondary: course.gradeNote ?? "Moodle grade data has not been synced yet.",
+    };
+  }
+
+  return {
+    primary: String(course.grade),
+    secondary: course.gradeLabel ?? undefined,
+  };
+}
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -70,8 +91,12 @@ export default function DashboardPage() {
   const displayName = results?.name ?? studentName ?? "Student";
   const signedInAs = results?.loginEmail || studentId;
   const hasResults = Boolean(results?.name);
-  const gpaUnavailable =
-    results?.gpaAvailable === false || (results?.dataSource === "synced" && results?.gpa == null);
+  const gpaUnavailable = results?.gpaAvailable !== true;
+
+  const riskLabel =
+    results?.riskAvailable === false
+      ? "Not enough data"
+      : results?.risk ?? "Not enough data";
 
   return (
     <div className="space-y-8">
@@ -109,11 +134,15 @@ export default function DashboardPage() {
               </CardHeader>
               <CardContent>
                 <p className="text-3xl font-bold text-foreground">
-                  {gpaUnavailable ? "Not available" : results!.gpa}
+                  {gpaUnavailable ? "GPA not available yet" : results!.gpa}
                 </p>
                 {gpaUnavailable && results?.gpaNote ? (
                   <p className="mt-2 text-sm text-muted-foreground">
                     {results.gpaNote}
+                  </p>
+                ) : results?.gpaSource ? (
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    {results.gpaSource}
                   </p>
                 ) : null}
               </CardContent>
@@ -126,8 +155,17 @@ export default function DashboardPage() {
               </CardHeader>
               <CardContent>
                 <p className="text-3xl font-bold text-foreground">
-                  {results!.risk}
+                  {riskLabel}
                 </p>
+                {results?.riskNote ? (
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    {results.riskNote}
+                  </p>
+                ) : results?.riskSource ? (
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    {results.riskSource}
+                  </p>
+                ) : null}
               </CardContent>
             </Card>
           </div>
@@ -138,19 +176,35 @@ export default function DashboardPage() {
             </CardHeader>
             <CardContent>
               <ul className="divide-y divide-border">
-                {(results!.courses ?? []).map((course) => (
-                  <li
-                    key={course.courseId ?? course.name}
-                    className="flex items-center justify-between py-3 first:pt-0 last:pb-0"
-                  >
-                    <span className="font-medium text-foreground">
-                      {course.name}
-                    </span>
-                    <span className="text-lg font-semibold text-primary">
-                      {course.grade != null ? course.grade : "—"}
-                    </span>
-                  </li>
-                ))}
+                {(results!.courses ?? []).map((course) => {
+                  const grade = courseGradeDisplay(course);
+                  return (
+                    <li
+                      key={course.courseId ?? course.name}
+                      className="flex items-start justify-between gap-4 py-3 first:pt-0 last:pb-0"
+                    >
+                      <span className="font-medium text-foreground">
+                        {course.name}
+                      </span>
+                      <div className="text-right">
+                        <span
+                          className={
+                            grade.primary === "Not available"
+                              ? "text-sm font-medium text-muted-foreground"
+                              : "text-lg font-semibold text-primary"
+                          }
+                        >
+                          {grade.primary}
+                        </span>
+                        {grade.secondary ? (
+                          <p className="mt-1 text-xs text-muted-foreground max-w-[220px]">
+                            {grade.secondary}
+                          </p>
+                        ) : null}
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
             </CardContent>
           </Card>

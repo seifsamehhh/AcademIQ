@@ -838,6 +838,40 @@
         return materials;
     };
 
+    const parseGradePoints = (gradeText) => {
+        const text = cleanText(gradeText);
+        if (!text || text === "-") return null;
+        if (text.startsWith("- ")) return null;
+        if (text.includes("/")) {
+            const head = text.split("/")[0].trim();
+            const n = parseFloat(head);
+            if (Number.isFinite(n)) return n;
+        }
+        const match = text.match(/^(\d+(?:\.\d+)?)/);
+        return match ? parseFloat(match[1]) : null;
+    };
+
+    const parseMaxPoints = (rangeText) => {
+        const text = cleanText(rangeText);
+        if (!text) return null;
+        const slashParts = text.split("/");
+        if (slashParts.length >= 2) {
+            const n = parseFloat(slashParts[slashParts.length - 1].trim());
+            if (Number.isFinite(n)) return n;
+        }
+        const dashMatch = text.match(/(\d+(?:\.\d+)?)\s*[–\-]\s*(\d+(?:\.\d+)?)/);
+        if (dashMatch) {
+            const low = parseFloat(dashMatch[1]);
+            const high = parseFloat(dashMatch[2]);
+            if (Number.isFinite(high) && Number.isFinite(low) && high > low) {
+                return high - low;
+            }
+            if (Number.isFinite(high)) return high;
+        }
+        const n = parseFloat(text);
+        return Number.isFinite(n) ? n : null;
+    };
+
     const extractGradesFromTable = (courseId, doc = document) => {
         const grades = [];
         doc.querySelectorAll("table.user-grade tbody tr").forEach((row) => {
@@ -846,17 +880,15 @@
             const rangeText = cleanText(row.querySelector("td.column-range")?.textContent);
             if (!itemName || !gradeText) return;
 
-            const [gradeValue] = gradeText.split("/");
-            const maxGrade = rangeText?.split("/")[1] || rangeText;
-            const gradeNumber = parseFloat(gradeValue);
-            const maxNumber = parseFloat(maxGrade);
+            const gradeNumber = parseGradePoints(gradeText);
+            const maxNumber = parseMaxPoints(rangeText);
             const percentage =
                 Number.isFinite(gradeNumber) && Number.isFinite(maxNumber) && maxNumber > 0
                     ? Math.round((gradeNumber / maxNumber) * 100)
                     : null;
 
             grades.push({
-                course_id: courseId,
+                course_id: String(courseId),
                 item_name: itemName,
                 item_type: itemName.toLowerCase().includes("quiz") ? "quiz" : "assignment",
                 grade: gradeText,

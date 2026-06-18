@@ -235,16 +235,9 @@ def _grades(user_id: str) -> List[Dict[str, Any]]:
 
 
 def _avg_percentage(grades: List[Dict[str, Any]], course_id: str = None, item_type: str = None) -> Optional[float]:
-    vals = []
-    for g in grades:
-        if course_id is not None and str(g.get("course_id")) != str(course_id):
-            continue
-        if item_type is not None and (g.get("item_type") or "").lower() != item_type:
-            continue
-        pct = g.get("percentage")
-        if isinstance(pct, (int, float)):
-            vals.append(float(pct))
-    return round(sum(vals) / len(vals), 1) if vals else None
+    from app.services.grade_resolution import average_percentage
+
+    return average_percentage(grades, course_id, item_type)
 
 
 # Raw behavioural features the performance model expects.

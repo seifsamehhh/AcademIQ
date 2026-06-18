@@ -29,8 +29,8 @@ from app.services.moodle_course_display import (
 )
 from app.services.moodle_sync_status import has_synced_moodle_data
 from app.services.moodle_ingest import is_real_course
+from app.services.grade_resolution import resolve_course_grade
 from app.services.student_data import (
-    _avg_percentage,
     _clean_course_name,
     _course_code,
     _grades,
@@ -85,45 +85,103 @@ def _derive_demo_risk(avg_grade: Optional[float]) -> str:
     return "High"
 
 
+def _has_synced_activity_features(feats: Dict[str, Any]) -> bool:
+    if not feats:
+        return False
+    keys = (
+        "all_clicks",
+        "active_days",
+        "quiz_attempts",
+        "assignment_submissions",
+        "total_time_spent",
+        "material_clicks",
+        "procrastination_index",
+        "late_submission_count",
+    )
+    return any((feats.get(k) or 0) > 0 for k in keys)
+
+
 def _derive_synced_risk(
     user_id: str,
     student_id: Optional[str],
     overall_avg: Optional[float],
-) -> str:
+) -> Dict[str, Any]:
     """Activity / ML based risk label for synced Moodle users."""
     doc, _matched = find_feature_vector_doc(user_id, student_id)
     feats = (doc or {}).get("features") or {}
+    synced_feats = bool(doc and doc.get("feature_source") == "synced" and feats)
 
-    if doc and doc.get("feature_source") == "synced" and feats and ml_service_configured():
+    if synced_feats and ml_service_configured():
         remote = predict_performance_remote(feats)
         if remote:
             status = (remote.get("status") or "").strip()
             if status == "Good":
-                return "Low risk"
+                return {
+                    "risk": "Low risk",
+                    "riskAvailable": True,
+                    "riskSource": "Based on synced Moodle activity features",
+                    "riskNote": None,
+                }
             if status == "Average":
-                return "Medium risk"
+                return {
+                    "risk": "Medium risk",
+                    "riskAvailable": True,
+                    "riskSource": "Based on synced Moodle activity features",
+                    "riskNote": None,
+                }
             if status == "At Risk":
-                return "At risk"
+                return {
+                    "risk": "At risk",
+                    "riskAvailable": True,
+                    "riskSource": "Based on synced Moodle activity features",
+                    "riskNote": None,
+                }
 
-    if feats and doc and doc.get("feature_source") == "synced":
+    if synced_feats and _has_synced_activity_features(feats):
         late = int(feats.get("late_submission_count") or 0)
         proc = float(feats.get("procrastination_index") or 0)
         active = int(feats.get("active_days") or 0)
         if late >= 2 or proc >= 5:
-            return "At risk"
-        if late >= 1 or proc >= 3 or active < 8:
-            return "Medium risk"
-        if active >= 8:
-            return "Low risk"
+            label = "At risk"
+        elif late >= 1 or proc >= 3 or active < 8:
+            label = "Medium risk"
+        elif active >= 8:
+            label = "Low risk"
+        else:
+            label = "Medium risk"
+        return {
+            "risk": label,
+            "riskAvailable": True,
+            "riskSource": "Based on synced Moodle activity features",
+            "riskNote": None,
+        }
 
     if overall_avg is not None:
         if overall_avg >= 80:
-            return "Low risk"
-        if overall_avg >= 65:
-            return "Medium risk"
-        return "At risk"
+            label = "Low risk"
+        elif overall_avg >= 65:
+            label = "Medium risk"
+        else:
+            label = "At risk"
+        return {
+            "risk": label,
+            "riskAvailable": True,
+            "riskSource": "Based on synced course grades",
+            "riskNote": None,
+        }
 
-    return "Pending"
+    return {
+        "risk": "Not enough data",
+        "riskAvailable": False,
+        "riskSource": None,
+        "riskNote": "Risk analysis requires synced grades or activity data.",
+    }
+
+
+def _course_grade_note(resolved: Dict[str, Any]) -> Optional[str]:
+    if resolved.get("gradeAvailable"):
+        return None
+    return resolved.get("gradeNote")
 
 
 def _gpa_from_percentages(grades: List[float]) -> Optional[float]:
@@ -143,11 +201,16 @@ def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
 
     for course in get_visible_synced_courses_for_user(user_id):
         cid = str(course["id"])
-        course_avg = _avg_percentage(grade_rows, cid)
+        cname = course.get("name")
+        resolved = resolve_course_grade(grade_rows, cid, cname)
         courses_out.append(
             {
-                "name": course["name"],
-                "grade": course_avg,
+                "name": cname,
+                "grade": resolved["grade"],
+                "gradeAvailable": resolved["gradeAvailable"],
+                "gradeSource": resolved["gradeSource"],
+                "gradeLabel": resolved["gradeLabel"],
+                "gradeNote": _course_grade_note(resolved),
                 "courseId": cid,
                 "code": course.get("code") or _course_code(course["name"], cid),
                 "source": course.get("source", "moodle_sync"),
@@ -157,21 +220,32 @@ def build_synced_results(user: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
-    graded = [c["grade"] for c in courses_out if c["grade"] is not None]
+    graded = [c["grade"] for c in courses_out if c.get("gradeAvailable") and c["grade"] is not None]
     overall_avg = round(sum(graded) / len(graded), 1) if graded else None
-    gpa_available = bool(graded)
+    gpa_available = len(graded) >= 2
+    risk_payload = _derive_synced_risk(user_id, student_id, overall_avg)
 
     return {
         "name": display_name,
         "loginEmail": resolve_login_email(user),
         "gpa": _gpa_from_percentages(graded) if gpa_available else None,
         "gpaAvailable": gpa_available,
+        "gpaSource": (
+            "Calculated from synced Moodle grades" if gpa_available else None
+        ),
         "gpaNote": (
             None
             if gpa_available
-            else "GPA is not included in the synced Moodle course data yet."
+            else (
+                "GPA will appear after Moodle grade data is synced."
+                if len(graded) == 0
+                else "GPA requires at least two courses with synced grades."
+            )
         ),
-        "risk": _derive_synced_risk(user_id, student_id, overall_avg),
+        "risk": risk_payload["risk"],
+        "riskAvailable": risk_payload["riskAvailable"],
+        "riskSource": risk_payload["riskSource"],
+        "riskNote": risk_payload["riskNote"],
         "courses": courses_out,
         "dataSource": "synced",
         "lastSync": _last_sync_iso(user_id),
@@ -216,11 +290,15 @@ def build_student_results(user: Dict[str, Any]) -> Dict[str, Any]:
         if not is_real_course(cid, raw_name):
             continue
         name = _clean_course_name(raw_name)
-        course_avg = _avg_percentage(grade_rows, str(cid))
+        resolved = resolve_course_grade(grade_rows, str(cid), name)
         courses_out.append(
             {
                 "name": name,
-                "grade": course_avg,
+                "grade": resolved["grade"],
+                "gradeAvailable": resolved["gradeAvailable"],
+                "gradeSource": resolved["gradeSource"],
+                "gradeLabel": resolved["gradeLabel"],
+                "gradeNote": _course_grade_note(resolved),
                 "courseId": str(cid),
                 "code": _course_code(name, str(cid)),
                 "activity": _course_activity_summary(user_id, str(cid)),
@@ -228,16 +306,35 @@ def build_student_results(user: Dict[str, Any]) -> Dict[str, Any]:
         )
     courses_out.sort(key=lambda c: c["name"])
 
-    graded = [c["grade"] for c in courses_out if c["grade"] is not None]
+    graded = [c["grade"] for c in courses_out if c.get("gradeAvailable") and c["grade"] is not None]
     overall_avg = round(sum(graded) / len(graded), 1) if graded else None
+    gpa_available = len(graded) >= 2
 
     return {
         "name": display_name,
         "loginEmail": resolve_login_email(user),
-        "gpa": _gpa_from_percentages(graded),
-        "gpaAvailable": bool(graded),
-        "gpaNote": None if graded else "GPA is not included in the synced Moodle course data yet.",
+        "gpa": _gpa_from_percentages(graded) if gpa_available else None,
+        "gpaAvailable": gpa_available,
+        "gpaSource": (
+            "Calculated from synced Moodle grades" if gpa_available else None
+        ),
+        "gpaNote": (
+            None
+            if gpa_available
+            else (
+                "GPA will appear after Moodle grade data is synced."
+                if len(graded) == 0
+                else "GPA requires at least two courses with synced grades."
+            )
+        ),
         "risk": _derive_demo_risk(overall_avg),
+        "riskAvailable": overall_avg is not None,
+        "riskSource": "Based on synced course grades" if overall_avg is not None else None,
+        "riskNote": (
+            None
+            if overall_avg is not None
+            else "Risk analysis requires synced grades or activity data."
+        ),
         "courses": courses_out,
         "dataSource": "metrics_only" if courses_out else "none",
         "lastSync": _last_sync_iso(user_id),

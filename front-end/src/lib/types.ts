@@ -55,6 +55,10 @@ export interface LoginResult {
 export interface DemoCourseResult {
   name: string;
   grade: number | null;
+  gradeAvailable?: boolean;
+  gradeSource?: string | null;
+  gradeLabel?: string | null;
+  gradeNote?: string | null;
   courseId?: string;
   code?: string;
   source?: "moodle_sync" | "seeded" | string;
@@ -73,8 +77,12 @@ export interface StudentResults {
   loginEmail?: string;
   gpa?: number | null;
   gpaAvailable?: boolean;
+  gpaSource?: string | null;
   gpaNote?: string | null;
   risk?: string;
+  riskAvailable?: boolean;
+  riskSource?: string | null;
+  riskNote?: string | null;
   courses?: DemoCourseResult[];
   dataSource?: "synced" | "demo" | "metrics_only" | "none";
   lastSync?: string | null;

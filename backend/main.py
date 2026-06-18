@@ -125,6 +125,19 @@ def debug_db_info():
     }
 
 
+@app.get("/debug/grades-audit/{email}")
+def debug_grades_audit(email: str):
+    """
+    Per-course grade availability audit for dashboard diagnostics.
+    No passwords, tokens, connection strings, or raw payload bodies.
+    """
+    from app.services.grades_audit import audit_grades_for_email
+
+    if not connect_database():
+        raise HTTPException(status_code=503, detail="Database unreachable")
+    return audit_grades_for_email(email)
+
+
 @app.get("/debug/user-data/{email}")
 def debug_user_data(email: str):
     """
