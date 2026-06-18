@@ -460,8 +460,8 @@ GUIDANCE_WEAKNESS_SPECS: List[Dict[str, Any]] = [
     },
     {
         "key": "quiz_attempts",
-        "title": "No quiz practice recorded",
-        "description": "No quiz attempts are synced for this course yet.",
+        "title": "No synced quiz practice available",
+        "description": "No quiz attempt data is currently synced for this course.",
         "recommendation": "Attempt available quizzes and review incorrect answers before the next assessment.",
         "severity": "Medium",
         "test": lambda f, m, a: int(f.get("quiz_attempts") or m.get("quiz_attempts") or 0) == 0,
@@ -469,8 +469,8 @@ GUIDANCE_WEAKNESS_SPECS: List[Dict[str, Any]] = [
     },
     {
         "key": "assignment_submissions",
-        "title": "No assignment activity recorded",
-        "description": "No assignment submissions are synced for this course.",
+        "title": "No synced assignment activity available",
+        "description": "No assignment submission data is currently synced for this course.",
         "recommendation": "Submit drafts early and use feedback before the final due date.",
         "severity": "Medium",
         "test": lambda f, m, a: int(f.get("assignment_submissions") or m.get("assignment_submissions") or 0) == 0,
@@ -587,8 +587,8 @@ def _build_quiz_weakness(
     if _metrics_has(metrics, "quiz_attempts"):
         if int(metrics.get("quiz_attempts") or 0) == 0:
             return {
-                "title": "No quiz practice recorded",
-                "description": "No quiz attempts are synced for this course.",
+                "title": "No synced quiz practice available",
+                "description": "No quiz attempt data is currently synced for this course.",
                 "impact": 48,
                 "recommendation": "Attempt available quizzes and review incorrect answers before the next assessment.",
                 "feature": "quiz_attempts",
@@ -597,16 +597,16 @@ def _build_quiz_weakness(
         return None
     if overlay_feats.get("quiz_attempts") is not None and int(overlay_feats.get("quiz_attempts") or 0) == 0:
         return {
-            "title": "No quiz practice recorded",
-            "description": "Feature records show no quiz attempts for this course.",
+            "title": "No synced quiz practice available",
+            "description": "No quiz attempt data is currently synced for this course.",
             "impact": 48,
             "recommendation": "Attempt available quizzes and review incorrect answers before the next assessment.",
             "feature": "quiz_attempts",
             "severity": "Medium",
         }
     return {
-        "title": "Quiz practice not synced",
-        "description": "No synced quiz practice is available for this course yet.",
+        "title": "No synced quiz practice available",
+        "description": "No quiz attempt data is currently synced for this course.",
         "impact": 42,
         "recommendation": "Complete Moodle quizzes so attempt data can support guidance.",
         "feature": "quiz_attempts",
@@ -621,8 +621,8 @@ def _build_assignment_weakness(
     if _metrics_has(metrics, "assignment_submissions"):
         if int(metrics.get("assignment_submissions") or 0) == 0:
             return {
-                "title": "No assignment activity recorded",
-                "description": "No assignment submissions are synced for this course.",
+                "title": "No synced assignment activity available",
+                "description": "No assignment submission data is currently synced for this course.",
                 "impact": 46,
                 "recommendation": "Submit drafts early and use feedback before the final due date.",
                 "feature": "assignment_submissions",
@@ -633,16 +633,16 @@ def _build_assignment_weakness(
         overlay_feats.get("assignment_submissions") or 0
     ) == 0:
         return {
-            "title": "No assignment activity recorded",
-            "description": "Feature records show no assignment submissions for this course.",
+            "title": "No synced assignment activity available",
+            "description": "No assignment submission data is currently synced for this course.",
             "impact": 46,
             "recommendation": "Submit drafts early and use feedback before the final due date.",
             "feature": "assignment_submissions",
             "severity": "Medium",
         }
     return {
-        "title": "Assignment activity not synced",
-        "description": "No synced assignment activity is available for this course yet.",
+        "title": "No synced assignment activity available",
+        "description": "No assignment submission data is currently synced for this course.",
         "impact": 40,
         "recommendation": "Submit assignments in Moodle so activity can inform guidance.",
         "feature": "assignment_submissions",

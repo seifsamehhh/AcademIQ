@@ -1,6 +1,8 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 
+import type { PredictionConfidence } from "@/lib/types";
+
 interface CourseAverageCardProps {
   /** Actual resolved course grade (0-100); null when unavailable. */
   courseAverage: number | null;
@@ -8,6 +10,7 @@ interface CourseAverageCardProps {
   /** Predicted grade from ML; null when ML is unavailable. */
   predictedGrade: number | null;
   gradeLabel?: string | null;
+  predictionConfidence?: PredictionConfidence | null;
 }
 
 export function CourseAverageCard({
@@ -15,16 +18,25 @@ export function CourseAverageCard({
   hasGradeData = courseAverage !== null,
   predictedGrade,
   gradeLabel,
+  predictionConfidence,
 }: CourseAverageCardProps) {
   const showComparison =
     hasGradeData && courseAverage !== null && predictedGrade !== null;
   const delta = showComparison ? predictedGrade - courseAverage : 0;
+  const limited = predictionConfidence === "limited";
+
   const deltaLabel = showComparison
-    ? delta === 0
-      ? "Prediction matches your current average."
-      : delta > 0
-        ? `Predicted to rise ${delta.toFixed(1)} pts above your current average.`
-        : `Predicted to fall ${Math.abs(delta).toFixed(1)} pts below your current average.`
+    ? limited
+      ? delta === 0
+        ? "Based on limited synced activity, expected performance matches your current midterm score."
+        : delta > 0
+          ? `Limited prediction is ${delta.toFixed(1)} pts above your current average.`
+          : `Limited prediction is ${Math.abs(delta).toFixed(1)} pts below your current average.`
+      : delta === 0
+        ? "Prediction matches your current average."
+        : delta > 0
+          ? `Predicted to rise ${delta.toFixed(1)} pts above your current average.`
+          : `Predicted to fall ${Math.abs(delta).toFixed(1)} pts below your current average.`
     : null;
 
   return (

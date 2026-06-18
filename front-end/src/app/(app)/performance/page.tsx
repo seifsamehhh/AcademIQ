@@ -165,6 +165,7 @@ export default function PerformancePage() {
             hasGradeData={ready.hasGradeData ?? ready.courseAverage !== null}
             predictedGrade={hasPrediction ? ready.predictedGrade : null}
             gradeLabel={ready.gradeLabel}
+            predictionConfidence={ready.predictionConfidence}
           />
           <ActivityStatsNotice
             source={ready.activityDataSource ?? "none"}

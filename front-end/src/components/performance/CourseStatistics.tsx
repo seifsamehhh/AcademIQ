@@ -1,15 +1,48 @@
 import { ClipboardList, Clock, FileCheck2, CalendarClock } from "lucide-react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import type { CourseStatistics as Stats, TaskBreakdown } from "@/lib/types";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import type {
+  ActivityValueSource,
+  CourseStatistics as Stats,
+  TaskBreakdown,
+} from "@/lib/types";
 
-function formatAttempted(breakdown: TaskBreakdown): string {
+type TaskLabel = "Quizzes" | "Assignments";
+
+const TASK_UNAVAILABLE_HINT: Record<TaskLabel, string> = {
+  Quizzes: "No synced quiz activity is available for this course yet.",
+  Assignments: "No synced assignment activity is available for this course yet.",
+};
+
+function valueSourceHint(source: ActivityValueSource): string | undefined {
+  if (source === "feature_vector") {
+    return "Source: synced activity feature";
+  }
+  if (source === "estimated_from_synced_activity") {
+    return "Estimated from synced Moodle activity";
+  }
+  return undefined;
+}
+
+function formatAttempted(
+  breakdown: TaskBreakdown,
+  label: TaskLabel,
+): { primary: string; hint?: string } {
   if (!breakdown.available) {
-    return "Not available";
+    return {
+      primary: "Not available",
+      hint: TASK_UNAVAILABLE_HINT[label],
+    };
   }
   if (breakdown.total != null) {
-    return `${breakdown.attempted ?? 0} of ${breakdown.total} recorded`;
+    return {
+      primary: `${breakdown.attempted ?? 0} of ${breakdown.total} recorded`,
+      hint: valueSourceHint(breakdown.valueSource),
+    };
   }
-  return `${breakdown.attempted ?? 0} recorded`;
+  return {
+    primary: `${breakdown.attempted ?? 0} recorded`,
+    hint: valueSourceHint(breakdown.valueSource),
+  };
 }
 
 function TaskRow({
@@ -18,9 +51,11 @@ function TaskRow({
   breakdown,
 }: {
   icon: typeof ClipboardList;
-  label: string;
+  label: TaskLabel;
   breakdown: TaskBreakdown;
 }) {
+  const { primary, hint } = formatAttempted(breakdown, label);
+
   return (
     <div className="flex items-center justify-between rounded-lg border border-border bg-background p-4">
       <div className="flex items-center gap-3">
@@ -29,7 +64,10 @@ function TaskRow({
         </div>
         <div>
           <p className="text-sm font-medium text-foreground">{label}</p>
-          <p className="text-xs text-muted-foreground">{formatAttempted(breakdown)}</p>
+          <p className="text-xs text-muted-foreground">{primary}</p>
+          {hint ? (
+            <p className="mt-1 text-xs text-muted-foreground/80">{hint}</p>
+          ) : null}
         </div>
       </div>
       <div className="text-right">
@@ -75,20 +113,20 @@ function TimeRow({
 
 export function CourseStatistics({ stats }: { stats: Stats }) {
   const weeklyEstimated = stats.weeklyAverageEstimated ?? false;
+  const totalTimeHint =
+    stats.totalTimeAvailable
+      ? valueSourceHint(stats.totalTimeValueSource)
+      : undefined;
+  const weeklyHint = stats.weeklyAverageAvailable
+    ? weeklyEstimated
+      ? valueSourceHint("estimated_from_synced_activity")
+      : valueSourceHint(stats.weeklyAverageValueSource)
+    : undefined;
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Course Activity Records</CardTitle>
-        <CardDescription>
-          Activity records are based on synced Moodle data currently available to
-          AcademIQ.
-        </CardDescription>
-        {stats.hasMissingFields ? (
-          <p className="text-xs text-muted-foreground pt-1">
-            Some Moodle activity fields are not available yet.
-          </p>
-        ) : null}
       </CardHeader>
       <CardContent className="grid gap-4 sm:grid-cols-2">
         <TaskRow icon={ClipboardList} label="Quizzes" breakdown={stats.quizzes} />
@@ -100,6 +138,7 @@ export function CourseStatistics({ stats }: { stats: Stats }) {
             stats.totalTimeHours != null ? `${stats.totalTimeHours.toFixed(1)} h` : "—"
           }
           available={stats.totalTimeAvailable}
+          hint={totalTimeHint}
         />
         <TimeRow
           icon={CalendarClock}
@@ -114,11 +153,7 @@ export function CourseStatistics({ stats }: { stats: Stats }) {
               : "—"
           }
           available={stats.weeklyAverageAvailable}
-          hint={
-            weeklyEstimated && stats.weeklyAverageAvailable
-              ? "Estimated from total course time — not from Moodle weekly logs."
-              : undefined
-          }
+          hint={weeklyHint}
         />
       </CardContent>
     </Card>
