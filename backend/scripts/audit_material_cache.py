@@ -50,12 +50,16 @@ def main() -> None:
     if va:
         print(
             "\n--- Quiz visibility ---\n"
+            f"Main educational: {va.get('visible_educational_main')} | "
+            f"Hidden/skipped: {va.get('hidden_skipped_educational')} | "
+            f"Duplicates hidden: {va.get('duplicates_hidden_from_main')} | "
             f"Visible lectures: {va.get('visible_lectures')} "
             f"(imported w/content: {va.get('expected_imported_lectures')}) | "
             f"Visible labs: {va.get('visible_labs')} "
             f"(imported w/content: {va.get('expected_imported_labs')}) | "
             f"Wrongly not uploaded: {len(va.get('wrongly_not_uploaded_imported') or [])} | "
-            f"Wrongly in Other Moodle: {len(va.get('wrongly_classified_other_moodle') or [])}"
+            f"Standalone exercises visible: {len(va.get('standalone_exercises_still_visible') or [])} | "
+            f"Bad lab sort: {len(va.get('bad_sort_examples') or [])}"
         )
 
 

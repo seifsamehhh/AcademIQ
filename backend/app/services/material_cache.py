@@ -414,7 +414,10 @@ def audit_material_cache(email: str, course_id: str) -> Dict[str, Any]:
 
 def _build_quiz_visibility_audit(docs: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Per-course quiz UI visibility diagnostics for demo verification."""
-    from app.services.material_quiz_display import resolve_material_display
+    from app.services.material_quiz_display import (
+        is_standalone_exercise_title,
+        resolve_material_display,
+    )
 
     displays = [resolve_material_display(d) for d in docs]
     imported = [d for d in docs if d.get("content_source") == "course_material_import"]
@@ -437,8 +440,17 @@ def _build_quiz_visibility_audit(docs: List[Dict[str, Any]]) -> Dict[str, Any]:
     ]
     wrongly_not_uploaded = []
     wrongly_other = []
+    standalone_exercises_visible = []
     for doc, disp in zip(docs, displays):
         title = str(doc.get("title") or "")
+        if is_standalone_exercise_title(title) and disp.get("visible_in_main_list"):
+            standalone_exercises_visible.append(
+                {
+                    "title": title,
+                    "material_id": doc.get("material_id"),
+                    "quiz_status": disp.get("quiz_status"),
+                }
+            )
         if doc.get("content_source") == "course_material_import" and content_text_length(doc) > 0:
             if disp.get("quiz_status") in ("not_uploaded", "extraction_failed"):
                 wrongly_not_uploaded.append(
@@ -461,14 +473,20 @@ def _build_quiz_visibility_audit(docs: List[Dict[str, Any]]) -> Dict[str, Any]:
                     }
                 )
 
-    # Bad sort: labs out of numeric order
+    # Bad sort: labs out of numeric order in main list
     bad_sort: List[Dict[str, Any]] = []
-    lab_nums: List[int] = []
-    for disp in displays:
-        if disp.get("material_kind") in ("lab", "lab_link") and disp.get("visible_in_main_list"):
-            num = disp.get("material_number")
-            if isinstance(num, int) and num < 9999:
-                lab_nums.append(num)
+    lab_displays = [
+        disp
+        for disp in displays
+        if disp.get("material_kind") in ("lab", "lab_link")
+        and disp.get("visible_in_main_list")
+    ]
+    lab_displays.sort(key=lambda d: int(d.get("material_number") or 9999))
+    lab_nums: List[int] = [
+        int(d.get("material_number") or 9999)
+        for d in lab_displays
+        if isinstance(d.get("material_number"), int) and d.get("material_number") < 9999
+    ]
     for i in range(len(lab_nums) - 1):
         if lab_nums[i] > lab_nums[i + 1]:
             bad_sort.append(
@@ -480,12 +498,32 @@ def _build_quiz_visibility_audit(docs: List[Dict[str, Any]]) -> Dict[str, Any]:
             )
             break
 
+    duplicates_hidden = sum(
+        1 for disp in displays if disp.get("hidden_duplicate_display")
+    )
+    visible_educational_main = sum(
+        1
+        for disp in displays
+        if disp.get("visible_in_main_list") and disp.get("is_educational_material")
+    )
+    hidden_skipped = sum(
+        1
+        for disp in displays
+        if not disp.get("visible_in_main_list")
+        and disp.get("is_educational_material")
+        and not disp.get("is_non_quiz_material")
+    )
+
     return {
         "imported_rows": len(imported),
         "imported_with_content": len(imported_with_content),
+        "visible_educational_main": visible_educational_main,
+        "hidden_skipped_educational": hidden_skipped,
+        "duplicates_hidden_from_main": duplicates_hidden,
         "visible_lectures": _count_kind(("lecture", "lecture_link")),
         "visible_labs": _count_kind(("lab", "lab_link")),
         "visible_revisions": _count_kind(("revision",)),
+        "standalone_exercises_still_visible": standalone_exercises_visible,
         "expected_imported_lectures": sum(
             1
             for d in imported_with_content

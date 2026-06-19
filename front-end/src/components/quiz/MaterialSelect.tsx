@@ -6,9 +6,12 @@ import { cn } from "@/lib/utils";
 import type { LearningMaterial } from "@/lib/types";
 import {
   displayMaterial,
+  deduplicateMaterials,
   isEducationalKind,
+  isMainListLearningMaterial,
   isReadyMaterial,
   isSkippedEducational,
+  isStandaloneExercise,
   materialSubtitle,
   normalizeMaterialForDisplay,
   sortMaterialsForDisplay,
@@ -31,6 +34,7 @@ function isVisibleMaterial(m: LearningMaterial): boolean {
 }
 
 function isOtherMoodleItem(m: LearningMaterial): boolean {
+  if (isStandaloneExercise(m)) return true;
   if (m.visibleInOtherItems === true) return true;
   if (m.isNonQuizMaterial === true || m.quizStatus === "not_quiz_material") return true;
   if (!isEducationalKind(m)) return true;
@@ -68,16 +72,6 @@ function statusBadge(m: LearningMaterial): {
   }
 }
 
-function sourceBadge(m: LearningMaterial): { label: string; variant: "muted" } | null {
-  if (m.importedContent) {
-    return { label: "Imported content", variant: "muted" };
-  }
-  if (isReadyMaterial(m) && m.source === "moodle_sync") {
-    return { label: "Moodle synced", variant: "muted" };
-  }
-  return null;
-}
-
 function MaterialRow({
   material,
   selectedIds,
@@ -93,7 +87,6 @@ function MaterialRow({
   const selectable = !disabled && isMaterialSelectable(material);
   const checked = selectedIds.includes(material.id);
   const { label: statusLabel, variant: statusVariant } = statusBadge(material);
-  const source = sourceBadge(material);
   const subtitle = materialSubtitle(material);
 
   return (
@@ -118,7 +111,6 @@ function MaterialRow({
       </span>
 
       <Badge variant={statusVariant}>{statusLabel}</Badge>
-      {source ? <Badge variant={source.variant}>{source.label}</Badge> : null}
 
       {subtitle ? (
         <p className="w-full basis-full pl-9 text-[11px] text-muted-foreground/80">
@@ -137,9 +129,11 @@ export function MaterialSelect({
   const [showOther, setShowOther] = useState(false);
   const [showSkipped, setShowSkipped] = useState(false);
 
-  const visible = materials.filter(isVisibleMaterial).map(normalizeMaterialForDisplay);
+  const visible = deduplicateMaterials(
+    materials.filter(isVisibleMaterial).map(normalizeMaterialForDisplay),
+  );
   const readyList = sortMaterialsForDisplay(
-    visible.filter((m) => isEducationalKind(m) && isReadyMaterial(m)),
+    visible.filter((m) => isMainListLearningMaterial(m)),
   );
   const skippedEducational = visible.filter(isSkippedEducational);
   const otherItems = visible.filter(isOtherMoodleItem);
@@ -222,7 +216,7 @@ export function MaterialSelect({
                     <ChevronRight className="h-3 w-3" />
                   )}
                   Other Moodle items ({otherItems.length}) — assignments, forums,
-                  grades, admin links
+                  exercises, grades, admin links
                 </button>
                 {showOther && (
                   <div className="mt-2 space-y-2">

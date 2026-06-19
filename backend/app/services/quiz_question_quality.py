@@ -7,6 +7,17 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Set
 
+QUIZ_GENERATION_GUIDANCE = (
+    "You are generating a university MCQ quiz from one selected course material only. "
+    "Use the material title and headings to make every question specific. "
+    "Every question must mention the exact concept being tested. "
+    "Never generate vague questions like 'What is the definition?'. "
+    "Never generate broken answer fragments. "
+    "Each option must be complete and readable. "
+    "If the content is not enough to create good MCQs, return a clear error "
+    "instead of bad questions."
+)
+
 _VAGUE_EXACT_RE = re.compile(
     r"^what\s+(?:is|are)\s+(?:the\s+)?(?:definition|purpose|advantages?|disadvantages?|types?|role|function|difference)\s*\??\s*$",
     re.I,
@@ -18,6 +29,13 @@ _VAGUE_SHORT_RE = re.compile(
 _VAGUE_GENERIC_RE = re.compile(
     r"^what\s+(?:is|are)\s+(?:the\s+)?(\w+)\s*\??\s*$",
     re.I,
+)
+_BROKEN_OPTION_END_RE = re.compile(
+    r"\b(the|about|by|of|a|an|to|in|for|with|and|or|as|on|at|from)\s*\.?\s*$",
+    re.I,
+)
+_BROKEN_OPTION_PHRASE_RE = re.compile(
+    r"(?i)practically it refers to|described by An\b|it refers to described",
 )
 _GENERIC_WORDS = frozenset(
     {
@@ -34,6 +52,8 @@ _GENERIC_WORDS = frozenset(
         "difference",
         "used",
         "meaning",
+        "genghis",
+        "genghis",
     }
 )
 _GENERIC_OPTION_RE = re.compile(
@@ -55,6 +75,66 @@ _DEFINITION_RE = re.compile(
 )
 
 
+def is_broken_option(option: str) -> bool:
+    """True when an MCQ option is a fragment or unreadable."""
+    o = (option or "").strip()
+    if len(o) < 12:
+        return True
+    if _GENERIC_OPTION_RE.match(o):
+        return True
+    if _BROKEN_OPTION_END_RE.search(o):
+        return True
+    if _BROKEN_OPTION_PHRASE_RE.search(o):
+        return True
+    words = o.split()
+    if len(words) < 3:
+        return True
+    if o.endswith("...") and len(o) < 40:
+        return True
+    return False
+
+
+def _extract_keywords(
+    source_text: str,
+    material_title: Optional[str],
+) -> List[str]:
+    keywords: List[str] = []
+    seen: Set[str] = set()
+    if material_title:
+        title_clean = re.sub(r"\b[A-Z]{2,6}\s*\d{3,4}\b", "", material_title)
+        title_clean = re.sub(r"\b(File|Moodle|Copy)\b", "", title_clean, flags=re.I)
+        for part in re.split(r"[-–—:]+", title_clean):
+            part = part.strip()
+            if len(part) >= 4 and part.lower() not in seen:
+                seen.add(part.lower())
+                keywords.append(part)
+    for concept in _extract_concepts(source_text, 30):
+        if concept.lower() not in seen:
+            seen.add(concept.lower())
+            keywords.append(concept)
+    return keywords
+
+
+def question_mentions_topic(
+    question: str,
+    material_title: Optional[str],
+    keywords: List[str],
+) -> bool:
+    """True when the stem references material title or extracted keywords."""
+    q_lower = (question or "").lower()
+    if len(q_lower.split()) >= 10:
+        return True
+    for kw in keywords[:25]:
+        token = kw.strip().lower()
+        if len(token) >= 4 and token in q_lower:
+            return True
+    if material_title:
+        for token in re.findall(r"[a-z]{4,}", material_title.lower()):
+            if token not in _GENERIC_WORDS and token in q_lower:
+                return True
+    return False
+
+
 def is_vague_question(question: str, material_title: Optional[str] = None) -> bool:
     """True when the stem lacks a concrete concept/topic noun phrase."""
     q = (question or "").strip()
@@ -71,6 +151,10 @@ def is_vague_question(question: str, material_title: Optional[str] = None) -> bo
         return True
     if re.search(r"\badvantages?\s*\??\s*$", q, re.I) and " of " not in q.lower():
         return True
+    if re.match(r"^what\s+are\s+\w+\s*\??\s*$", q, re.I) and " of " not in q.lower():
+        word = re.sub(r"^what\s+are\s+|\s*\??\s*$", "", q, flags=re.I).strip()
+        if len(word.split()) <= 2:
+            return True
     tokens = re.findall(r"[A-Za-z][A-Za-z0-9\-]{2,}", q)
     skip = _GENERIC_WORDS | frozenset(
         {"what", "which", "how", "why", "when", "the", "are", "is", "does", "do"}
@@ -135,6 +219,12 @@ def _options_too_generic(options: List[str]) -> bool:
     return generic >= len(options) - 1
 
 
+def _options_valid(options: List[str]) -> bool:
+    if len(options) < 4:
+        return False
+    return all(not is_broken_option(o) for o in options)
+
+
 def _build_concept_question(
     concept: str,
     text: str,
@@ -155,7 +245,7 @@ def _build_concept_question(
         if not hit:
             return None
         answer = hit.group(1).strip()
-    if len(answer) < 8:
+    if len(answer) < 8 or is_broken_option(answer):
         return None
     if len(answer) > 100:
         answer = answer[:97].rsplit(" ", 1)[0] + "…"
@@ -163,15 +253,26 @@ def _build_concept_question(
     for other in _extract_concepts(text, 20):
         if other.lower() != c.lower() and len(other) > 3:
             snippet = other[:80]
-            if snippet not in distractors and snippet != answer:
+            if (
+                snippet not in distractors
+                and snippet != answer
+                and not is_broken_option(snippet)
+            ):
                 distractors.append(snippet)
         if len(distractors) >= 3:
             break
     while len(distractors) < 3:
-        distractors.append(f"Alternative: {c} aspect {len(distractors) + 1}")
+        filler = f"A related concept distinct from {c}"
+        if not is_broken_option(filler):
+            distractors.append(filler)
+        else:
+            distractors.append(f"Alternative aspect of {c}")
     options = [answer] + distractors[:3]
+    if not _options_valid(options):
+        return None
+    question = f"What is the definition of {c}?"
     return {
-        "question": f"What is the definition of {c}?",
+        "question": question,
         "options": options,
         "correctIndex": 0,
     }
@@ -187,6 +288,7 @@ def validate_and_improve_questions(
         return []
 
     concepts = _extract_concepts(source_text)
+    keywords = _extract_keywords(source_text, material_title)
     if material_title:
         title_clean = re.sub(r"\b[A-Z]{2,6}\s*\d{3,4}\b", "", material_title).strip()
         title_clean = re.sub(r"\b(File|Moodle)\b", "", title_clean, flags=re.I).strip()
@@ -202,7 +304,12 @@ def validate_and_improve_questions(
         options = list(q.get("options") or [])
         correct_idx = int(q.get("correctIndex") or 0)
 
-        vague = is_vague_question(question, material_title) or _options_too_generic(options)
+        vague = (
+            is_vague_question(question, material_title)
+            or _options_too_generic(options)
+            or not _options_valid(options)
+            or not question_mentions_topic(question, material_title, keywords)
+        )
 
         if vague:
             concept = None
@@ -228,13 +335,27 @@ def validate_and_improve_questions(
 
         if is_vague_question(question, material_title):
             continue
+        if not question_mentions_topic(question, material_title, keywords):
+            if concepts:
+                question = _rewrite_vague_stem(question, concepts[min(i, len(concepts) - 1)])
+            if not question_mentions_topic(question, material_title, keywords):
+                continue
 
-        if len(options) >= 2 and 0 <= correct_idx < len(options):
+        if not _options_valid(options):
+            concept = concepts[min(i, len(concepts) - 1)] if concepts else None
+            if concept:
+                rebuilt = _build_concept_question(concept, source_text, used_concepts)
+                if rebuilt:
+                    rebuilt["id"] = q.get("id") or f"q{i + 1}"
+                    improved.append(rebuilt)
+            continue
+
+        if len(options) >= 4 and 0 <= correct_idx < len(options):
             improved.append(
                 {
                     "id": q.get("id") or f"q{i + 1}",
                     "question": question,
-                    "options": options,
+                    "options": options[:4],
                     "correctIndex": correct_idx,
                 }
             )

@@ -241,9 +241,18 @@ _EDUCATIONAL_TITLE_RE = re.compile(
 
 _LAB_ASSIGNMENT_RE = re.compile(r"(?i)\blab\s+(?:assignment\s*)?#?\d+")
 
-# Numbers after lecture/lab/lec — Lecture2 and Lecture 2 both match.
-_LECTURE_NUM_RE = re.compile(r"(?i)\b(?:lecture|lec)\s*#?(\d+)")
-_LAB_NUM_RE = re.compile(r"(?i)\blab(?:\s+(?:assignment\s*)?)?\s*#?(\d+)")
+_STANDALONE_EXERCISE_RE = re.compile(
+    r"(?i)^(?:meal\s+)?exercise\s*#?\s*\d+\s*$"
+)
+_STANDALONE_EXERCISE_PHRASE_RE = re.compile(
+    r"(?i)(?:smart\s+home|triple-island|meal)\s+exercise"
+)
+_EXERCISE_PREFIX_RE = re.compile(r"(?i)^exercise\s*#?\s*\d+")
+
+# Numbers after lecture/lab/lec — Lecture2, Lecture 2, Lab-8 all match.
+_LECTURE_NUM_RE = re.compile(r"(?i)\b(?:lecture|lec)\s*-?\s*#?(\d+)")
+_LAB_NUM_RE = re.compile(r"(?i)\blab(?:\s+(?:assignment\s*)?)?\s*-?\s*#?(\d+)")
+_LAB_NUM_EMBEDDED_RE = re.compile(r"(?i)(?:^|[\s_])lab\s*-?\s*(\d+)|_LAB(\d+)")
 _REVISION_NUM_RE = re.compile(r"(?i)\b(?:revision|review|summary)\s*#?(\d+)")
 _CHAPTER_NUM_RE = re.compile(r"(?i)\bchapters?\s*#?(\d+)")
 _WEEK_NUM_RE = re.compile(r"(?i)\bweek\s*#?(\d+)")
@@ -282,9 +291,29 @@ def _normalize_title_text(title: str) -> str:
     return re.sub(r"[_]+", " ", (title or ""))
 
 
+def is_standalone_exercise_title(title: str) -> bool:
+    """Standalone Moodle exercises — not main-list quiz materials."""
+    t = (title or "").strip()
+    if not t:
+        return False
+    normalized = _normalize_title_text(t)
+    for src in (t, normalized):
+        if _STANDALONE_EXERCISE_RE.match(src.strip()):
+            return True
+        if _STANDALONE_EXERCISE_PHRASE_RE.search(src):
+            return True
+        if _EXERCISE_PREFIX_RE.match(src.strip()) and not re.search(
+            r"(?i)\blab\s*-?\s*\d", src
+        ):
+            return True
+    return False
+
+
 def matches_educational_title(title: str) -> bool:
     t = title or ""
     normalized = _normalize_title_text(t)
+    if is_standalone_exercise_title(t):
+        return False
     return bool(
         _EDUCATIONAL_TITLE_RE.search(t) or _EDUCATIONAL_TITLE_RE.search(normalized)
     )
@@ -305,6 +334,9 @@ def classify_non_quiz_material(title: str, file_type: str) -> Tuple[bool, Option
 
     if _LAB_ASSIGNMENT_RE.search(t) or _LAB_ASSIGNMENT_RE.search(normalized):
         return False, None
+
+    if is_standalone_exercise_title(t):
+        return True, "Standalone exercise — quiz uses full lab/lecture materials only"
 
     # A: Hard admin phrases always win.
     if matches_hard_admin_title(t):
@@ -332,6 +364,9 @@ def is_educational_material(title: str, file_type: str) -> bool:
     normalized = _normalize_title_text(t)
 
     if matches_hard_admin_title(t):
+        return False
+
+    if is_standalone_exercise_title(t):
         return False
 
     if matches_educational_title(t):
@@ -379,7 +414,12 @@ def extract_material_number(title: str, material_kind: str) -> int:
         return int(m.group(1)) if m else 9999
     if material_kind in ("lab", "lab_link"):
         m = _LAB_NUM_RE.search(t)
-        return int(m.group(1)) if m else 9999
+        if m:
+            return int(m.group(1))
+        m2 = _LAB_NUM_EMBEDDED_RE.search(t)
+        if m2:
+            return int(m2.group(1) or m2.group(2))
+        return 9999
     if material_kind == "revision":
         m = _REVISION_NUM_RE.search(t)
         return int(m.group(1)) if m else 9999
@@ -424,8 +464,8 @@ def _apply_import_content_status(
     content: str,
 ) -> Optional[Dict[str, Any]]:
     """
-  When materials were imported locally, trust stored content for quiz UI status.
-  Never show Not uploaded when content_text exists.
+    When materials were imported locally, trust stored content for quiz UI status.
+    Never show Not uploaded when content_text exists.
     """
     if content_len <= 0:
         return None
@@ -447,12 +487,49 @@ def _apply_import_content_status(
         )
         probe_count = int(eligibility_meta.get("probe_question_count") or 0)
 
+    if is_import and content_len < 100:
+        return {
+            "quiz_status": "extraction_too_short",
+            "quiz_status_reason": (
+                f"Only {content_len} characters imported (need at least 100 for quiz)."
+            ),
+            "reason": f"Only {content_len} characters imported.",
+            "is_educational_material": True,
+            "is_non_quiz_material": False,
+            "quiz_generation_eligible": False,
+            "ready_for_quiz": False,
+            "will_generate_successfully": False,
+            "why_not_ready": "Too little imported text for quiz generation.",
+            "visible_in_main_list": False,
+            "visible_in_other_items": False,
+            "selectable": False,
+            "probe_question_count": probe_count,
+            "question_count_possible": probe_count,
+            "probe_failure_reason": eligibility_meta.get("probe_failure_reason"),
+            "eligibility_meta": {
+                k: eligibility_meta.get(k)
+                for k in (
+                    "probe_engine",
+                    "lecture_concept_count",
+                    "definition_pair_count",
+                    "total_concepts",
+                    "concept_candidate_count",
+                    "cleaned_text_length",
+                )
+                if eligibility_meta.get(k) is not None
+            },
+        }
+
     stored_qs = str(doc.get("quiz_status") or "")
-    if stored_qs in ("ready", "limited_ready") and stored_ready:
+    if stored_qs in ("ready", "limited_ready") and stored_ready and not is_import:
         quiz_status = stored_qs
     elif probe_count >= MIN_READY_QUESTIONS or content_len >= MIN_QUIZ_CONTENT_CHARS:
         quiz_status = "ready"
-    elif probe_count >= MIN_LIMITED_QUESTIONS or content_len >= 200:
+    elif (
+        probe_count >= MIN_LIMITED_QUESTIONS
+        or content_len >= 100
+        or (is_import and content_len > 0)
+    ):
         quiz_status = "limited_ready"
     else:
         quiz_status = "limited_ready"
@@ -461,7 +538,12 @@ def _apply_import_content_status(
     if quiz_status == "limited_ready":
         content_note = LIMITED_QUIZ_NOTE
 
-    selectable = True
+    selectable = quiz_status in ("ready", "limited_ready")
+    visible_main = content_len >= 100
+    if is_standalone_exercise_title(str(doc.get("title") or "")):
+        visible_main = False
+        selectable = False
+
     return {
         "quiz_status": quiz_status,
         "quiz_status_reason": content_note,
@@ -470,10 +552,10 @@ def _apply_import_content_status(
         "is_non_quiz_material": False,
         "quiz_generation_eligible": selectable,
         "ready_for_quiz": quiz_status == "ready",
-        "will_generate_successfully": True,
-        "why_not_ready": None,
-        "visible_in_main_list": True,
-        "visible_in_other_items": False,
+        "will_generate_successfully": selectable,
+        "why_not_ready": None if selectable else content_note,
+        "visible_in_main_list": visible_main,
+        "visible_in_other_items": not visible_main,
         "selectable": selectable,
         "probe_question_count": probe_count,
         "question_count_possible": probe_count,
@@ -833,7 +915,129 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
         result["sort_number"] = material_number
         result["content_text_length"] = content_len
 
+    if is_standalone_exercise_title(title):
+        result.update(
+            {
+                "quiz_status": "not_quiz_material",
+                "quiz_status_reason": (
+                    "Standalone exercise — quiz uses full lab/lecture materials only"
+                ),
+                "is_educational_material": False,
+                "is_non_quiz_material": True,
+                "quiz_generation_eligible": False,
+                "ready_for_quiz": False,
+                "visible_in_main_list": False,
+                "visible_in_other_items": True,
+                "selectable": False,
+                "material_kind": "other_moodle_item",
+            }
+        )
+
+    clen = int(result.get("content_text_length") or 0)
+    if clen > 0 and clen < 100 and result.get("visible_in_main_list"):
+        result["visible_in_main_list"] = False
+        result["visible_in_other_items"] = False
+        result["selectable"] = False
+        result["quiz_generation_eligible"] = False
+    elif clen > 0 and clen < 300 and result.get("visible_in_main_list"):
+        title_lower = title.lower()
+        is_revision = (
+            material_kind == "revision"
+            or "revision" in title_lower
+            or "final revision" in title_lower
+        )
+        is_numbered_core = (
+            material_kind in ("lecture", "lab", "lecture_link", "lab_link")
+            and material_number < 9999
+        )
+        if not is_revision and not is_numbered_core:
+            result["visible_in_main_list"] = False
+            result["visible_in_other_items"] = True
+            result["selectable"] = False
+            result["quiz_generation_eligible"] = False
+
     return result
+
+
+def _clean_title_for_dedupe(title: str) -> str:
+    t = re.sub(r"\.(pdf|pptx?|ppsx|docx?|txt|zip)$", "", (title or ""), flags=re.I)
+    t = re.sub(r"\s*\(\d+\)", "", t)
+    t = re.sub(r"[_]+", " ", t)
+    t = re.sub(r"\s+", " ", t).strip().lower()
+    return t
+
+
+def _dedupe_key(display: Dict[str, Any], doc: Optional[Dict[str, Any]]) -> str:
+    kind = str(display.get("material_kind") or "")
+    num = display.get("material_number")
+    title_clean = _clean_title_for_dedupe(display.get("title") or "")
+    if re.search(r"(?i)final\s+revision", title_clean):
+        return "revision:final"
+    if kind in ("lecture", "lecture_link") and isinstance(num, int) and num < 9999:
+        return f"lecture:{num}"
+    if kind in ("lab", "lab_link") and isinstance(num, int) and num < 9999:
+        return f"lab:{num}"
+    if kind == "revision":
+        if "final" in title_clean:
+            return "revision:final"
+        rev_n = num if isinstance(num, int) and num < 9999 else 0
+        return f"revision:{rev_n}"
+    if doc and doc.get("content_hash"):
+        return f"hash:{doc.get('content_hash')}"
+    return f"{kind}:{title_clean}"
+
+
+def _dedupe_score(display: Dict[str, Any], doc: Dict[str, Any]) -> int:
+    score = int(display.get("content_text_length") or 0)
+    if doc.get("content_source") == _IMPORT_SOURCE or doc.get("imported_at"):
+        score += 100000
+    qs = str(display.get("quiz_status") or "")
+    if qs == "ready":
+        score += 5000
+    elif qs == "limited_ready":
+        score += 2000
+    if display.get("ready_for_quiz"):
+        score += 500
+    if not display.get("is_link_wrapper"):
+        score += 100
+    return score
+
+
+def _deduplicate_displays(
+    displays: List[Dict[str, Any]],
+    docs: List[Dict[str, Any]],
+) -> int:
+    """Hide weaker duplicate rows from the main list; keep best per dedupe key."""
+    doc_map = {str(d.get("material_id") or ""): d for d in docs}
+    best: Dict[str, Tuple[int, str]] = {}
+    hidden_mids: Set[str] = set()
+
+    for display in displays:
+        mid = str(display.get("material_id") or "")
+        doc = doc_map.get(mid) or {}
+        key = _dedupe_key(display, doc)
+        score = _dedupe_score(display, doc)
+        prev = best.get(key)
+        if prev is None or score > prev[0]:
+            if prev is not None:
+                hidden_mids.add(prev[1])
+            best[key] = (score, mid)
+        else:
+            hidden_mids.add(mid)
+
+    hidden_count = 0
+    for display in displays:
+        mid = str(display.get("material_id") or "")
+        if mid in hidden_mids:
+            display["visible_in_main_list"] = False
+            display["visible_in_other_items"] = True
+            display["selectable"] = False
+            display["quiz_generation_eligible"] = False
+            display["ready_for_quiz"] = False
+            display["will_generate_successfully"] = False
+            display["hidden_duplicate_display"] = True
+            hidden_count += 1
+    return hidden_count
 
 
 def resolve_quiz_material_display(
@@ -851,6 +1055,7 @@ def resolve_quiz_material_display(
         if not doc.get("hidden_duplicate")
     ]
     _apply_link_wrapper_visibility(displays)
+    duplicates_hidden = _deduplicate_displays(displays, materials)
     displays.sort(key=material_display_sort_key)
 
     # Gap diagnostics for debug endpoints only — never inserted into the UI list.
@@ -865,6 +1070,7 @@ def resolve_quiz_material_display(
         "other_items_count": other_count,
         "missing_educational_count": len(missing_lectures),
         "missing_lecture_numbers": missing_lectures,
+        "duplicates_hidden_from_main": duplicates_hidden,
     }
     return displays, meta
 
