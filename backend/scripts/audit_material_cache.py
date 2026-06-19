@@ -37,6 +37,16 @@ def main() -> None:
 
     report = audit_material_cache(email, course_id)
     print(json.dumps(report, indent=2, default=str))
+    print(
+        "\n--- Summary ---\n"
+        f"Ready: {report.get('ready_count')} | "
+        f"Limited: {report.get('limited_ready_count')} | "
+        f"Imported: {report.get('imported_count')} "
+        f"(ready: {report.get('imported_ready_count')}) | "
+        f"Duplicates: {report.get('duplicates_count')} | "
+        f"Cache hits: {report.get('cache_hit_count')} | "
+        f"Missing expected: {len(report.get('missing_expected_materials') or [])}"
+    )
 
 
 if __name__ == "__main__":

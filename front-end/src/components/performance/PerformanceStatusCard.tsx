@@ -15,7 +15,6 @@ const COPY: Partial<Record<string, string>> = {
 
 export function PerformanceStatusCard({
   status,
-  source,
   statusNote,
 }: {
   status: PerformanceStatus | null;
@@ -29,10 +28,10 @@ export function PerformanceStatusCard({
       <CardHeader>
         <div className="flex items-center gap-2">
           <Award className={cn("h-5 w-5", style.text)} />
-          <CardTitle>Performance Status</CardTitle>
+          <CardTitle>Risk Status</CardTitle>
         </div>
         <CardDescription>
-          Classification based on the expected performance estimate
+          Course risk classification from the performance model
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -42,9 +41,6 @@ export function PerformanceStatusCard({
         <p className="text-sm text-muted-foreground">{COPY[status]}</p>
         {statusNote ? (
           <p className="text-xs text-muted-foreground">{statusNote}</p>
-        ) : null}
-        {source ? (
-          <p className="text-xs text-muted-foreground">{source}</p>
         ) : null}
       </CardContent>
     </Card>

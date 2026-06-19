@@ -65,8 +65,8 @@ export function CourseAverageCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Current course score</CardTitle>
-        <CardDescription>From {sourceLabel}</CardDescription>
+        <CardTitle>Current Course Average</CardTitle>
+        <CardDescription>From {sourceLabel} — separate from predicted grade</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {hasGradeData && courseAverage !== null ? (

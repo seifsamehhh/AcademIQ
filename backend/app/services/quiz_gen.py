@@ -15,7 +15,7 @@ import io
 import logging
 import os
 import sys
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +167,27 @@ def _supplement_to_target(
         return primary, primary_engine
 
 
-def generate_questions(text: str, num_questions: int = 5) -> Tuple[List[Dict[str, Any]], str]:
+def _validate_questions(
+    questions: List[Dict[str, Any]],
+    text: str,
+    material_title: Optional[str],
+) -> List[Dict[str, Any]]:
+    if not questions:
+        return questions
+    try:
+        from app.services.quiz_question_quality import validate_and_improve_questions
+
+        return validate_and_improve_questions(questions, text, material_title)
+    except Exception as exc:
+        logger.warning("Question validation failed: %s", exc)
+        return questions
+
+
+def generate_questions(
+    text: str,
+    num_questions: int = 5,
+    material_title: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], str]:
     """
     Generate MCQs from stored content_text.
 
@@ -212,7 +232,8 @@ def generate_questions(text: str, num_questions: int = 5) -> Tuple[List[Dict[str
         light = generate_lightweight(text, num_questions=num_questions)
         if light:
             logger.info("Lightweight engine: %d questions", len(light))
-            return _supplement_to_target(light, text, num_questions, "light")
+            combined, eng = _supplement_to_target(light, text, num_questions, "light")
+            return _validate_questions(combined, text, material_title), eng
         logger.warning("Lightweight engine returned 0 questions")
     except Exception as exc:
         logger.error("Lightweight engine failed: %s", exc, exc_info=True)
@@ -224,7 +245,8 @@ def generate_questions(text: str, num_questions: int = 5) -> Tuple[List[Dict[str
         lecture = generate_lecture_quiz(text, num_questions=num_questions)
         if lecture:
             logger.info("Lecture engine: %d questions", len(lecture))
-            return _supplement_to_target(lecture, text, num_questions, "lecture")
+            combined, eng = _supplement_to_target(lecture, text, num_questions, "lecture")
+            return _validate_questions(combined, text, material_title), eng
         logger.warning("Lecture engine returned 0 questions")
     except Exception as exc:
         logger.error("Lecture engine failed: %s", exc, exc_info=True)
@@ -235,7 +257,8 @@ def generate_questions(text: str, num_questions: int = 5) -> Tuple[List[Dict[str
             heavy = generate_from_text(text, num_questions=num_questions)
             if len(heavy) >= 3:
                 logger.info("Heavy engine: %d questions", len(heavy))
-                return _supplement_to_target(heavy, text, num_questions, "heavy")
+                combined, eng = _supplement_to_target(heavy, text, num_questions, "heavy")
+                return _validate_questions(combined, text, material_title), eng
             logger.warning("Heavy engine: only %d questions", len(heavy))
         except Exception as exc:
             logger.warning("Heavy engine failed: %s", exc, exc_info=True)
@@ -247,7 +270,8 @@ def generate_questions(text: str, num_questions: int = 5) -> Tuple[List[Dict[str
         fragment = generate_fragment_quiz(text, num_questions=num_questions)
         if fragment:
             logger.info("Fragment engine: %d questions", len(fragment))
-            return fragment[:num_questions], "fragment"
+            validated = _validate_questions(fragment[:num_questions], text, material_title)
+            return validated, "fragment"
         logger.warning("Fragment engine returned 0 questions")
     except Exception as exc:
         logger.error("Fragment engine failed: %s", exc, exc_info=True)

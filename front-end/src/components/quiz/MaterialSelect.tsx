@@ -4,6 +4,14 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { LearningMaterial } from "@/lib/types";
+import {
+  displayMaterial,
+  isEducationalKind,
+  isReadyMaterial,
+  isSkippedEducational,
+  materialSubtitle,
+  sortMaterialsForDisplay,
+} from "@/lib/materialDisplay";
 
 interface MaterialSelectProps {
   materials: LearningMaterial[];
@@ -14,17 +22,6 @@ interface MaterialSelectProps {
 const NO_READY_MESSAGE =
   "No quiz-ready learning materials are available yet for this course.";
 
-const STATUS_HELP: Record<string, string> = {
-  not_uploaded:
-    "File detected from Moodle, but readable content has not been extracted yet.",
-  extraction_failed: "Content could not be extracted from this Moodle file.",
-  not_enough_readable_text:
-    "Text was extracted, but it does not contain enough structured educational content for a reliable quiz.",
-  extraction_too_short:
-    "Text was extracted, but it does not contain enough structured educational content for a reliable quiz.",
-};
-
-/** Hide synthetic / debug rows from the demo UI. */
 function isVisibleMaterial(m: LearningMaterial): boolean {
   if (m.missingFromDb) return false;
   if (m.kind === "MISSING") return false;
@@ -32,33 +29,17 @@ function isVisibleMaterial(m: LearningMaterial): boolean {
   return true;
 }
 
-/** Backend returns materials pre-sorted; preserve that order when splitting lists. */
-function preserveApiOrder(
-  all: LearningMaterial[],
-  predicate: (m: LearningMaterial) => boolean,
-): LearningMaterial[] {
-  return all.filter(predicate);
-}
-
-function isMainListMaterial(m: LearningMaterial): boolean {
-  if (m.visibleInOtherItems === true) return false;
-  if (m.visibleInMainList === true) return true;
-  return !m.isNonQuizMaterial && m.quizStatus !== "not_quiz_material";
-}
-
 function isOtherMoodleItem(m: LearningMaterial): boolean {
   if (m.visibleInOtherItems === true) return true;
-  if (m.visibleInMainList === true) return false;
-  return m.isNonQuizMaterial === true || m.quizStatus === "not_quiz_material";
+  if (m.isNonQuizMaterial === true || m.quizStatus === "not_quiz_material") return true;
+  if (!isEducationalKind(m)) return true;
+  return false;
 }
 
 export function isMaterialSelectable(m: LearningMaterial): boolean {
   if (!isVisibleMaterial(m)) return false;
-  if (m.quizStatus === "not_quiz_material") return false;
-  if (m.quizStatus === "ready" || m.quizStatus === "limited_ready") {
-    return m.quizGenerationEligible === true;
-  }
-  return false;
+  if (!isReadyMaterial(m)) return false;
+  return m.quizGenerationEligible === true;
 }
 
 function statusBadge(m: LearningMaterial): {
@@ -69,82 +50,48 @@ function statusBadge(m: LearningMaterial): {
     case "ready":
       return { label: "Ready for quiz", variant: "default" };
     case "limited_ready":
-      return { label: "Ready, limited", variant: "warning" };
-    case "extraction_too_short":
-      return { label: "Not enough readable text", variant: "warning" };
-    case "not_enough_readable_text":
-      return { label: "Not enough readable text", variant: "warning" };
-    case "not_uploaded":
-      return { label: "Not uploaded yet", variant: "muted" };
-    case "extraction_failed":
-      return { label: "Extraction failed", variant: "destructive" };
-    case "unsupported":
-      return { label: "Unsupported file type", variant: "warning" };
-    case "too_short":
-      return { label: "Too little content", variant: "warning" };
+      return { label: "Ready limited", variant: "warning" };
     case "not_quiz_material":
       return { label: "Not quiz material", variant: "muted" };
+    case "not_uploaded":
+      return { label: "Not synced yet", variant: "muted" };
+    case "extraction_failed":
+      return { label: "Could not extract", variant: "muted" };
+    case "extraction_too_short":
+    case "not_enough_readable_text":
+      return { label: "Not enough content", variant: "muted" };
     default:
-      return { label: "Not available for quiz", variant: "muted" };
+      return { label: "Not available", variant: "muted" };
   }
 }
 
-function getHelpText(m: LearningMaterial, selectable: boolean): string | null {
-  if (selectable) {
-    if (m.quizStatus === "limited_ready" && m.quizStatusReason) {
-      const note = m.quizStatusReason.trim();
-      if (note && !note.includes("course context") && !note.includes("course-context")) {
-        return note;
-      }
-    }
-    return null;
+function sourceBadge(m: LearningMaterial): { label: string; variant: "muted" } | null {
+  if (m.importedContent) {
+    return { label: "Imported content", variant: "muted" };
   }
-  if (m.quizStatus && STATUS_HELP[m.quizStatus]) {
-    return STATUS_HELP[m.quizStatus];
+  if (isReadyMaterial(m) && m.source === "moodle_sync") {
+    return { label: "Moodle synced", variant: "muted" };
   }
   return null;
-}
-
-function isHiddenContentSource(source: string): boolean {
-  const s = source.toLowerCase();
-  return s.includes("manual") || s.includes("local import") || s === "local_import";
-}
-
-function materialMetaLine(m: LearningMaterial): string | null {
-  const parts: string[] = [];
-  if (m.materialKind && m.materialNumber != null) {
-    parts.push(`${m.materialKind} ${m.materialNumber}`);
-  }
-  if (typeof m.contentTextLength === "number" && m.contentTextLength > 0) {
-    parts.push(`${m.contentTextLength.toLocaleString()} chars`);
-  }
-  if (
-    m.contentSource &&
-    m.contentSource !== "moodle_sync" &&
-    !isHiddenContentSource(m.contentSource)
-  ) {
-    parts.push(m.contentSource);
-  }
-  if (m.originalFilename) {
-    parts.push(m.originalFilename);
-  }
-  return parts.length ? parts.join(" · ") : null;
 }
 
 function MaterialRow({
   material,
   selectedIds,
   onToggle,
+  disabled = false,
 }: {
   material: LearningMaterial;
   selectedIds: string[];
   onToggle: (id: string) => void;
+  disabled?: boolean;
 }) {
-  const selectable = isMaterialSelectable(material);
+  const display = displayMaterial(material);
+  const selectable = !disabled && isMaterialSelectable(material);
   const checked = selectedIds.includes(material.id);
   const { label: statusLabel, variant: statusVariant } = statusBadge(material);
-  const helpText = getHelpText(material, selectable);
-  const metaLine = materialMetaLine(material);
+  const source = sourceBadge(material);
+  const subtitle = materialSubtitle(material);
 
   return (
     <label
@@ -152,7 +99,7 @@ function MaterialRow({
         "flex flex-wrap items-center gap-3 rounded-lg border border-border/60 bg-background/60 p-3 transition-colors",
         selectable
           ? "cursor-pointer hover:border-primary/30 hover:bg-primary/5 has-[:checked]:border-primary/50"
-          : "cursor-not-allowed opacity-60",
+          : "cursor-not-allowed opacity-55",
       )}
     >
       <Checkbox
@@ -164,23 +111,15 @@ function MaterialRow({
       />
       <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
       <span className="flex-1 text-sm font-medium text-foreground">
-        {material.title}
+        {display.title}
       </span>
 
       <Badge variant={statusVariant}>{statusLabel}</Badge>
+      {source ? <Badge variant={source.variant}>{source.label}</Badge> : null}
 
-      {selectable && material.source === "moodle_sync" ? (
-        <Badge variant="muted">Moodle</Badge>
-      ) : null}
-
-      {helpText ? (
-        <p className="w-full basis-full pl-9 text-xs text-muted-foreground">
-          {helpText}
-        </p>
-      ) : null}
-      {metaLine ? (
-        <p className="w-full basis-full pl-9 text-[11px] text-muted-foreground/70">
-          {metaLine}
+      {subtitle ? (
+        <p className="w-full basis-full pl-9 text-[11px] text-muted-foreground/80">
+          {subtitle}
         </p>
       ) : null}
     </label>
@@ -193,39 +132,39 @@ export function MaterialSelect({
   onToggle,
 }: MaterialSelectProps) {
   const [showOther, setShowOther] = useState(false);
+  const [showSkipped, setShowSkipped] = useState(false);
 
   const visible = materials.filter(isVisibleMaterial);
-  const mainList = preserveApiOrder(visible, isMainListMaterial);
-  const otherItems = preserveApiOrder(visible, isOtherMoodleItem);
-  const selectableCount = visible.filter(isMaterialSelectable).length;
+  const readyList = sortMaterialsForDisplay(
+    visible.filter((m) => isEducationalKind(m) && isReadyMaterial(m)),
+  );
+  const skippedEducational = visible.filter(isSkippedEducational);
+  const otherItems = visible.filter(isOtherMoodleItem);
 
   return (
     <div className="mc-card p-5">
       <div className="mb-4">
         <h3 className="text-sm font-semibold text-foreground">Learning materials</h3>
         <p className="mt-1 text-xs text-muted-foreground">
-          Lectures, labs, revisions, and notes appear below. Select materials marked
-          Ready for quiz or Ready, limited to generate a quiz from that file&apos;s
-          content only.
+          Select lectures, labs, or revision materials marked Ready for quiz or Ready
+          limited. Quiz questions are generated from the selected file only.
         </p>
       </div>
       <div className="space-y-2">
         {visible.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No learning materials found for this course. Sync materials from
-            Moodle using the AcademIQ Chrome extension.
+            No learning materials found for this course. Sync materials from Moodle
+            using the AcademIQ Chrome extension.
           </p>
         ) : (
           <>
-            {selectableCount === 0 ? (
+            {readyList.length === 0 ? (
               <p className="text-sm text-muted-foreground rounded-md border border-border bg-muted/40 px-3 py-2">
                 {NO_READY_MESSAGE}
               </p>
-            ) : null}
-
-            {mainList.length > 0 && (
+            ) : (
               <div className="space-y-2">
-                {mainList.map((m) => (
+                {readyList.map((m) => (
                   <MaterialRow
                     key={m.id}
                     material={m}
@@ -236,8 +175,39 @@ export function MaterialSelect({
               </div>
             )}
 
+            {skippedEducational.length > 0 && (
+              <div className="mt-3">
+                <button
+                  type="button"
+                  onClick={() => setShowSkipped((v) => !v)}
+                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showSkipped ? (
+                    <ChevronDown className="h-3 w-3" />
+                  ) : (
+                    <ChevronRight className="h-3 w-3" />
+                  )}
+                  Skipped {skippedEducational.length} item
+                  {skippedEducational.length === 1 ? "" : "s"} (not ready yet)
+                </button>
+                {showSkipped && (
+                  <div className="mt-2 space-y-2">
+                    {sortMaterialsForDisplay(skippedEducational).map((m) => (
+                      <MaterialRow
+                        key={m.id}
+                        material={m}
+                        selectedIds={selectedIds}
+                        onToggle={onToggle}
+                        disabled
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {otherItems.length > 0 && (
-              <div className="mt-4">
+              <div className="mt-3">
                 <button
                   type="button"
                   onClick={() => setShowOther((v) => !v)}
@@ -248,10 +218,8 @@ export function MaterialSelect({
                   ) : (
                     <ChevronRight className="h-3 w-3" />
                   )}
-                  {showOther ? "Hide" : "Show"} {otherItems.length} other Moodle
-                  item{otherItems.length === 1 ? "" : "s"} (grades, submissions,
-                  project requirements, criteria, rubrics, forums, folders,
-                  admin files)
+                  Other Moodle items ({otherItems.length}) — assignments, forums,
+                  grades, admin links
                 </button>
                 {showOther && (
                   <div className="mt-2 space-y-2">
@@ -261,6 +229,7 @@ export function MaterialSelect({
                         material={m}
                         selectedIds={selectedIds}
                         onToggle={onToggle}
+                        disabled
                       />
                     ))}
                   </div>

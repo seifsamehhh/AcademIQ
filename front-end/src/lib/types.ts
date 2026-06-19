@@ -336,7 +336,8 @@ export interface LearningMaterial {
   sortLinkRank?: number;
   materialKind?: string;
   materialNumber?: number;
-  /** Future import pipeline fields (optional). */
+  /** True when content was imported from provided course files (demo display only). */
+  importedContent?: boolean;
   contentSource?: string | null;
   originalFilename?: string | null;
   isLinkWrapper?: boolean;

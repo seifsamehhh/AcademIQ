@@ -40,6 +40,7 @@ from app.services.student_data import (
 )
 
 _DOWNLOADABLE_FILE_TYPES = {"pdf", "pptx", "ppt", "docx", "doc", "txt", "text"}
+_IMPORT_CONTENT_SOURCE = "course_material_import"
 _LINK_LIKE_FILE_TYPES = frozenset({"link", "url", "html", "page", "book"})
 _TARGETED_RETRY_FILE_TYPES = frozenset(
     {"pdf", "pptx", "ppt", "html", "link", "url", "page", "book"}
@@ -57,6 +58,31 @@ _TERMINAL_EXTRACTION_STATUSES = TERMINAL_EXTRACTION_STATUSES
 
 
 _TITLE_STOP_WORDS = {"the", "a", "an", "and", "or", "for", "of", "to", "in", "is", "on", "at", "by"}
+
+
+def _is_preserved_import_content(doc: Optional[Dict[str, Any]]) -> bool:
+    if not doc:
+        return False
+    if doc.get("content_source") != _IMPORT_CONTENT_SOURCE:
+        return False
+    return content_text_length(doc) > 0 and bool(doc.get("ready_for_quiz"))
+
+
+def _should_preserve_existing_content(
+    doc: Optional[Dict[str, Any]],
+    force: bool,
+) -> bool:
+    if force or not doc:
+        return False
+    if _is_preserved_import_content(doc):
+        return True
+    if (
+        is_extraction_cache_hit(doc, force=False)
+        and content_text_length(doc) > 0
+        and bool(doc.get("ready_for_quiz"))
+    ):
+        return True
+    return False
 
 
 def _normalize_title(title: str) -> str:
@@ -1369,7 +1395,7 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "title": title,
                 "should_upload": False,
                 "status": "not_quiz_material",
-                "reason": non_quiz_reason,
+                "reason": "Skipped non-quiz Moodle items",
                 "content_text_length": 0,
                 "matched_by": "classification",
                 **_preflight_row_urls(None, activity_url, resolved_url),
@@ -1619,6 +1645,31 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     downloadable_count = sum(1 for r in results if r.get("downloadable"))
 
+    ready_from_db = sum(
+        1
+        for d in all_docs
+        if str(d.get("quiz_status") or "") in ("ready", "limited_ready")
+        and bool(d.get("ready_for_quiz"))
+    )
+    skipped_ready_count = sum(
+        1
+        for r in results
+        if r["status"] in (
+            "already_ready",
+            "already_processed",
+            "already_classified",
+            "already_saved",
+            "skipped_existing",
+        )
+        and not r.get("should_upload")
+    )
+    skipped_non_quiz = status_summary.get("not_quiz_material", 0)
+    user_message = f"Sync complete. {ready_from_db} materials are ready for quiz."
+    if skipped_ready_count:
+        user_message += " Already-ready materials were skipped."
+    if skipped_non_quiz:
+        user_message += f" Skipped {skipped_non_quiz} non-quiz Moodle items."
+
     unique_input_ids = {
         str(_normalize_incoming_material_item(item).get("material_id") or "")
         for item in materials_in
@@ -1656,6 +1707,11 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         "db_sample": db_sample,
         "no_match_debug": no_match_debug,
         "materials": results,
+        "ready_materials_count": ready_from_db,
+        "skipped_ready_count": skipped_ready_count,
+        "skipped_non_quiz_count": skipped_non_quiz,
+        "user_message": user_message,
+        "sync_complete": True,
     }
 
 
@@ -2283,11 +2339,76 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     force = _is_force_reprocess(payload)
     now = datetime.utcnow()
 
+    existing_precheck = material_repository.get_by_object_id(target_db_id) or target_doc
+    if _should_preserve_existing_content(existing_precheck, force):
+        existing_chars = content_text_length(existing_precheck)
+        display = resolve_material_display(existing_precheck)
+        quiz_status_out = str(
+            display.get("quiz_status")
+            or existing_precheck.get("quiz_status")
+            or "ready"
+        )
+        note = (
+            "Already ready — imported content preserved"
+            if _is_preserved_import_content(existing_precheck)
+            else "Already ready — existing content preserved"
+        )
+        return _package_upload_response(
+            course_id,
+            target_db_id,
+            False,
+            payload,
+            {
+                "status": "skipped_existing",
+                "already_ready": True,
+                "course_id": course_id,
+                "material_id": material_id,
+                "resolved_from_material_id": (
+                    raw_material_id if raw_material_id != material_id else None
+                ),
+                "title": existing_precheck.get("title", title),
+                "chars": existing_chars,
+                "ready_for_quiz": True,
+                "hasContent": True,
+                "extraction_status": existing_precheck.get("extraction_status"),
+                "extraction_error": None,
+                "quiz_status": quiz_status_out,
+                "content_note": note,
+                "inserted": False,
+            },
+        )
+
     # Extension could not download bytes — record terminal failure on exact db_id row.
     if payload.get("upload_attempt_failed"):
         raw_error = str(payload.get("extraction_error") or "download_failed_unknown")
         stored_error = _normalize_upload_failure_reason(raw_error, payload)
         existing_doc = material_repository.get_by_object_id(target_db_id) or target_doc
+        if existing_doc and not force and _should_preserve_existing_content(existing_doc, force):
+            existing_chars = content_text_length(existing_doc)
+            return _package_upload_response(
+                course_id,
+                target_db_id,
+                False,
+                payload,
+                {
+                    "status": "skipped_existing",
+                    "already_ready": True,
+                    "course_id": course_id,
+                    "material_id": material_id,
+                    "resolved_from_material_id": (
+                        raw_material_id if raw_material_id != material_id else None
+                    ),
+                    "title": existing_doc.get("title", title),
+                    "chars": existing_chars,
+                    "ready_for_quiz": True,
+                    "hasContent": True,
+                    "extraction_status": existing_doc.get("extraction_status"),
+                    "extraction_error": None,
+                    "quiz_status": existing_doc.get("quiz_status") or "ready",
+                    "content_note": "Download skipped — material already ready",
+                    "inserted": False,
+                },
+            )
         existing_status = str((existing_doc or {}).get("extraction_status") or "not_uploaded")
         if existing_doc and not force:
             if existing_status == "extraction_failed" and existing_doc.get("last_attempted_at"):

@@ -4,13 +4,16 @@ export function LimitedInsightCard({ message }: { message: string }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Performance insight</CardTitle>
+        <CardTitle>Prediction not available yet</CardTitle>
         <CardDescription>
-          Based on current grade records and available activity signals.
+          Not enough synced activity data for this course.
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <p className="text-sm text-muted-foreground leading-relaxed">{message}</p>
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          {message?.trim() ||
+            "More Moodle activity signals are needed before a model estimate can be shown."}
+        </p>
       </CardContent>
     </Card>
   );

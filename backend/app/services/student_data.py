@@ -625,6 +625,8 @@ def _course_obj(user_id: str, course_id: str, student_id: Optional[str] = None) 
 
 
 def _material_source(doc: Dict[str, Any]) -> str:
+    if doc.get("content_source") == "course_material_import":
+        return "moodle_sync"
     if doc.get("seed_source") == "demo_test":
         return "seeded"
     if doc.get("source") == "moodle_sync":
@@ -783,6 +785,9 @@ def get_materials(course_id: str, user_id: str | None = None) -> List[Dict[str, 
             "hasRealFileSibling": display.get("has_real_file_sibling", False),
             "questionCountPossible": display.get("question_count_possible"),
             "minQuestionsRequired": display.get("min_questions_required"),
+            "contentSource": doc.get("content_source"),
+            "originalFilename": doc.get("original_filename"),
+            "importedContent": doc.get("content_source") == "course_material_import",
         })
     return out
 

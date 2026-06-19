@@ -1,7 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 const DEFAULT_MESSAGE =
-  "More course-specific Moodle activity is needed before a reliable prediction can be generated.";
+  "Not enough synced activity data for a reliable prediction yet.";
 
 export function MlUnavailableCard({ message }: { message: string }) {
   const text = message?.trim() || DEFAULT_MESSAGE;

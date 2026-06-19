@@ -189,6 +189,7 @@ def generate_quiz(
     content_chars = len(selected_text)
     primary_title: str = (mat_meta[0].get("title") or "") if mat_meta else ""
     selected_titles = [m.get("title") for m in mat_meta]
+    display_title = primary_title
 
     from app.services.material_quiz_display import (
         LIMITED_QUIZ_NOTE,
@@ -210,6 +211,7 @@ def generate_quiz(
             limited_note = LIMITED_QUIZ_NOTE
         elif single["quiz_status"] == "ready":
             target_questions = 5
+        display_title = str(single.get("title") or primary_title)
 
     logger.info(
         "Quiz request course=%s materials=%s content_chars=%d mode=selected_material_only",
@@ -232,7 +234,9 @@ def generate_quiz(
         )
 
     questions, engine = quiz_gen.generate_questions(
-        selected_text, num_questions=target_questions,
+        selected_text,
+        num_questions=target_questions,
+        material_title=display_title,
     )
 
     if not questions or len(questions) < MIN_LIMITED_QUESTIONS:

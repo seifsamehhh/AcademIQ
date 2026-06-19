@@ -328,6 +328,10 @@ def audit_material_cache(email: str, course_id: str) -> Dict[str, Any]:
                 "extraction_status": doc.get("extraction_status"),
                 "quiz_status": quiz_status,
                 "ready_for_quiz": bool(doc.get("ready_for_quiz")),
+                "content_source": doc.get("content_source"),
+                "original_filename": doc.get("original_filename"),
+                "material_kind": doc.get("material_kind"),
+                "material_number": doc.get("material_number"),
                 "reason": doc.get("failure_reason") or doc.get("extraction_error"),
                 "duplicate_of": doc.get("duplicate_of"),
                 "cache_hit": cached,
@@ -335,6 +339,53 @@ def audit_material_cache(email: str, course_id: str) -> Dict[str, Any]:
         )
 
     rows.sort(key=lambda r: r.get("title") or "")
+
+    imported_count = sum(
+        1 for d in visible_docs if d.get("content_source") == "course_material_import"
+    )
+    imported_ready = sum(
+        1
+        for d in visible_docs
+        if d.get("content_source") == "course_material_import"
+        and str(d.get("quiz_status") or "") in ("ready", "limited_ready")
+    )
+
+    missing_expected: List[Dict[str, Any]] = []
+    for kind_label, kind_values in (
+        ("lecture", ("lecture", "lecture_link")),
+        ("lab", ("lab", "lab_link")),
+        ("revision", ("revision",)),
+    ):
+        seen_numbers: Dict[int, Dict[str, Any]] = {}
+        for doc in visible_docs:
+            title = str(doc.get("title") or "")
+            file_type = str(doc.get("file_type") or "")
+            is_non, _ = classify_non_quiz_material(title, file_type)
+            kind = doc.get("material_kind")
+            if not kind:
+                kind = classify_material_kind(title, file_type, is_non)
+            if kind not in kind_values:
+                continue
+            num = doc.get("material_number")
+            if num is None:
+                num = extract_material_number(title, kind)
+            if num is None or num >= 9999:
+                continue
+            display = resolve_material_display(doc)
+            qs = str(display.get("quiz_status") or doc.get("quiz_status") or "")
+            entry = seen_numbers.get(int(num))
+            if not entry or qs in ("ready", "limited_ready"):
+                seen_numbers[int(num)] = {
+                    "kind": kind_label,
+                    "number": int(num),
+                    "title": title,
+                    "quiz_status": qs,
+                    "content_source": doc.get("content_source"),
+                    "content_text_length": content_text_length(doc),
+                }
+        for num, info in sorted(seen_numbers.items()):
+            if info["quiz_status"] not in ("ready", "limited_ready"):
+                missing_expected.append(info)
 
     return {
         "email": email,
@@ -350,5 +401,8 @@ def audit_material_cache(email: str, course_id: str) -> Dict[str, Any]:
         "duplicates_count": duplicates_count,
         "cache_hit_count": cache_hit_count,
         "cache_miss_count": cache_miss_count,
+        "imported_count": imported_count,
+        "imported_ready_count": imported_ready,
+        "missing_expected_materials": missing_expected,
         "materials": rows,
     }

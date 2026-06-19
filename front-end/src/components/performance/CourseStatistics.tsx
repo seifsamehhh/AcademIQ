@@ -1,190 +1,127 @@
-import { ClipboardList, Clock, FileCheck2, CalendarClock } from "lucide-react";
+import {
+  Activity,
+  BookOpen,
+  ClipboardCheck,
+  Clock,
+} from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import type {
-  ActivityValueSource,
-  CourseStatistics as Stats,
-  TaskBreakdown,
-} from "@/lib/types";
+import type { CourseStatistics as Stats } from "@/lib/types";
 
-type TaskLabel = "Quizzes" | "Assignments";
-
-const TASK_UNAVAILABLE_HINT: Record<TaskLabel, string> = {
-  Quizzes: "No synced quiz activity data is available for this course yet.",
-  Assignments: "No synced assignment activity data is available for this course yet.",
-};
-
-function activityFeatureHint(source: ActivityValueSource): string | undefined {
-  if (source === "feature_vector") {
-    return "From synced activity feature";
-  }
-  if (source === "estimated_from_synced_activity") {
-    return "Estimated from synced Moodle activity";
-  }
-  return undefined;
-}
-
-function formatTaskDisplay(
-  breakdown: TaskBreakdown,
-  label: TaskLabel,
-): {
-  countPrimary: string;
-  countHint?: string;
-  avgPrimary: string;
-  avgLabel: string;
-} {
-  if (!breakdown.available) {
-    return {
-      countPrimary: "Not available",
-      countHint: TASK_UNAVAILABLE_HINT[label],
-      avgPrimary: "—",
-      avgLabel: "avg score",
-    };
-  }
-
-  const syncedMoodle = breakdown.valueSource === "synced_moodle";
-  const hasAvg =
-    breakdown.averageScore !== null && breakdown.averageScore !== undefined;
-  const attempted = breakdown.attempted;
-  const confirmedZero = syncedMoodle && attempted === 0;
-  const countUncertain =
-    hasAvg &&
-    !confirmedZero &&
-    (attempted === null || attempted === 0);
-
-  let countPrimary: string;
-  if (countUncertain) {
-    countPrimary = "Count not available";
-  } else if (confirmedZero) {
-    countPrimary =
-      breakdown.total != null
-        ? `0 of ${breakdown.total} recorded`
-        : "0 recorded";
-  } else if (breakdown.total != null) {
-    countPrimary = `${attempted ?? 0} of ${breakdown.total} recorded`;
-  } else {
-    countPrimary = `${attempted ?? 0} recorded`;
-  }
-
-  const featureHint = activityFeatureHint(breakdown.valueSource);
-
-  return {
-    countPrimary,
-    countHint: featureHint,
-    avgPrimary: hasAvg ? `${breakdown.averageScore}%` : "—",
-    avgLabel: hasAvg && countUncertain ? "Synced grade data" : "avg score",
-  };
-}
-
-function TaskRow({
+function MetricCard({
   icon: Icon,
-  label,
-  breakdown,
+  title,
+  value,
+  hint,
 }: {
-  icon: typeof ClipboardList;
-  label: TaskLabel;
-  breakdown: TaskBreakdown;
+  icon: typeof Activity;
+  title: string;
+  value: string;
+  hint?: string;
 }) {
-  const { countPrimary, countHint, avgPrimary, avgLabel } = formatTaskDisplay(
-    breakdown,
-    label,
-  );
-
   return (
-    <div className="flex items-center justify-between rounded-lg border border-border bg-background p-4">
-      <div className="flex items-center gap-3">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
+    <div className="rounded-lg border border-border bg-background p-4">
+      <div className="flex items-start gap-3">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10">
           <Icon className="h-4 w-4 text-primary" />
         </div>
-        <div>
-          <p className="text-sm font-medium text-foreground">{label}</p>
-          <p className="text-xs text-muted-foreground">{countPrimary}</p>
-          {countHint ? (
-            <p className="mt-1 text-xs text-muted-foreground/80">{countHint}</p>
+        <div className="min-w-0">
+          <p className="text-xs font-medium text-muted-foreground">{title}</p>
+          <p className="mt-1 text-lg font-semibold text-foreground">{value}</p>
+          {hint ? (
+            <p className="mt-1 text-xs text-muted-foreground/80">{hint}</p>
           ) : null}
         </div>
       </div>
-      <div className="text-right">
-        <p className="text-lg font-semibold text-foreground">{avgPrimary}</p>
-        <p className="text-xs text-muted-foreground">{avgLabel}</p>
-      </div>
     </div>
   );
 }
 
-function TimeRow({
-  icon: Icon,
-  label,
-  value,
-  hint,
-  available,
-}: {
-  icon: typeof Clock;
-  label: string;
-  value: string;
-  hint?: string;
-  available: boolean;
-}) {
-  return (
-    <div className="flex items-center gap-3 rounded-lg border border-border bg-background p-4">
-      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
-        <Icon className="h-4 w-4 text-primary" />
-      </div>
-      <div>
-        <p className="text-lg font-semibold text-foreground">
-          {available ? value : "Not available"}
-        </p>
-        <p className="text-xs text-muted-foreground">{label}</p>
-        {hint ? <p className="mt-1 text-xs text-muted-foreground/80">{hint}</p> : null}
-      </div>
-    </div>
-  );
+function formatTaskCount(
+  attempted: number | null | undefined,
+  total: number | null | undefined,
+  available: boolean,
+): string {
+  if (!available) return "Not enough synced data";
+  if (attempted === 0 && total === 0) return "0 recorded";
+  if (total != null) return `${attempted ?? 0} of ${total} recorded`;
+  return `${attempted ?? 0} recorded`;
 }
 
 export function CourseStatistics({ stats }: { stats: Stats }) {
-  const weeklyEstimated = stats.weeklyAverageEstimated ?? false;
-  const totalTimeHint = stats.totalTimeAvailable
-    ? activityFeatureHint(stats.totalTimeValueSource)
+  const engagementValue = stats.weeklyAverageAvailable
+    ? stats.weeklyAverageHours != null
+      ? `${stats.weeklyAverageHours.toFixed(1)} h / week`
+      : "Not enough synced data"
+    : "Not enough synced data";
+
+  const engagementHint = stats.weeklyAverageEstimated
+    ? "Estimated from synced course time"
+    : stats.weeklyAverageAvailable
+      ? "From synced Moodle activity"
+      : undefined;
+
+  const materialValue = formatTaskCount(
+    stats.quizzes.attempted,
+    stats.quizzes.total,
+    stats.quizzes.available,
+  );
+  const materialHint = stats.quizzes.available
+    ? stats.quizzes.averageScore != null
+      ? `Avg quiz score ${stats.quizzes.averageScore}%`
+      : "Quiz views and attempts"
     : undefined;
-  const weeklyHint = stats.weeklyAverageAvailable
-    ? weeklyEstimated
-      ? activityFeatureHint("estimated_from_synced_activity")
-      : activityFeatureHint(stats.weeklyAverageValueSource)
+
+  const assessmentValue = formatTaskCount(
+    stats.assignments.attempted,
+    stats.assignments.total,
+    stats.assignments.available,
+  );
+  const assessmentHint = stats.assignments.available
+    ? stats.assignments.averageScore != null
+      ? `Avg assignment score ${stats.assignments.averageScore}%`
+      : "Assignment submissions"
     : undefined;
+
+  const timingValue = stats.totalTimeAvailable
+    ? stats.totalTimeHours != null
+      ? `${stats.totalTimeHours.toFixed(1)} h total`
+      : "Not enough synced data"
+    : "Not enough synced data";
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Course Activity Records</CardTitle>
+        <CardTitle>Course Activity Metrics</CardTitle>
         <CardDescription>
-          Synced course activity signals — not grades.
+          Synced Moodle activity signals used by the performance model
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4 sm:grid-cols-2">
-        <TaskRow icon={ClipboardList} label="Quizzes" breakdown={stats.quizzes} />
-        <TaskRow icon={FileCheck2} label="Assignments" breakdown={stats.assignments} />
-        <TimeRow
-          icon={Clock}
-          label="Total recorded time on course"
-          value={
-            stats.totalTimeHours != null ? `${stats.totalTimeHours.toFixed(1)} h` : "—"
-          }
-          available={stats.totalTimeAvailable}
-          hint={totalTimeHint}
+        <MetricCard
+          icon={Activity}
+          title="Engagement Activity"
+          value={engagementValue}
+          hint={engagementHint}
         />
-        <TimeRow
-          icon={CalendarClock}
-          label={
-            weeklyEstimated
-              ? "Estimated weekly study time"
-              : "Average weekly study time"
+        <MetricCard
+          icon={BookOpen}
+          title="Material Interaction"
+          value={materialValue}
+          hint={materialHint}
+        />
+        <MetricCard
+          icon={ClipboardCheck}
+          title="Assessment Activity"
+          value={assessmentValue}
+          hint={assessmentHint}
+        />
+        <MetricCard
+          icon={Clock}
+          title="Timing Behavior"
+          value={timingValue}
+          hint={
+            stats.totalTimeAvailable ? "Total recorded time on course" : undefined
           }
-          value={
-            stats.weeklyAverageHours != null
-              ? `${stats.weeklyAverageHours.toFixed(1)} h`
-              : "—"
-          }
-          available={stats.weeklyAverageAvailable}
-          hint={weeklyHint}
         />
       </CardContent>
     </Card>

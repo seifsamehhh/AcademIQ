@@ -127,12 +127,7 @@ export default function PerformancePage() {
               />
               <PerformanceStatusCard
                 status={ready.status}
-                statusNote={
-                  ready.statusNote ??
-                  (ready.predictionConfidence === "limited"
-                    ? "Based on limited synced activity and grade records."
-                    : undefined)
-                }
+                statusNote={ready.statusNote}
               />
             </div>
           ) : null}
@@ -163,13 +158,16 @@ export default function PerformancePage() {
             gradeSource={ready.gradeSource}
             predictionConfidence={ready.predictionConfidence}
           />
-          <ActivityStatsNotice
-            source={ready.activityDataSource ?? "none"}
-            note={
-              ready.activityStatsNote ??
-              "Activity stats are based on synced Moodle records available to AcademIQ."
-            }
-          />
+          {hasPrediction || notEnoughData || mode === "limited_insight" ? (
+            <ActivityStatsNotice
+              source={ready.activityDataSource ?? "none"}
+              note={
+                ready.activityStatsNote ??
+                "Activity metrics reflect synced Moodle records available to AcademIQ."
+              }
+              show={hasPrediction}
+            />
+          ) : null}
           <CourseStatistics stats={ready.statistics} />
         </div>
       ) : (

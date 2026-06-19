@@ -4,28 +4,15 @@ import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import type { PredictionConfidence } from "@/lib/types";
 
-const LIMITED_SOURCE_NOTE =
-  "Prediction based on current grade records and limited synced activity features.";
-
-function predictionSourceLabel(
-  predictionSource?: string | null,
-  confidence?: PredictionConfidence | null,
-): string | null {
+function confidenceNote(confidence?: PredictionConfidence | null): string {
   if (confidence === "limited") {
-    return LIMITED_SOURCE_NOTE;
+    return "Limited confidence because some Moodle activity signals are missing.";
   }
-  if (predictionSource === "rule_adjusted_prediction") {
-    return "Limited activity estimate";
-  }
-  if (predictionSource === "ml_service" || predictionSource === "local_ml") {
-    return "ML prediction";
-  }
-  return null;
+  return "Model estimate based on available activity features.";
 }
 
 export function PredictedGradeCard({
   grade,
-  predictionSource,
   confidence,
 }: {
   grade: number | null;
@@ -35,7 +22,6 @@ export function PredictedGradeCard({
   if (grade === null) return null;
   const confidenceLabel =
     confidence === "high" ? "High" : confidence === "limited" ? "Limited" : null;
-  const sourceLabel = predictionSourceLabel(predictionSource, confidence);
 
   return (
     <Card>
@@ -45,7 +31,8 @@ export function PredictedGradeCard({
           <CardTitle>Predicted Grade</CardTitle>
         </div>
         <CardDescription>
-          Expected performance estimate — not your official Moodle grade or midterm score.
+          Predicted from synced engagement, assessment activity, timing behavior, and
+          learning activity signals.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -61,9 +48,9 @@ export function PredictedGradeCard({
             Confidence: {confidenceLabel}
           </Badge>
         ) : null}
-        {sourceLabel ? (
-          <p className="text-xs text-muted-foreground">{sourceLabel}</p>
-        ) : null}
+        <p className="text-xs text-muted-foreground leading-relaxed">
+          {confidenceNote(confidence)}
+        </p>
       </CardContent>
     </Card>
   );
