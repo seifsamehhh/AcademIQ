@@ -9,6 +9,7 @@ import type { CourseInsights } from "@/lib/types";
 import { PerformanceClassification } from "@/components/insights/PerformanceClassification";
 import { RiskFactors } from "@/components/insights/RiskFactors";
 import { ApiErrorAlert } from "@/components/common/ApiErrorAlert";
+import { PageHeader } from "@/components/mission-control/PageHeader";
 import { Skeleton } from "@/components/ui/skeleton";
 
 function InsightsContent() {
@@ -59,14 +60,15 @@ function InsightsContent() {
         Back to Performance Analysis
       </Link>
 
-      <div>
-        <h1 className="text-2xl font-bold text-foreground">Performance guidance</h1>
-        <p className="text-muted-foreground">
-          {insights
+      <PageHeader
+        eyebrow="Course Intelligence"
+        title="Performance guidance"
+        description={
+          insights
             ? `${insights.course.code} — ${insights.course.name}`
-            : "Loading course guidance..."}
-        </p>
-      </div>
+            : "Loading course guidance..."
+        }
+      />
 
       {error ? <ApiErrorAlert message={error} /> : null}
 

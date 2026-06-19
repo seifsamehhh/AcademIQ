@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, FileText } from "lucide-react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -106,6 +105,32 @@ function getHelpText(m: LearningMaterial, selectable: boolean): string | null {
   return null;
 }
 
+function isHiddenContentSource(source: string): boolean {
+  const s = source.toLowerCase();
+  return s.includes("manual") || s.includes("local import") || s === "local_import";
+}
+
+function materialMetaLine(m: LearningMaterial): string | null {
+  const parts: string[] = [];
+  if (m.materialKind && m.materialNumber != null) {
+    parts.push(`${m.materialKind} ${m.materialNumber}`);
+  }
+  if (typeof m.contentTextLength === "number" && m.contentTextLength > 0) {
+    parts.push(`${m.contentTextLength.toLocaleString()} chars`);
+  }
+  if (
+    m.contentSource &&
+    m.contentSource !== "moodle_sync" &&
+    !isHiddenContentSource(m.contentSource)
+  ) {
+    parts.push(m.contentSource);
+  }
+  if (m.originalFilename) {
+    parts.push(m.originalFilename);
+  }
+  return parts.length ? parts.join(" · ") : null;
+}
+
 function MaterialRow({
   material,
   selectedIds,
@@ -119,13 +144,14 @@ function MaterialRow({
   const checked = selectedIds.includes(material.id);
   const { label: statusLabel, variant: statusVariant } = statusBadge(material);
   const helpText = getHelpText(material, selectable);
+  const metaLine = materialMetaLine(material);
 
   return (
     <label
       className={cn(
-        "flex flex-wrap items-center gap-3 rounded-lg border border-border bg-background p-3 transition-colors",
+        "flex flex-wrap items-center gap-3 rounded-lg border border-border/60 bg-background/60 p-3 transition-colors",
         selectable
-          ? "cursor-pointer hover:bg-accent has-[:checked]:border-primary/50"
+          ? "cursor-pointer hover:border-primary/30 hover:bg-primary/5 has-[:checked]:border-primary/50"
           : "cursor-not-allowed opacity-60",
       )}
     >
@@ -152,6 +178,11 @@ function MaterialRow({
           {helpText}
         </p>
       ) : null}
+      {metaLine ? (
+        <p className="w-full basis-full pl-9 text-[11px] text-muted-foreground/70">
+          {metaLine}
+        </p>
+      ) : null}
     </label>
   );
 }
@@ -169,16 +200,16 @@ export function MaterialSelect({
   const selectableCount = visible.filter(isMaterialSelectable).length;
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Learning materials</CardTitle>
-        <CardDescription>
-          Lectures, labs, revisions, and notes appear below. Select materials
-          marked Ready for quiz or Ready, limited to generate a quiz from that
-          file&apos;s content only.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-2">
+    <div className="mc-card p-5">
+      <div className="mb-4">
+        <h3 className="text-sm font-semibold text-foreground">Learning materials</h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Lectures, labs, revisions, and notes appear below. Select materials marked
+          Ready for quiz or Ready, limited to generate a quiz from that file&apos;s
+          content only.
+        </p>
+      </div>
+      <div className="space-y-2">
         {visible.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             No learning materials found for this course. Sync materials from
@@ -238,7 +269,7 @@ export function MaterialSelect({
             )}
           </>
         )}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { GraduationCap, LogOut } from "lucide-react";
+import { GraduationCap, LogOut, Brain } from "lucide-react";
 import { useUser } from "@/context/UserContext";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -24,10 +24,10 @@ function NavLinks({ pathname }: { pathname: string }) {
             key={item.href}
             href={item.href}
             className={cn(
-              "shrink-0 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+              "shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
               active
-                ? "bg-accent text-accent-foreground"
-                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                ? "bg-primary/10 text-primary"
+                : "text-muted-foreground hover:bg-accent hover:text-foreground",
             )}
           >
             {item.label}
@@ -49,20 +49,24 @@ export function AppHeader() {
   };
 
   return (
-    <header className="sticky top-0 z-50 w-full border-b border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      {/* Mobile: logo + logout on top, nav links on a full-width row below */}
+    <header className="sticky top-0 z-50 w-full border-b border-border/50 bg-background/80 backdrop-blur-xl">
+      <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent" />
+
       <div className="container md:hidden">
         <div className="flex h-14 items-center justify-between gap-4">
           <Link
             href="/dashboard"
-            className="flex shrink-0 items-center gap-2 transition-opacity hover:opacity-80"
+            className="group flex shrink-0 items-center gap-2.5 transition-opacity hover:opacity-80"
           >
-            <GraduationCap className="h-7 w-7 text-primary" />
-            <span className="text-lg font-bold text-foreground">AcademIQ</span>
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 ring-1 ring-primary/25 group-hover:ring-primary/50">
+              <GraduationCap className="h-3.5 w-3.5 text-primary" />
+            </div>
+            <span className="text-sm font-bold tracking-tight text-foreground">
+              AcademIQ
+            </span>
           </Link>
-          <Button variant="outline" size="sm" onClick={handleLogout}>
+          <Button variant="outline" size="sm" onClick={handleLogout} className="h-8">
             <LogOut className="h-4 w-4" />
-            Logout
           </Button>
         </div>
         <nav
@@ -73,30 +77,44 @@ export function AppHeader() {
         </nav>
       </div>
 
-      {/* Desktop: single row — logo | nav links | logout */}
-      <div className="container hidden h-16 items-center justify-between gap-6 md:flex">
+      <div className="container hidden h-14 items-center justify-between gap-6 md:flex">
         <Link
           href="/dashboard"
-          className="flex shrink-0 items-center gap-2 transition-opacity hover:opacity-80"
+          className="group flex shrink-0 items-center gap-2.5 transition-opacity hover:opacity-80"
         >
-          <GraduationCap className="h-7 w-7 text-primary" />
-          <span className="text-lg font-bold text-foreground">AcademIQ</span>
+          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 ring-1 ring-primary/25 group-hover:ring-primary/50">
+            <GraduationCap className="h-3.5 w-3.5 text-primary" />
+          </div>
+          <span className="text-sm font-bold tracking-tight text-foreground">
+            AcademIQ
+          </span>
         </Link>
 
-        <nav
-          className="flex items-center gap-1"
-          aria-label="Student navigation"
-        >
+        <nav className="flex items-center gap-1" aria-label="Student navigation">
           <NavLinks pathname={pathname} />
         </nav>
 
-        <div className="flex shrink-0 items-center gap-3">
-          {user && (
-            <span className="text-sm text-muted-foreground">{user.fullName}</span>
-          )}
-          <Button variant="outline" size="sm" onClick={handleLogout}>
-            <LogOut className="h-4 w-4" />
-            Logout
+        <div className="flex shrink-0 items-center gap-2">
+          <Link
+            href="/insights"
+            className="hidden items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground sm:flex"
+          >
+            <Brain className="h-3.5 w-3.5" />
+            Insights
+          </Link>
+          {user ? (
+            <span className="hidden max-w-[140px] truncate text-xs text-muted-foreground sm:inline">
+              {user.fullName}
+            </span>
+          ) : null}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleLogout}
+            className="h-8 gap-1.5 border-border/60 bg-card/50 text-xs"
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            Sign out
           </Button>
         </div>
       </div>

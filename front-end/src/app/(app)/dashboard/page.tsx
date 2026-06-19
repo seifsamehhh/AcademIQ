@@ -14,6 +14,7 @@ import {
 import type { DemoCourseResult, StudentResults, Course } from "@/lib/types";
 import { ApiErrorAlert } from "@/components/common/ApiErrorAlert";
 import { GradeImportPanel } from "@/components/dashboard/GradeImportPanel";
+import { PageHeader } from "@/components/mission-control/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -136,21 +137,15 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-bold text-foreground">
-          Welcome, {displayName}
-        </h1>
-        <p className="text-muted-foreground">
-          Signed in as <span className="font-medium">{signedInAs}</span>
-          {results?.dataSource === "synced" && results.lastSync ? (
-            <>
-              {" "}
-              · Last Moodle sync{" "}
-              {new Date(results.lastSync).toLocaleString()}
-            </>
-          ) : null}
-        </p>
-      </div>
+      <PageHeader
+        eyebrow="Mission Control"
+        title={`Welcome, ${displayName}`}
+        description={
+          results?.dataSource === "synced" && results.lastSync
+            ? `Signed in as ${signedInAs} · Last Moodle sync ${new Date(results.lastSync).toLocaleString()}`
+            : `Signed in as ${signedInAs}`
+        }
+      />
 
       {error ? <ApiErrorAlert message={error} /> : null}
 

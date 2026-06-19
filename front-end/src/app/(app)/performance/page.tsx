@@ -14,6 +14,7 @@ import { LimitedInsightCard } from "@/components/performance/LimitedInsightCard"
 import { CourseAverageCard } from "@/components/performance/CourseAverageCard";
 import { ActivityStatsNotice } from "@/components/performance/ActivityStatsNotice";
 import { CourseStatistics } from "@/components/performance/CourseStatistics";
+import { PageHeader } from "@/components/mission-control/PageHeader";
 import { buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -95,12 +96,11 @@ export default function PerformancePage() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-bold text-foreground">Performance Analysis</h1>
-        <p className="text-muted-foreground">
-          View course activity, resolved grades, and performance predictions with guidance.
-        </p>
-      </div>
+      <PageHeader
+        eyebrow="Course Intelligence"
+        title="Performance Analysis"
+        description="View course activity, resolved grades, and performance predictions with guidance."
+      />
 
       {error ? (
         <ApiErrorAlert message={error} onRetry={() => setReloadKey((k) => k + 1)} />

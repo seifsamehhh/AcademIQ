@@ -8,6 +8,7 @@ import { CourseSelect } from "@/components/common/CourseSelect";
 import { ApiErrorAlert } from "@/components/common/ApiErrorAlert";
 import { MaterialSelect, isMaterialSelectable } from "@/components/quiz/MaterialSelect";
 import { QuizView } from "@/components/quiz/QuizView";
+import { PageHeader } from "@/components/mission-control/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -265,52 +266,53 @@ export default function QuizPage() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-bold text-foreground">Quiz Generation</h1>
-        <p className="text-muted-foreground">
-          Choose a course, select ready learning materials, then generate a quiz
-          from each file&apos;s own content.
-        </p>
-      </div>
+      <PageHeader
+        eyebrow="AI Study Tools"
+        title="Quiz Generation"
+        description="Choose a course, select ready learning materials, then generate a quiz from each file's own content."
+      />
 
       {error ? <ApiErrorAlert message={error} /> : null}
 
-      {courses.length ? (
-        <CourseSelect
-          courses={courses}
-          value={selectedCourse}
-          onChange={handleCourseChange}
-        />
-      ) : (
-        <Skeleton className="h-16 w-full max-w-sm" />
-      )}
-
-      {materials ? (
-        <MaterialSelect
-          materials={materials}
-          selectedIds={selectedMaterials}
-          onToggle={toggleMaterial}
-        />
-      ) : (
-        <Skeleton className="h-48 w-full" />
-      )}
-
-      <Button
-        onClick={handleGenerate}
-        disabled={selectedMaterials.length === 0 || isGenerating}
-      >
-        {isGenerating ? (
-          <>
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Generating...
-          </>
+      <div className="mc-card p-5 space-y-6">
+        {courses.length ? (
+          <CourseSelect
+            courses={courses}
+            value={selectedCourse}
+            onChange={handleCourseChange}
+          />
         ) : (
-          <>
-            <Sparkles className="h-4 w-4" />
-            Generate Quiz
-          </>
+          <Skeleton className="h-16 w-full max-w-sm" />
         )}
-      </Button>
+
+        {materials ? (
+          <MaterialSelect
+            materials={materials}
+            selectedIds={selectedMaterials}
+            onToggle={toggleMaterial}
+          />
+        ) : (
+          <Skeleton className="h-48 w-full" />
+        )}
+
+        <Button
+          onClick={handleGenerate}
+          disabled={selectedMaterials.length === 0 || isGenerating}
+          className="glow-primary-sm"
+        >
+          {isGenerating ? (
+            <>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Generating...
+            </>
+          ) : (
+            <>
+              <Sparkles className="h-4 w-4" />
+              Generate Quiz
+            </>
+          )}
+        </Button>
+      </div>
 
       {quiz && <QuizView quiz={quiz} />}
 

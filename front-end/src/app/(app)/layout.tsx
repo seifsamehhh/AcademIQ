@@ -8,9 +8,10 @@ export default function AppLayout({
 }) {
   return (
     <AuthGuard>
-      <div className="flex min-h-screen flex-col">
+      <div className="relative flex min-h-screen flex-col bg-background">
+        <div className="pointer-events-none fixed inset-0 bg-spotlight opacity-50" />
         <AppHeader />
-        <main className="flex-1 bg-background">
+        <main className="relative flex-1">
           <div className="container py-8">{children}</div>
         </main>
       </div>

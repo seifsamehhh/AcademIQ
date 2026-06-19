@@ -1,94 +1,58 @@
 @import "tailwindcss";
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
 
 /*
-  AcademIQ design system.
-  Colors are HSL channel values (no hsl() wrapper) so they can be composed
-  with alpha in utilities, e.g. bg-primary/10. Mapped to Tailwind v4 tokens
-  in the @theme inline block below.
+  Mission Control design system (dark-first).
+  HSL channel values for Tailwind v4 @theme composition.
 */
 
 :root {
-  --background: 0 0% 100%;
-  --foreground: 248 30% 15%;
+  --background: 224 71% 4%;
+  --foreground: 220 20% 92%;
 
-  --card: 252 30% 96%;
-  --card-foreground: 248 30% 15%;
+  --card: 224 55% 7%;
+  --card-foreground: 220 20% 92%;
 
-  --popover: 0 0% 100%;
-  --popover-foreground: 248 30% 15%;
+  --popover: 224 55% 9%;
+  --popover-foreground: 220 20% 92%;
 
-  --primary: 252 58% 60%;
+  --primary: 239 84% 67%;
   --primary-foreground: 0 0% 100%;
 
-  --secondary: 252 30% 94%;
-  --secondary-foreground: 248 30% 15%;
+  --secondary: 224 35% 12%;
+  --secondary-foreground: 220 20% 85%;
 
-  --muted: 252 20% 94%;
-  --muted-foreground: 248 15% 45%;
+  --muted: 224 35% 10%;
+  --muted-foreground: 220 15% 48%;
 
-  --accent: 252 40% 92%;
-  --accent-foreground: 248 30% 15%;
+  --accent: 224 35% 14%;
+  --accent-foreground: 220 20% 92%;
 
-  --destructive: 0 84% 60%;
+  --destructive: 0 72% 55%;
   --destructive-foreground: 0 0% 100%;
 
-  /* Status palette (burnout / performance) */
-  --success: 142 71% 45%;
+  --success: 160 84% 39%;
   --success-foreground: 0 0% 100%;
+
   --warning: 38 92% 50%;
   --warning-foreground: 0 0% 100%;
 
-  --border: 252 20% 88%;
-  --input: 252 20% 88%;
-  --ring: 252 58% 60%;
+  --border: 224 35% 13%;
+  --input: 224 45% 8%;
+  --ring: 239 84% 67%;
 
   --radius: 0.75rem;
 
-  /* Landing / auth custom tokens */
-  --footer-bg: 0 0% 8%;
-  --footer-foreground: 0 0% 95%;
-  --auth-start: 0 0% 18%;
-  --auth-end: 0 0% 6%;
-}
+  --footer-bg: 224 71% 3%;
+  --footer-foreground: 220 15% 55%;
+  --auth-start: 224 71% 4%;
+  --auth-end: 224 71% 2%;
 
-.dark {
-  --background: 248 30% 8%;
-  --foreground: 0 0% 95%;
-
-  --card: 248 30% 12%;
-  --card-foreground: 0 0% 95%;
-
-  --popover: 248 30% 12%;
-  --popover-foreground: 0 0% 95%;
-
-  --primary: 252 58% 60%;
-  --primary-foreground: 0 0% 100%;
-
-  --secondary: 248 25% 18%;
-  --secondary-foreground: 0 0% 95%;
-
-  --muted: 248 25% 18%;
-  --muted-foreground: 248 15% 60%;
-
-  --accent: 248 25% 18%;
-  --accent-foreground: 0 0% 95%;
-
-  --destructive: 0 62% 40%;
-  --destructive-foreground: 0 0% 100%;
-
-  --success: 142 60% 45%;
-  --success-foreground: 0 0% 100%;
-  --warning: 38 92% 55%;
-  --warning-foreground: 0 0% 100%;
-
-  --border: 248 25% 20%;
-  --input: 248 25% 20%;
-  --ring: 252 58% 60%;
-
-  --footer-bg: 0 0% 4%;
-  --footer-foreground: 0 0% 90%;
-  --auth-start: 0 0% 14%;
-  --auth-end: 0 0% 4%;
+  --chart-1: 239 84% 67%;
+  --chart-2: 160 84% 39%;
+  --chart-3: 38 92% 50%;
+  --chart-4: 270 60% 60%;
+  --chart-5: 200 80% 55%;
 }
 
 @theme inline {
@@ -136,7 +100,7 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 4px);
 
-  --font-sans: var(--font-geist-sans);
+  --font-sans: "Inter", var(--font-geist-sans), system-ui, sans-serif;
   --font-mono: var(--font-geist-mono);
 }
 
@@ -145,13 +109,66 @@
     border-color: hsl(var(--border));
   }
 
+  html {
+    background-color: hsl(var(--background));
+  }
+
   body {
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
+    font-family: "Inter", var(--font-geist-sans), system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
   }
 }
 
-/* Centered, padded content container (replaces the Tailwind v3 container plugin) */
+@layer utilities {
+  .glow-primary {
+    box-shadow:
+      0 0 20px hsl(var(--primary) / 0.25),
+      0 0 60px hsl(var(--primary) / 0.08);
+  }
+
+  .glow-primary-sm {
+    box-shadow:
+      0 0 10px hsl(var(--primary) / 0.2),
+      0 0 30px hsl(var(--primary) / 0.06);
+  }
+
+  .bg-grid {
+    background-image:
+      linear-gradient(hsl(var(--border) / 0.4) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--border) / 0.4) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+
+  .bg-spotlight {
+    background:
+      radial-gradient(
+        ellipse 80% 50% at 50% -10%,
+        hsl(var(--primary) / 0.12) 0%,
+        transparent 70%
+      ),
+      hsl(var(--background));
+  }
+
+  .glass {
+    background: hsl(var(--card) / 0.8);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid hsl(var(--border) / 0.6);
+  }
+
+  .mc-card {
+    @apply rounded-xl border border-border/50 bg-card/50 backdrop-blur-sm;
+  }
+}
+
 .container {
   width: 100%;
   margin-inline: auto;
@@ -167,5 +184,27 @@
 @media (min-width: 1400px) {
   .container {
     max-width: 1400px;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

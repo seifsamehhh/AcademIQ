@@ -336,6 +336,9 @@ export interface LearningMaterial {
   sortLinkRank?: number;
   materialKind?: string;
   materialNumber?: number;
+  /** Future import pipeline fields (optional). */
+  contentSource?: string | null;
+  originalFilename?: string | null;
   isLinkWrapper?: boolean;
   hasRealFileSibling?: boolean;
   missingFromDb?: boolean;
