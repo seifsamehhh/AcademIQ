@@ -1669,6 +1669,7 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         user_message += " Already-ready materials were skipped."
     if skipped_non_quiz:
         user_message += f" Skipped {skipped_non_quiz} non-quiz Moodle items."
+    user_message += " Quiz materials are ready."
 
     unique_input_ids = {
         str(_normalize_incoming_material_item(item).get("material_id") or "")

@@ -44,9 +44,19 @@ def main() -> None:
         f"Imported: {report.get('imported_count')} "
         f"(ready: {report.get('imported_ready_count')}) | "
         f"Duplicates: {report.get('duplicates_count')} | "
-        f"Cache hits: {report.get('cache_hit_count')} | "
         f"Missing expected: {len(report.get('missing_expected_materials') or [])}"
     )
+    va = report.get("quiz_visibility_audit") or {}
+    if va:
+        print(
+            "\n--- Quiz visibility ---\n"
+            f"Visible lectures: {va.get('visible_lectures')} "
+            f"(imported w/content: {va.get('expected_imported_lectures')}) | "
+            f"Visible labs: {va.get('visible_labs')} "
+            f"(imported w/content: {va.get('expected_imported_labs')}) | "
+            f"Wrongly not uploaded: {len(va.get('wrongly_not_uploaded_imported') or [])} | "
+            f"Wrongly in Other Moodle: {len(va.get('wrongly_classified_other_moodle') or [])}"
+        )
 
 
 if __name__ == "__main__":

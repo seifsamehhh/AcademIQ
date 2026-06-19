@@ -146,24 +146,24 @@ def stabilize_attempted_empty_materials(course_id: str) -> int:
     return updated
 
 
-_SORT_GROUP_LABELS = [
-    "Lecture",
-    "Lab",
-    "Revision",
-    "Notes/Tutorial/Slides",
-    "Other Educational",
-    "Non-quiz / Admin",
-]
+_SORT_GROUP_LABELS: Dict[int, str] = {
+    0: "Lecture",
+    2: "Revision",
+    3: "Notes/Tutorial/Slides",
+    4: "Other Educational",
+    5: "Lab",
+    6: "Non-quiz / Admin",
+}
 
 _KIND_SORT_GROUP: Dict[str, int] = {
     "lecture": 0,
     "lecture_link": 0,
-    "lab": 1,
-    "lab_link": 1,
     "revision": 2,
     "notes": 3,
     "other_educational": 4,
-    "other_moodle_item": 5,
+    "lab": 5,
+    "lab_link": 5,
+    "other_moodle_item": 6,
 }
 
 _LINK_FILE_TYPES = frozenset({"link", "url", "html"})
@@ -392,6 +392,107 @@ def extract_material_number(title: str, material_kind: str) -> int:
     return 9999
 
 
+def resolve_material_number(
+    doc: Dict[str, Any],
+    title: str,
+    material_kind: str,
+) -> int:
+    """Prefer stored material_number, then title, then original_filename."""
+    stored = doc.get("material_number")
+    if isinstance(stored, int) and stored < 9999:
+        return int(stored)
+    if isinstance(stored, str) and stored.strip().isdigit():
+        n = int(stored.strip())
+        if n < 9999:
+            return n
+    for source in (title, str(doc.get("original_filename") or "")):
+        if not source:
+            continue
+        n = extract_material_number(source, material_kind)
+        if n < 9999:
+            return n
+    return 9999
+
+
+_IMPORT_SOURCE = "course_material_import"
+
+
+def _apply_import_content_status(
+    doc: Dict[str, Any],
+    content_len: int,
+    raw_file_type: str,
+    content: str,
+) -> Optional[Dict[str, Any]]:
+    """
+  When materials were imported locally, trust stored content for quiz UI status.
+  Never show Not uploaded when content_text exists.
+    """
+    if content_len <= 0:
+        return None
+    is_import = doc.get("content_source") == _IMPORT_SOURCE or bool(doc.get("imported_at"))
+    stored_ready = bool(doc.get("ready_for_quiz")) or str(doc.get("quiz_status") or "") in (
+        "ready",
+        "limited_ready",
+    )
+    if not is_import and not stored_ready:
+        return None
+
+    probe_count = 0
+    eligibility_meta: Dict[str, Any] = {}
+    if content:
+        _, reason_code, eligibility_meta = assess_quiz_eligibility(
+            content,
+            file_type=raw_file_type,
+            probe=True,
+        )
+        probe_count = int(eligibility_meta.get("probe_question_count") or 0)
+
+    stored_qs = str(doc.get("quiz_status") or "")
+    if stored_qs in ("ready", "limited_ready") and stored_ready:
+        quiz_status = stored_qs
+    elif probe_count >= MIN_READY_QUESTIONS or content_len >= MIN_QUIZ_CONTENT_CHARS:
+        quiz_status = "ready"
+    elif probe_count >= MIN_LIMITED_QUESTIONS or content_len >= 200:
+        quiz_status = "limited_ready"
+    else:
+        quiz_status = "limited_ready"
+
+    content_note = None
+    if quiz_status == "limited_ready":
+        content_note = LIMITED_QUIZ_NOTE
+
+    selectable = True
+    return {
+        "quiz_status": quiz_status,
+        "quiz_status_reason": content_note,
+        "reason": content_note,
+        "is_educational_material": True,
+        "is_non_quiz_material": False,
+        "quiz_generation_eligible": selectable,
+        "ready_for_quiz": quiz_status == "ready",
+        "will_generate_successfully": True,
+        "why_not_ready": None,
+        "visible_in_main_list": True,
+        "visible_in_other_items": False,
+        "selectable": selectable,
+        "probe_question_count": probe_count,
+        "question_count_possible": probe_count,
+        "probe_failure_reason": eligibility_meta.get("probe_failure_reason"),
+        "eligibility_meta": {
+            k: eligibility_meta.get(k)
+            for k in (
+                "probe_engine",
+                "lecture_concept_count",
+                "definition_pair_count",
+                "total_concepts",
+                "concept_candidate_count",
+                "cleaned_text_length",
+            )
+            if eligibility_meta.get(k) is not None
+        },
+    }
+
+
 def material_display_sort_key(display: Dict[str, Any]) -> Tuple[int, int, int, str]:
     sg = display.get("sort_group")
     sn = display.get("material_number")
@@ -411,6 +512,8 @@ def _is_real_lecture_lab_file(display: Dict[str, Any]) -> bool:
     kind = display.get("material_kind")
     if kind not in ("lecture", "lab"):
         return False
+    if int(display.get("content_text_length") or 0) >= 200:
+        return True
     ft = (display.get("file_type") or "").lower()
     if ft in _REAL_CONTENT_FILE_TYPES:
         return True
@@ -445,6 +548,10 @@ def _apply_link_wrapper_visibility(displays: List[Dict[str, Any]]) -> None:
         d["has_real_file_sibling"] = sibling
 
         if sibling:
+            # Keep imported / content-rich rows visible even when a file sibling exists.
+            if int(d.get("content_text_length") or 0) > 0:
+                d["has_real_file_sibling"] = True
+                continue
             d["visible_in_main_list"] = False
             d["visible_in_other_items"] = True
             d["selectable"] = False
@@ -545,7 +652,19 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     material_kind = classify_material_kind(title, raw_file_type, is_non_quiz)
-    material_number = extract_material_number(title, material_kind)
+    stored_kind = str(doc.get("material_kind") or "").strip()
+    if stored_kind and stored_kind not in ("other_moodle_item", ""):
+        if not is_non_quiz or stored_kind in (
+            "lecture",
+            "lab",
+            "revision",
+            "notes",
+            "other_educational",
+            "lecture_link",
+            "lab_link",
+        ):
+            material_kind = stored_kind
+    material_number = resolve_material_number(doc, title, material_kind)
     sort_link_rank = 1 if is_link_wrapper else 0
     sort_group = _KIND_SORT_GROUP.get(material_kind, 5)
     if is_non_quiz:
@@ -561,9 +680,7 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
         "has_real_file_sibling": False,
         "sort_link_rank": sort_link_rank,
         "sort_group": sort_group,
-        "sort_group_label": (
-            _SORT_GROUP_LABELS[sort_group] if sort_group < len(_SORT_GROUP_LABELS) else "Other"
-        ),
+        "sort_group_label": _SORT_GROUP_LABELS.get(sort_group, "Other"),
         "sort_number": material_number,
         "content_text_length": content_len,
         "probe_question_count": 0,
@@ -668,7 +785,7 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
 
     selectable = quiz_status in ("ready", "limited_ready")
 
-    return {
+    result: Dict[str, Any] = {
         **base,
         "quiz_status": quiz_status,
         "quiz_status_reason": content_note,
@@ -706,6 +823,17 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
         "bullet_line_count": eligibility_meta.get("bullet_line_count"),
         "concept_candidate_count": eligibility_meta.get("concept_candidate_count"),
     }
+
+    import_override = _apply_import_content_status(doc, content_len, raw_file_type, content)
+    if import_override:
+        result.update(import_override)
+        result["material_kind"] = material_kind
+        result["material_number"] = material_number
+        result["sort_group"] = sort_group
+        result["sort_number"] = material_number
+        result["content_text_length"] = content_len
+
+    return result
 
 
 def resolve_quiz_material_display(

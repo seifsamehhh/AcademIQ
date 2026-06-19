@@ -6,6 +6,7 @@ and audit helpers for Quiz Generation.
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -351,6 +352,8 @@ def audit_material_cache(email: str, course_id: str) -> Dict[str, Any]:
     )
 
     missing_expected: List[Dict[str, Any]] = []
+    visibility_audit = _build_quiz_visibility_audit(visible_docs)
+
     for kind_label, kind_values in (
         ("lecture", ("lecture", "lecture_link")),
         ("lab", ("lab", "lab_link")),
@@ -404,5 +407,98 @@ def audit_material_cache(email: str, course_id: str) -> Dict[str, Any]:
         "imported_count": imported_count,
         "imported_ready_count": imported_ready,
         "missing_expected_materials": missing_expected,
+        "quiz_visibility_audit": visibility_audit,
         "materials": rows,
+    }
+
+
+def _build_quiz_visibility_audit(docs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Per-course quiz UI visibility diagnostics for demo verification."""
+    from app.services.material_quiz_display import resolve_material_display
+
+    displays = [resolve_material_display(d) for d in docs]
+    imported = [d for d in docs if d.get("content_source") == "course_material_import"]
+
+    def _count_kind(kind_values: tuple[str, ...], in_main: bool = True) -> int:
+        n = 0
+        for doc, disp in zip(docs, displays):
+            kind = str(disp.get("material_kind") or doc.get("material_kind") or "")
+            if kind not in kind_values:
+                continue
+            if in_main and not disp.get("visible_in_main_list"):
+                continue
+            if disp.get("is_non_quiz_material"):
+                continue
+            n += 1
+        return n
+
+    imported_with_content = [
+        d for d in imported if content_text_length(d) > 0
+    ]
+    wrongly_not_uploaded = []
+    wrongly_other = []
+    for doc, disp in zip(docs, displays):
+        title = str(doc.get("title") or "")
+        if doc.get("content_source") == "course_material_import" and content_text_length(doc) > 0:
+            if disp.get("quiz_status") in ("not_uploaded", "extraction_failed"):
+                wrongly_not_uploaded.append(
+                    {
+                        "title": title,
+                        "quiz_status": disp.get("quiz_status"),
+                        "content_text_length": content_text_length(doc),
+                        "material_id": doc.get("material_id"),
+                    }
+                )
+        if disp.get("visible_in_other_items") and disp.get("is_educational_material"):
+            kind = str(disp.get("material_kind") or "")
+            if kind in ("lecture", "lab", "revision", "notes", "other_educational"):
+                wrongly_other.append(
+                    {
+                        "title": title,
+                        "material_kind": kind,
+                        "quiz_status": disp.get("quiz_status"),
+                        "material_id": doc.get("material_id"),
+                    }
+                )
+
+    # Bad sort: labs out of numeric order
+    bad_sort: List[Dict[str, Any]] = []
+    lab_nums: List[int] = []
+    for disp in displays:
+        if disp.get("material_kind") in ("lab", "lab_link") and disp.get("visible_in_main_list"):
+            num = disp.get("material_number")
+            if isinstance(num, int) and num < 9999:
+                lab_nums.append(num)
+    for i in range(len(lab_nums) - 1):
+        if lab_nums[i] > lab_nums[i + 1]:
+            bad_sort.append(
+                {
+                    "kind": "lab",
+                    "sequence": lab_nums,
+                    "issue": "non_numeric_order",
+                }
+            )
+            break
+
+    return {
+        "imported_rows": len(imported),
+        "imported_with_content": len(imported_with_content),
+        "visible_lectures": _count_kind(("lecture", "lecture_link")),
+        "visible_labs": _count_kind(("lab", "lab_link")),
+        "visible_revisions": _count_kind(("revision",)),
+        "expected_imported_lectures": sum(
+            1
+            for d in imported_with_content
+            if str(d.get("material_kind") or "") in ("lecture", "lecture_link")
+            or "lecture" in str(d.get("title") or "").lower()
+        ),
+        "expected_imported_labs": sum(
+            1
+            for d in imported_with_content
+            if str(d.get("material_kind") or "") in ("lab", "lab_link")
+            or re.search(r"(?i)\blab\s*\d", str(d.get("title") or ""))
+        ),
+        "wrongly_not_uploaded_imported": wrongly_not_uploaded,
+        "wrongly_classified_other_moodle": wrongly_other,
+        "bad_sort_examples": bad_sort,
     }

@@ -10,6 +10,7 @@ import {
   isReadyMaterial,
   isSkippedEducational,
   materialSubtitle,
+  normalizeMaterialForDisplay,
   sortMaterialsForDisplay,
 } from "@/lib/materialDisplay";
 
@@ -38,15 +39,17 @@ function isOtherMoodleItem(m: LearningMaterial): boolean {
 
 export function isMaterialSelectable(m: LearningMaterial): boolean {
   if (!isVisibleMaterial(m)) return false;
-  if (!isReadyMaterial(m)) return false;
-  return m.quizGenerationEligible === true;
+  const n = normalizeMaterialForDisplay(m);
+  if (!isReadyMaterial(n)) return false;
+  return n.quizGenerationEligible === true;
 }
 
 function statusBadge(m: LearningMaterial): {
   label: string;
   variant: "default" | "muted" | "destructive" | "warning";
 } {
-  switch (m.quizStatus) {
+  const n = normalizeMaterialForDisplay(m);
+  switch (n.quizStatus) {
     case "ready":
       return { label: "Ready for quiz", variant: "default" };
     case "limited_ready":
@@ -134,7 +137,7 @@ export function MaterialSelect({
   const [showOther, setShowOther] = useState(false);
   const [showSkipped, setShowSkipped] = useState(false);
 
-  const visible = materials.filter(isVisibleMaterial);
+  const visible = materials.filter(isVisibleMaterial).map(normalizeMaterialForDisplay);
   const readyList = sortMaterialsForDisplay(
     visible.filter((m) => isEducationalKind(m) && isReadyMaterial(m)),
   );
