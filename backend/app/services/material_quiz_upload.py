@@ -25,6 +25,14 @@ from app.services.material_quiz_display import (
     _LAB_NUM_RE,
     _LECTURE_NUM_RE,
 )
+from app.services.material_cache import (
+    build_extracted_content_fields,
+    content_text_length,
+    enrich_kind_fields,
+    is_extraction_cache_hit,
+    resolve_canonical_material,
+    TERMINAL_EXTRACTION_STATUSES,
+)
 from app.services.quiz_material_eligibility import assess_quiz_eligibility
 from app.services.student_data import (
     MIN_QUIZ_CONTENT_CHARS,
@@ -44,27 +52,8 @@ _READY_EXTRACTION_STATUSES = frozenset(
     {"success", "ready", "ready_for_quiz", "extracted"}
 )
 
-# After upload, these statuses are terminal — normal preflight must not re-download.
-_TERMINAL_EXTRACTION_STATUSES = frozenset(
-    {
-        "not_quiz_material",
-        "too_short",
-        "insufficient_text",
-        "insufficient_quiz_structure",
-        "unsupported",
-        "extraction_failed",
-        "failed",
-        "no_text",
-        "no_content",
-        "not_educational",
-        "not_enough_readable_text",
-        "admin_file",
-        "folder",
-        "assignment",
-        "grades",
-        "project_requirements",
-    }
-)
+# Terminal statuses — shared with material_cache (includes ready / limited_ready).
+_TERMINAL_EXTRACTION_STATUSES = TERMINAL_EXTRACTION_STATUSES
 
 
 _TITLE_STOP_WORDS = {"the", "a", "an", "and", "or", "for", "of", "to", "in", "is", "on", "at", "by"}
@@ -240,6 +229,27 @@ def _preflight_upload_decision(
             "Force reprocess requested",
             existing_chars,
             downloadable or url_like,
+        )
+
+    if is_extraction_cache_hit(existing_doc, force):
+        display = resolve_material_display(existing_doc)
+        display_status = str(display.get("quiz_status") or "")
+        if existing_chars > 0 or display_status in ("ready", "limited_ready"):
+            return (
+                False,
+                "cache_hit",
+                "Skipped — already processed (content cached)",
+                existing_chars,
+                downloadable,
+            )
+        return (
+            False,
+            "already_classified",
+            existing_doc.get("failure_reason")
+            or existing_doc.get("extraction_error")
+            or f"Terminal status: {existing_doc.get('extraction_status')}",
+            existing_chars,
+            downloadable,
         )
 
     if existing_chars >= MIN_QUIZ_CONTENT_CHARS:
@@ -443,12 +453,18 @@ def _find_canonical_learning_row(
 def _content_fields_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     """Extract quiz-relevant content fields for canonical merge."""
     text = (doc.get("content_text") or "").strip()
+    chars = int(doc.get("content_chars") or len(text))
     return {
         "content_text": text,
-        "content_chars": int(doc.get("content_chars") or len(text)),
+        "content_text_length": int(doc.get("content_text_length") or chars),
+        "content_chars": chars,
+        "content_hash": doc.get("content_hash"),
         "ready_for_quiz": bool(doc.get("ready_for_quiz")),
+        "quiz_generation_eligible": bool(doc.get("quiz_generation_eligible")),
+        "quiz_status": doc.get("quiz_status"),
         "extraction_status": doc.get("extraction_status"),
         "extraction_error": doc.get("extraction_error"),
+        "failure_reason": doc.get("failure_reason"),
         "processed_at": doc.get("processed_at"),
         "last_attempted_at": doc.get("last_attempted_at"),
         "metadata_only": False,
@@ -601,18 +617,6 @@ def resolve_material_identity(
     batch_cmid_titles = batch_cmid_titles or {}
     stable_key = stable_material_key or _compute_stable_material_key(course_id, norm)
 
-    # 1. Exact Mongo _id from preflight
-    if db_id:
-        doc = material_repository.get_by_object_id(db_id)
-        if doc and str(doc.get("course_id")) == str(course_id):
-            canonical = _find_canonical_learning_row(
-                course_id, norm.get("title") or "", norm.get("file_type") or ""
-            )
-            if canonical and _canonical_learning_row_score(canonical) > _canonical_learning_row_score(doc):
-                return _identity_result(canonical, "canonical_over_db_id", stable_key)
-            return _identity_result(doc, "mongo_id", stable_key)
-
-    # 2. Explicit matched material_id from preflight
     if matched_material_id:
         doc = material_repository.get(course_id, str(matched_material_id))
         if doc:
@@ -624,13 +628,15 @@ def resolve_material_identity(
                     return _identity_result(canonical, "canonical_over_matched_id", stable_key)
             return _identity_result(doc, "matched_material_id", stable_key)
 
-    # 3. stable_material_key
-    doc = material_repository.get_by_stable_key(course_id, stable_key)
-    if doc:
-        return _identity_result(doc, "stable_material_key", stable_key)
+    result = resolve_canonical_material(
+        course_id,
+        norm,
+        db_id=db_id,
+        stable_material_key=stable_key,
+        batch_cmid_titles=batch_cmid_titles,
+    )
 
-    # 4–6. URL / cmid / hash allocation (same as save-detected)
-    allocated_id, existing, strategy = _allocate_material_id(course_id, norm, batch_cmid_titles)
+    existing = result.get("existing_doc")
     if existing:
         canonical = _find_canonical_learning_row(
             course_id, norm.get("title") or "", norm.get("file_type") or ""
@@ -638,9 +644,9 @@ def resolve_material_identity(
         if canonical and canonical.get("material_id") != existing.get("material_id"):
             if _canonical_learning_row_score(canonical) >= _canonical_learning_row_score(existing):
                 return _identity_result(canonical, "canonical_over_existing", stable_key)
-        return _identity_result(existing, strategy, stable_key)
+        return result
 
-    return _identity_result(None, strategy, stable_key, allocated_id)
+    return result
 
 
 def _allocate_material_id(
@@ -1026,6 +1032,9 @@ def save_detected_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
         base_doc["material_id"] = material_id
         base_doc["source"] = "moodle_sync"
         base_doc["stable_material_key"] = stable_key
+        base_doc.update(enrich_kind_fields(title, raw_file_type))
+        if activity_url:
+            base_doc["original_moodle_url"] = activity_url
         if activity_url:
             base_doc["normalized_source_url"] = _normalize_source_url(activity_url)
         if resolved_url:
@@ -1373,10 +1382,23 @@ def preflight_materials(payload: Dict[str, Any]) -> Dict[str, Any]:
             })
             continue
 
-        # ── B: Phase 1 — in-memory lookup (fast, uses bulk-load data) ─────────
+        # ── B0: Shared canonical identity resolver (before fuzzy fallbacks) ───
         existing_doc = None
         matched_by = None
+        identity_first = resolve_material_identity(
+            course_id,
+            norm,
+            stable_material_key=str(item.get("stable_material_key") or "").strip() or None,
+            matched_material_id=str(
+                item.get("material_id") or item.get("id") or ""
+            ).strip()
+            or None,
+        )
+        if identity_first.get("existing_doc"):
+            existing_doc = identity_first["existing_doc"]
+            matched_by = f"identity:{identity_first.get('match_strategy')}"
 
+        # ── B: Phase 1 — in-memory lookup (fast, uses bulk-load data) ─────────
         # M1: exact material_id (cmid)
         if material_id and material_id in by_material_id:
             existing_doc = by_material_id[material_id]
@@ -2458,10 +2480,51 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     # ── Step 2: caching — skip re-extraction if already processed ───────────
-    existing_doc = material_repository.get(course_id, material_id)
+    existing_doc = material_repository.get_by_object_id(target_db_id) or target_doc
+    if existing_doc and not force and is_extraction_cache_hit(existing_doc, force):
+        existing_chars = content_text_length(existing_doc)
+        probe_fields = _derive_readiness_from_probe(
+            existing_doc.get("content_text") or "", str(file_type),
+        )
+        already_ready = bool(existing_doc.get("ready_for_quiz")) or probe_fields["ready_for_quiz"]
+        display = resolve_material_display(existing_doc)
+        quiz_status_out = str(
+            display.get("quiz_status")
+            or existing_doc.get("quiz_status")
+            or probe_fields.get("quiz_probe_status")
+            or "not_uploaded"
+        )
+        return _package_upload_response(
+            course_id,
+            target_db_id,
+            False,
+            payload,
+            {
+                "status": "skipped_existing",
+                "already_ready": already_ready,
+                "course_id": course_id,
+                "material_id": material_id,
+                "resolved_from_material_id": (
+                    raw_material_id if raw_material_id != material_id else None
+                ),
+                "title": existing_doc.get("title", title),
+                "chars": existing_chars,
+                "ready_for_quiz": already_ready,
+                "hasContent": already_ready,
+                "extraction_status": existing_doc.get("extraction_status")
+                or probe_fields["extraction_status"],
+                "extraction_error": existing_doc.get("extraction_error"),
+                "probe_question_count": existing_doc.get("probe_question_count")
+                or probe_fields.get("probe_question_count"),
+                "quiz_status": quiz_status_out,
+                "content_note": "Skipped — already processed (cache hit)",
+                "inserted": False,
+            },
+        )
+
     if existing_doc and not force:
         existing_status = str(existing_doc.get("extraction_status") or "")
-        existing_chars = _content_chars_from_doc(existing_doc)
+        existing_chars = content_text_length(existing_doc)
 
         if existing_status in _TERMINAL_EXTRACTION_STATUSES:
             return _package_upload_response(
@@ -2569,6 +2632,40 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
         ready_for_quiz = probe_fields["ready_for_quiz"]
         probe_count = probe_fields.get("probe_question_count", 0)
 
+    extracted_payload = (
+        build_extracted_content_fields(
+            text,
+            probe_fields if chars > 0 else {
+                "extraction_status": extraction_status,
+                "extraction_error": extraction_error,
+                "ready_for_quiz": ready_for_quiz,
+                "quiz_probe_status": extraction_status if extraction_status == "extraction_failed" else "not_uploaded",
+            },
+            source_url=str(source_url or "") or None,
+            resolved_url=resolved_url_payload,
+        )
+        if chars > 0
+        else {
+            "content_text": "",
+            "content_text_length": 0,
+            "content_chars": 0,
+            "content_hash": None,
+            "ready_for_quiz": False,
+            "quiz_generation_eligible": False,
+            "quiz_status": (
+                "extraction_failed"
+                if extraction_status == "extraction_failed"
+                else extraction_status
+            ),
+            "extraction_status": extraction_status,
+            "extraction_error": extraction_error,
+            "failure_reason": extraction_error,
+            "processed_at": now,
+            "last_attempted_at": now,
+            "metadata_only": False,
+        }
+    )
+
     material_doc = build_material_doc(
         {
             "id": material_id,
@@ -2592,19 +2689,13 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
     material_doc.update(
         {
             "source": "moodle_sync",
-            "content_text": text,
-            "content_chars": chars,
-            "ready_for_quiz": ready_for_quiz,
-            "extraction_status": extraction_status,
-            "extraction_error": extraction_error,
             "uploaded_by_email": user_email or None,
             "uploaded_by_user_id": academiq_user_id,
-            "processed_at": now,
-            "last_attempted_at": now,
-            "metadata_only": False,
             "extractor_version": CURRENT_EXTRACTOR_VERSION,
+            **extracted_payload,
         }
     )
+    material_doc.update(enrich_kind_fields(title, str(file_type)))
     if source_url:
         material_doc["url"] = source_url
     if resolved_url_payload:
@@ -2620,36 +2711,24 @@ def process_material_upload_for_quiz(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     inserted = material_repository.upsert(material_doc)
 
-    mirror_error = (
-        _normalize_upload_failure_reason(str(extraction_error or ""), payload)
-        if extraction_status == "extraction_failed"
-        else extraction_error
-    )
+    if extraction_status == "extraction_failed":
+        normalized_fail = _normalize_upload_failure_reason(
+            str(extraction_error or ""), payload
+        )
+        extracted_payload["extraction_error"] = normalized_fail
+        extracted_payload["failure_reason"] = normalized_fail
+
     material_repository.update_by_object_id(
         target_db_id,
         {
-            "content_text": text,
-            "content_chars": chars,
-            "ready_for_quiz": ready_for_quiz,
-            "extraction_status": extraction_status,
-            "extraction_error": mirror_error,
-            "processed_at": now,
-            "last_attempted_at": now,
-            "metadata_only": False,
+            **extracted_payload,
             "extractor_version": CURRENT_EXTRACTOR_VERSION,
         },
     )
 
     if chars > 0:
         sync_fields = {
-            "content_text": text,
-            "content_chars": chars,
-            "ready_for_quiz": ready_for_quiz,
-            "extraction_status": extraction_status,
-            "extraction_error": extraction_error,
-            "processed_at": now,
-            "last_attempted_at": now,
-            "metadata_only": False,
+            **extracted_payload,
             "extractor_version": CURRENT_EXTRACTOR_VERSION,
         }
         synced_id = _sync_extracted_content_to_canonical_row(

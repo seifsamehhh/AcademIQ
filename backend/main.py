@@ -280,6 +280,19 @@ def debug_raw_course_materials(email: str, course_id: str):
     }
 
 
+@app.get("/debug/material-cache-audit/{email}/{course_id}")
+def debug_material_cache_audit(email: str, course_id: str):
+    """
+    Per-course material extraction cache audit: readiness counts, cache hits,
+    and per-row identity/extraction fields (no content_text bodies).
+    """
+    from app.services.material_cache import audit_material_cache
+
+    if not connect_database():
+        raise HTTPException(status_code=503, detail="Database unreachable")
+    return audit_material_cache(email, course_id)
+
+
 @app.get("/debug/material-processing-audit/{email}")
 def debug_material_processing_audit(email: str):
     """
