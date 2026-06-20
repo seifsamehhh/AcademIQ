@@ -39,7 +39,8 @@ _VAGUE_GENERIC_RE = re.compile(
     re.I,
 )
 _BROKEN_OPTION_END_RE = re.compile(
-    r"\b(the|about|by|of|a|an|to|in|for|with|and|or|as|on|at|from|approx|include|refers to)\s*\.?\s*$",
+    r"\b(the|about|by|of|a|an|to|in|for|with|and|or|as|on|at|from|approx|include|refers to|"
+    r"iff|that|histories)\s*\.?\s*$",
     re.I,
 )
 _TECH_TERM_RE = re.compile(r"^[A-Z]{2,10}$")
@@ -57,7 +58,24 @@ _VAGUE_CONCEPT_RE = re.compile(
 _SHOUTY_STEM_RE = re.compile(r"\b[A-Z]{3,}(?:\s+[A-Z]{3,}){2,}")
 _BAD_STEM_RE = re.compile(
     r"(?i)^what\s+is\s+(change|make|select|number of|task of)\b|"
-    r"^what\s+is\s+information from\b"
+    r"^what\s+is\s+information from\b|"
+    r"purpose of if\b|describes if\b|explains if\b|"
+    r"purpose of walk\b|describes walk\b|"
+    r"whose goal\b|next can be\b|geography of the\b|"
+    r"purpose of the environment\b|describes the environment\b"
+)
+_ARABIC_SCRIPT_RE = re.compile(r"[\u0600-\u06FF]")
+_OCR_SPLIT_CAPS_RE = re.compile(r"(?<![A-Za-z])[B-HJ-Z]\s+[a-z]{2,}")
+_JUNK_OPTION_CONTENT_RE = re.compile(
+    r"(?i)\beg\b|american heritage|i can relax|concrete architectures|"
+    r"perlocution|steve opens the window|users\)|"
+    r"information filtering agent key|different types of intelligent|"
+    r"histories that\.?$|behaviorally equivalent iff|to all environments|"
+    r"deduction rules that govern|thatea\s*=|example\s*x\d|\bx\d\s+\d|"
+    r"key characteristics of intelligent agents|one that acts or has the power|"
+    r"general definitions of agent|logic based agents it|"
+    r"cardmembers maximize their rewards|partially observable\s*,\s*internal state|"
+    r"^:\s*the deduction|chatbots are primarily designed for sharing"
 )
 _FILENAME_CONCEPT_RE = re.compile(
     r"(?i)\.(pdf|pptx?|ppsx)|_|lecture\s*\d+|lab\s*\d+|test\s+notes|algorithm\s+steps"
@@ -96,6 +114,24 @@ _GENERIC_OPTION_RE = re.compile(
     r"^(none of the above|all of the above|not applicable|n/?a|true|false|yes|no|other)\s*$",
     re.I,
 )
+_ALLOWED_COMPOUND_CONCEPTS = frozenset(
+    {
+        "training set", "test set", "feature vector", "intelligent agent",
+        "multi agent system", "multi-agent system", "utility based agent",
+        "utility-based agent", "goal based agent", "goal-based agent",
+        "learning agent", "reactive agent", "deliberative agent",
+        "simple reflex agent", "model based reflex agent",
+        "model-based reflex agent", "information filtering agent",
+        "partially observable environment", "fully observable environment",
+        "belief desire intention", "belief-desire-intention",
+        "naive bayes", "bayes theorem", "edge detection", "image segmentation",
+        "image enhancement", "histogram equalization", "spatial filtering",
+        "pattern recognition", "supervised learning", "unsupervised learning",
+        "feature extraction", "decision theory", "bayesian classification",
+        "conditional independence", "maximum likelihood", "laplacian operator",
+        "sobel operator", "hough transform",
+    }
+)
 _WEAK_SINGLE_CONCEPTS = frozenset(
     {
         "length", "classifier", "features", "feature", "what", "which", "how",
@@ -108,6 +144,7 @@ _WEAK_SINGLE_CONCEPTS = frozenset(
         "rule", "rules", "terminology", "lightness", "width", "information",
         "trade", "label", "task", "they", "it", "we", "itself", "result",
         "and", "or", "but", "direction", "magnitude", "detector", "vector",
+        "walk", "iff", "geography", "users", "next",
     }
 )
 
@@ -222,6 +259,23 @@ _PRIORITY_TEACHABLE_TERMS = [
     "likelihood", "bayesian classification", "conditional independence",
     "maximum likelihood", "spatial filtering", "convolution", "gradient",
     "laplacian operator", "sobel operator", "hough transform",
+    "sensors", "actuators", "utility-based agent", "reactive agent",
+    "deliberative agent", "learning agent", "information filtering agent",
+    "goal-based agent", "model-based reflex agent", "simple reflex agent",
+    "partially observable environment", "fully observable environment",
+    "belief-desire-intention", "chatbot",
+]
+_EXTRA_GENERIC_DISTRACTORS = [
+    "It confuses training data with test data in machine learning.",
+    "It describes hardware wiring instead of the software concept.",
+    "It applies only to unsupervised learning, not this topic.",
+    "It is about image display settings, not agent reasoning.",
+    "It mixes up classification and regression tasks.",
+    "It refers to user interface design, not artificial intelligence.",
+    "It describes a database query, not an intelligent agent behavior.",
+    "It is a networking protocol detail, not a learning algorithm.",
+    "It explains file storage, not how agents perceive an environment.",
+    "It describes sorting arrays, not pattern recognition methods.",
 ]
 MIN_OPTION_WORDS = 6
 MAX_OPTION_WORDS = 35
@@ -290,6 +344,31 @@ def is_duplicate_label_concept(concept: str) -> bool:
     return False
 
 
+def is_slide_fragment_concept(concept: str) -> bool:
+    """Slide/OCR fragments that should never become question stems."""
+    c = (concept or "").strip()
+    if not c:
+        return True
+    low = c.lower()
+    if re.match(r"(?i)^if\s+(the\s+)?", low):
+        return True
+    if re.search(r"(?i)whose goal|next can be|geography of the", low):
+        return True
+    if re.match(r"(?i)^next\b", low):
+        return True
+    if re.search(r"(?i)\biff\s*$", low):
+        return True
+    if ")" in c and "(" not in c:
+        return True
+    if re.search(r"(?i)perlocution|american heritage|concrete architectures", low):
+        return True
+    if re.search(r"(?i)types of intelligent$|^intelligent$", low):
+        return True
+    if re.match(r"(?i)^(the\s+)?environment$", low):
+        return True
+    return False
+
+
 def clean_teachable_answer(raw: str, concept: str = "") -> str:
     """Normalize a material-backed answer line for MCQ options."""
     a = clean_option_text(raw)
@@ -328,12 +407,18 @@ def is_broken_definition_answer(answer: str) -> bool:
         return True
     if words[0].lower() in {"too", "hence", "given", "filtered", "bridged"} and len(words) < 10:
         return True
+    if _JUNK_OPTION_CONTENT_RE.search(a):
+        return True
+    if _ARABIC_SCRIPT_RE.search(a):
+        return True
     return False
 
 
 def is_teachable_concept(concept: str) -> bool:
     c = clean_concept_label(concept)
     if not c or is_weak_concept(c):
+        return False
+    if is_slide_fragment_concept(c):
         return False
     if is_heading_concept(c):
         return False
@@ -381,7 +466,10 @@ def extract_teachable_pairs(text: str, limit: int = 25) -> List[Tuple[str, str]]
         if not answer or is_broken_definition_answer(answer):
             for m in re.finditer(r"[A-Za-z][^.!?]{25,220}[.!?]", text or ""):
                 sent = re.sub(r"\s+", " ", m.group(0)).strip()
-                if term not in sent.lower():
+                if not re.search(
+                    rf"(?i)(?:^|\b){re.escape(term)}\b\s+(?:is|are|means|refers to|used to)",
+                    sent,
+                ):
                     continue
                 if re.search(r"f\s*\(|\(x,\s*y\)", sent):
                     continue
@@ -425,6 +513,86 @@ def extract_teachable_pairs(text: str, limit: int = 25) -> List[Tuple[str, str]]
             ranked.append((score, concept, answer))
 
     ranked.sort(key=lambda x: -x[0])
+    pairs = [(c, a) for _, c, a in ranked[:limit]]
+
+    if len(pairs) < min(limit, 5):
+        pairs = _mine_thin_content_pairs(text, pairs, limit)
+
+    return pairs[:limit]
+
+
+def _mine_thin_content_pairs(
+    text: str,
+    existing: List[Tuple[str, str]],
+    limit: int,
+) -> List[Tuple[str, str]]:
+    """Extra pair mining for shorter lecture slides (e.g. intelligent agents)."""
+    seen = {normalize_concept_key(c) for c, _ in existing}
+    ranked: List[Tuple[int, str, str]] = []
+    for concept, answer in existing:
+        ranked.append((len(answer.split()), concept, answer))
+
+    for term in (
+        "sensors", "actuators", "utility-based agent", "reactive agent",
+        "deliberative agent", "learning agent", "goal-based agent",
+        "model-based reflex agent", "simple reflex agent", "chatbot",
+        "partially observable", "fully observable", "multi-agent system",
+    ):
+        if term not in (text or "").lower():
+            continue
+        label = term.title() if "agent" not in term else term.replace("-", "-").title()
+        if term == "utility-based agent":
+            label = "Utility-Based Agent"
+        elif term == "goal-based agent":
+            label = "Goal-Based Agent"
+        elif term == "model-based reflex agent":
+            label = "Model-Based Reflex Agent"
+        elif term == "simple reflex agent":
+            label = "Simple Reflex Agent"
+        elif term == "learning agent":
+            label = "Learning Agent"
+        elif term == "multi-agent system":
+            label = "Multi-Agent System"
+        key = normalize_concept_key(term)
+        if key in seen or not is_teachable_concept(label):
+            continue
+        for m in re.finditer(
+            rf"\b{re.escape(term)}\b[^.!?]{{0,80}}[.!?]",
+            text or "",
+            re.I,
+        ):
+            sent = clean_teachable_answer(m.group(0), label)
+            if not re.search(
+                rf"(?i)(?:^|\b){re.escape(term)}\b\s+(?:is|are|means|refers to|used to)",
+                sent,
+            ):
+                continue
+            if is_broken_definition_answer(sent):
+                continue
+            seen.add(key)
+            ranked.append((len(sent.split()) + 8, label, sent))
+            break
+
+    for sent in extract_educational_sentences(text, limit=40):
+        m = re.match(
+            r"^([A-Za-z][^.!?]{2,45}?)\s+"
+            r"(?:is|are|means|refers to|used to|helps|defined as)\s+(.+)$",
+            sent,
+            re.I,
+        )
+        if not m:
+            continue
+        concept = clean_concept_label(m.group(1).strip())
+        answer = clean_teachable_answer(m.group(2).strip(), concept)
+        if not is_teachable_concept(concept) or is_broken_definition_answer(answer):
+            continue
+        key = normalize_concept_key(concept)
+        if key in seen:
+            continue
+        seen.add(key)
+        ranked.append((len(answer.split()), concept, answer))
+
+    ranked.sort(key=lambda x: -x[0])
     return [(c, a) for _, c, a in ranked[:limit]]
 
 
@@ -452,7 +620,7 @@ def option_names_other_concept(option: str, rival_concepts: List[str]) -> bool:
 
 
 def _unique_distractor_for_slot(slot: int, used: Set[str]) -> str:
-    pool = _CONCEPT_GENERIC_DISTRACTORS + _GENERIC_SAFE_DISTRACTORS
+    pool = _CONCEPT_GENERIC_DISTRACTORS + _EXTRA_GENERIC_DISTRACTORS + _GENERIC_SAFE_DISTRACTORS
     candidate = pool[slot % len(pool)]
     if candidate.lower() not in used:
         return candidate
@@ -472,16 +640,9 @@ def pick_same_topic_distractors(
     material_sentences: Optional[List[str]] = None,
     n: int = 3,
 ) -> List[str]:
-    """Wrong options for the same question — generic plausible wrongs, then material."""
+    """Wrong options — material sentences first, then varied generics (not repeated junk)."""
     correct_key = correct.lower().strip()
     out: List[str] = []
-
-    for d in _CONCEPT_GENERIC_DISTRACTORS:
-        if len(out) >= n:
-            break
-        if d.lower() not in used and d.lower() != correct_key:
-            out.append(d)
-            used.add(d.lower())
 
     sentences = material_sentences or extract_educational_sentences(source_text, limit=40)
     for s in sentences:
@@ -499,8 +660,16 @@ def pick_same_topic_distractors(
         out.append(o)
         used.add(o.lower())
 
+    generic_pool = _CONCEPT_GENERIC_DISTRACTORS + _EXTRA_GENERIC_DISTRACTORS + _GENERIC_SAFE_DISTRACTORS
+    for d in generic_pool:
+        if len(out) >= n:
+            break
+        if d.lower() not in used and d.lower() != correct_key:
+            out.append(d)
+            used.add(d.lower())
+
     slot = 0
-    while len(out) < n and slot < 12:
+    while len(out) < n and slot < 16:
         d = _unique_distractor_for_slot(slot, used)
         if d.lower() not in used and d.lower() != correct_key:
             out.append(d)
@@ -510,10 +679,11 @@ def pick_same_topic_distractors(
 
 
 def normalize_merged_words(text: str) -> str:
-    """Light OCR merge fix — LuminosityGray -> Luminosity Gray, etc."""
+    """Light OCR merge fix — LuminosityGray -> Luminosity Gray; S ensors -> Sensors."""
     s = (text or "").strip()
     if not s:
         return ""
+    s = re.sub(r"(?<![A-Za-z])([B-HJ-Z])\s+([a-z]{2,})", r"\1\2", s)
     s = _MERGED_CAMEL_RE.sub(r"\1 \2", s)
     for old, new in (
         ("LuminosityGray", "Luminosity Gray"),
@@ -534,6 +704,12 @@ def option_needs_replacement(
     if not o or len(o) < 8:
         return True
     if "?" in o:
+        return True
+    if _ARABIC_SCRIPT_RE.search(o):
+        return True
+    if _OCR_SPLIT_CAPS_RE.search(o):
+        return True
+    if _JUNK_OPTION_CONTENT_RE.search(o):
         return True
     if _OPTION_BLACKLIST_RE.search(o):
         return True
@@ -587,6 +763,11 @@ def clean_option_text(option: str) -> str:
         return ""
     o = o.replace("?", ".")
     o = normalize_merged_words(o)
+    if _ARABIC_SCRIPT_RE.search(o) or _JUNK_OPTION_CONTENT_RE.search(o):
+        return ""
+    if _OCR_SPLIT_CAPS_RE.search(o):
+        o = re.sub(r"(?<![A-Za-z])([B-HJ-Z])\s+([a-z]{2,})", r"\1\2", o)
+    o = re.sub(r"^A([a-z])", r"A \1", o)
     o = o.rstrip(",;:")
     if o and o[0].islower():
         o = o[0].upper() + o[1:]
@@ -777,6 +958,12 @@ def is_broken_option(option: str) -> bool:
         return True
     if re.search(r"\d\.\s*$", o) and len(words) <= 6:
         return True
+    if _ARABIC_SCRIPT_RE.search(o):
+        return True
+    if _OCR_SPLIT_CAPS_RE.search(o):
+        return True
+    if _JUNK_OPTION_CONTENT_RE.search(o):
+        return True
     return False
 
 
@@ -793,6 +980,9 @@ def is_grammatically_broken_question(question: str) -> bool:
     if _SHOUTY_STEM_RE.search(q.replace("?", "")):
         return True
     if _BAD_STEM_RE.search(q):
+        return True
+    concept = extract_concept_from_stem(q)
+    if not concept or not is_teachable_concept(concept):
         return True
     return False
 
@@ -1023,7 +1213,8 @@ def is_weak_concept(concept: str) -> bool:
     if len(words) <= 2 and all(
         w in _WEAK_SINGLE_CONCEPTS or w in {"the", "a", "an"} for w in words
     ):
-        return True
+        if low not in _ALLOWED_COMPOUND_CONCEPTS:
+            return True
     if re.search(
         r"category to which|object belon|which a given|play in|recogntit|"
         r"pattern recognition algorithm$|information from a single|"
@@ -1033,6 +1224,8 @@ def is_weak_concept(concept: str) -> bool:
     ):
         return True
     if low.endswith(" that") or "whose purpose" in low:
+        return True
+    if is_slide_fragment_concept(c):
         return True
     if low.startswith("itself from") or "from one machine" in low:
         return True
@@ -1198,14 +1391,17 @@ def build_mcq_from_teachable_pair(
     teachable_pairs: List[Tuple[str, str]],
     template_idx: int,
     material_title: Optional[str] = None,
+    global_used: Optional[Set[str]] = None,
 ) -> Optional[Dict[str, Any]]:
-    if not is_teachable_concept(concept) or is_broken_option(answer):
+    if not is_teachable_concept(concept) or is_broken_definition_answer(answer):
         return None
     rivals = rival_concept_names(teachable_pairs, concept)
     correct = clean_teachable_answer(answer, concept)
     if not correct or is_broken_option(correct):
         return None
     used: Set[str] = {correct.lower()}
+    if global_used:
+        used.update(global_used)
     distractors = pick_same_topic_distractors(
         concept, correct, source_text, rivals, used, n=3,
     )
@@ -1324,6 +1520,45 @@ def log_quiz_generation_stats(
     )
 
 
+def _build_sane_mcqs_from_pairs(
+    teachable_pairs: List[Tuple[str, str]],
+    source_text: str,
+    material_title: Optional[str],
+    target: int,
+    global_used: Optional[Set[str]] = None,
+    used_concepts: Optional[Set[str]] = None,
+    start_template_idx: int = 0,
+) -> List[Dict[str, Any]]:
+    """Build MCQs only from teachable pairs that pass final sanity gates."""
+    pool: List[Dict[str, Any]] = []
+    used = used_concepts or set()
+    gused = global_used or set()
+    for i, (concept, answer) in enumerate(teachable_pairs):
+        if len(pool) >= target:
+            break
+        key = normalize_concept_key(concept)
+        if key in used:
+            continue
+        built = build_mcq_from_teachable_pair(
+            concept, answer, source_text, teachable_pairs,
+            start_template_idx + len(pool), material_title, gused,
+        )
+        if not built:
+            continue
+        item = light_cleanup_mcq(
+            built, source_text, material_title, gused, teachable_pairs,
+        )
+        item = final_repair_mcq(
+            item, source_text, material_title, gused, teachable_pairs,
+            template_idx=start_template_idx + len(pool), used_concepts=used,
+        )
+        if not mcq_options_final_sane(item, material_title):
+            continue
+        pool.append(item)
+        used.add(key)
+    return pool
+
+
 def finalize_quiz_fast(
     questions: List[Dict[str, Any]],
     source_text: str,
@@ -1340,36 +1575,34 @@ def finalize_quiz_fast(
     content_len = len((source_text or "").strip())
     min_target = target if content_len > RICH_CONTENT_CHARS else min(MIN_QUIZ_RETURN, target)
 
-    pool = _accept_drafts(questions)
-    valid_primary = len(pool)
-    teachable_pairs = extract_teachable_pairs(validate_text, 40)
-
-    if len(teachable_pairs) >= min_target:
-        pair_built: List[Dict[str, Any]] = []
-        for i, (concept, answer) in enumerate(teachable_pairs):
-            if len(pair_built) >= target:
-                break
-            built = build_mcq_from_teachable_pair(
-                concept, answer, validate_text, teachable_pairs, i, material_title,
-            )
-            if built:
-                pair_built.append(built)
-        if len(pair_built) >= min_target:
-            pool = deduplicate_questions(
-                _accept_drafts(pair_built) + pool, validate_text, material_title,
-            )
-
-    if pool:
-        pool = deduplicate_questions(pool, validate_text, material_title)
-
+    valid_primary = len(_accept_drafts(questions))
+    teachable_pairs = extract_teachable_pairs(validate_text, 50)
+    global_used: Set[str] = set()
+    used_concepts: Set[str] = set()
     fallback_added = 0
+
+    pool = _build_sane_mcqs_from_pairs(
+        teachable_pairs, validate_text, material_title, target,
+        global_used, used_concepts,
+    )
+
     from app.services.quiz_gen_fallback import generate_deterministic_fallback
 
-    if (deadline is None or time.monotonic() < deadline - 0.5):
-        fb = generate_deterministic_fallback(fb_source, material_title, target + 4)
-        before = len(pool)
-        pool = deduplicate_questions(_accept_drafts(fb) + pool, validate_text, material_title)
-        fallback_added = max(0, len(pool) - before)
+    if (
+        len(pool) < min_target
+        and (deadline is None or time.monotonic() < deadline - 0.5)
+    ):
+        fb_pairs = extract_teachable_pairs(fb_source, 50)
+        if len(fb_pairs) > len(teachable_pairs):
+            teachable_pairs = fb_pairs
+        more = _build_sane_mcqs_from_pairs(
+            teachable_pairs, validate_text, material_title,
+            min_target - len(pool), global_used, used_concepts,
+            start_template_idx=len(pool),
+        )
+        if more:
+            pool = deduplicate_questions(pool + more, validate_text, material_title)
+            fallback_added += len(more)
 
     fill_attempts = 0
     while (
@@ -1378,60 +1611,13 @@ def finalize_quiz_fast(
         and (deadline is None or time.monotonic() < deadline - 0.3)
     ):
         fill_attempts += 1
-        need = min(min_target - len(pool) + 2, 4)
+        need = min(min_target - len(pool) + 2, 6)
         fb = generate_deterministic_fallback(fb_source, material_title, need)
-        before = len(pool)
-        pool = deduplicate_questions(_accept_drafts(fb) + pool, validate_text, material_title)
-        fallback_added += max(0, len(pool) - before)
-
-    global_used: Set[str] = set()
-    cleaned: List[Dict[str, Any]] = []
-    for item in pool:
-        cleaned.append(light_cleanup_mcq(item, validate_text, material_title, global_used))
-    pool = deduplicate_questions(cleaned, validate_text, material_title)
-    pool = pool[:target]
-
-    if len(pool) < min_target and content_len > RICH_CONTENT_CHARS:
-        extra = emergency_quiz_fill(validate_text, material_title, min_target)
-        for item in extra:
+        for draft in _accept_drafts(fb):
             if len(pool) >= min_target:
                 break
-            item = light_cleanup_mcq(item, validate_text, material_title, global_used)
-            merged = deduplicate_questions(pool + [item], validate_text, material_title)
-            if len(merged) > len(pool):
-                pool = merged
-                fallback_added += 1
-
-    pool = pool[:target]
-    teachable_pairs = extract_teachable_pairs(validate_text, 40)
-    used_concepts: Set[str] = set()
-    repaired: List[Dict[str, Any]] = []
-    for i, item in enumerate(pool):
-        item = final_repair_mcq(
-            item, validate_text, material_title, global_used,
-            teachable_pairs, template_idx=i, used_concepts=used_concepts,
-        )
-        concept = extract_concept_from_stem(str(item.get("question") or ""))
-        if concept:
-            used_concepts.add(normalize_concept_key(concept))
-        repaired.append(item)
-    pool = repaired[:target]
-
-    while len(pool) < min_target and teachable_pairs and content_len > RICH_CONTENT_CHARS:
-        if deadline is not None and time.monotonic() >= deadline - 0.2:
-            break
-        for concept, answer in teachable_pairs:
-            key = normalize_concept_key(concept)
-            if key in used_concepts:
-                continue
-            built = build_mcq_from_teachable_pair(
-                concept, answer, validate_text, teachable_pairs,
-                len(pool), material_title,
-            )
-            if not built:
-                continue
             item = light_cleanup_mcq(
-                built, validate_text, material_title, global_used, teachable_pairs,
+                draft, validate_text, material_title, global_used, teachable_pairs,
             )
             item = final_repair_mcq(
                 item, validate_text, material_title, global_used,
@@ -1439,14 +1625,57 @@ def finalize_quiz_fast(
             )
             if not mcq_options_final_sane(item, material_title):
                 continue
-            pool.append(item)
-            used_concepts.add(key)
-            fallback_added += 1
+            merged = deduplicate_questions(pool + [item], validate_text, material_title)
+            if len(merged) > len(pool):
+                pool = merged
+                concept = extract_concept_from_stem(str(item.get("question") or ""))
+                if concept:
+                    used_concepts.add(normalize_concept_key(concept))
+                fallback_added += 1
+
+    if len(pool) < min_target and content_len > RICH_CONTENT_CHARS:
+        for item in emergency_quiz_fill(validate_text, material_title, min_target):
             if len(pool) >= min_target:
                 break
+            item = light_cleanup_mcq(
+                item, validate_text, material_title, global_used, teachable_pairs,
+            )
+            item = final_repair_mcq(
+                item, validate_text, material_title, global_used,
+                teachable_pairs, template_idx=len(pool), used_concepts=used_concepts,
+            )
+            if not mcq_options_final_sane(item, material_title):
+                continue
+            merged = deduplicate_questions(pool + [item], validate_text, material_title)
+            if len(merged) > len(pool):
+                pool = merged
+                fallback_added += 1
+
+    pool = [
+        item for item in pool[:target]
+        if mcq_options_final_sane(item, material_title)
+    ]
+
+    while len(pool) < min_target and teachable_pairs:
+        if deadline is not None and time.monotonic() >= deadline - 0.2:
+            break
+        more = _build_sane_mcqs_from_pairs(
+            teachable_pairs, validate_text, material_title,
+            min_target - len(pool), global_used, used_concepts,
+            start_template_idx=len(pool),
+        )
+        if not more:
+            teachable_pairs = teachable_pairs[1:]
+            continue
+        pool = deduplicate_questions(pool + more, validate_text, material_title)
+        fallback_added += len(more)
         if len(pool) >= min_target:
             break
-        teachable_pairs = teachable_pairs[1:]  # avoid infinite loop on same head
+
+    pool = [
+        item for item in pool[:target]
+        if mcq_options_final_sane(item, material_title)
+    ]
 
     for j, item in enumerate(pool):
         item["id"] = f"q{j + 1}"
