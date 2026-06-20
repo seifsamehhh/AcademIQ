@@ -7,20 +7,31 @@ const COPY_SUFFIX_RE = /\s*\(\d+\)\s*$/;
 const PAREN_NUM_RE = /\s*\(\d+\)/g;
 const COPY_WORD_RE = /\b-?\s*copy\b/gi;
 
-/** Sort: lectures → revision → labs */
+/** Sort: lectures → revision → notes → labs */
 const KIND_SORT: Record<string, number> = {
   lecture: 0,
   lecture_link: 0,
   revision: 1,
-  notes: 9,
-  other_educational: 9,
-  lab: 2,
-  lab_link: 2,
+  notes: 2,
+  other_educational: 3,
+  lab: 4,
+  lab_link: 4,
 };
 
-const MIN_READY_CHARS = 301;
+const EDUCATIONAL_KINDS = new Set([
+  "lecture",
+  "lecture_link",
+  "lab",
+  "lab_link",
+  "revision",
+  "notes",
+  "other_educational",
+]);
+
+const MIN_READY_CHARS = 600;
 const MIN_LIMITED_CHARS = 100;
-const MIN_STANDALONE_NOTE_CHARS = 1000;
+const MIN_MAIN_LIST_CHARS = 100;
+const MIN_TOPIC_SNIPPET_CHARS = 300;
 
 const STANDALONE_EXERCISE_RE = /^(?:meal\s+)?exercise\s*#?\s*\d+\s*$/i;
 const EXERCISE_PHRASE_RE =
@@ -36,23 +47,6 @@ const LAB_TOPIC_HINTS: Array<{ re: RegExp; label: string }> = [
   { re: /knn/i, label: "KNN" },
   { re: /decision\s*tree/i, label: "Decision Tree" },
 ];
-
-export function isDemoHiddenTitle(m: LearningMaterial): boolean {
-  const title = stripNoise(m.title).trim();
-  const fn = m.originalFilename ? stripNoise(m.originalFilename).trim() : "";
-  const combined = `${title} ${fn}`;
-  if (/^test\s+notes/i.test(title) || /^test\s+notes/i.test(fn)) return true;
-  if (/^summary$/i.test(title) || /^summary$/i.test(fn)) return true;
-  if (
-    (/^summary\b/i.test(title) || /^summary\b/i.test(fn)) &&
-    !/revision/i.test(combined)
-  ) {
-    return true;
-  }
-  if (/algorithm\s+steps/i.test(combined)) return true;
-  if (/^multi\s+class\s+classification/i.test(combined)) return true;
-  return false;
-}
 
 export function isStandaloneExercise(m: LearningMaterial): boolean {
   const title = stripNoise(m.title).trim();
@@ -71,32 +65,12 @@ export function isStandaloneExercise(m: LearningMaterial): boolean {
   return false;
 }
 
-export function isCoreDemoKind(m: LearningMaterial): boolean {
-  if (isStandaloneExercise(m) || isDemoHiddenTitle(m)) return false;
-  const kind = (m.materialKind || "").toLowerCase();
-  const title = stripNoise(m.title);
-  if (kind.includes("lecture") || kind.includes("lab") || kind === "revision") {
-    return true;
-  }
-  if (/final\s+revision/i.test(title)) return true;
-  if (
-    /\b(?:lecture|lec)\s*-?\s*\d/i.test(title) ||
-    /\blab\s*-?\s*\d/i.test(title) ||
-    /_LAB\d/i.test(title)
-  ) {
-    return true;
-  }
-  if (/^revision/i.test(title)) return true;
-  return false;
-}
-
 export function isEducationalKind(m: LearningMaterial): boolean {
-  if (isStandaloneExercise(m) || isDemoHiddenTitle(m)) return false;
+  if (isStandaloneExercise(m)) return false;
   if (m.isNonQuizMaterial || m.quizStatus === "not_quiz_material") return false;
   if (m.isEducational === false) return false;
-  if (isCoreDemoKind(m)) return true;
   const kind = (m.materialKind || "").toLowerCase();
-  if (kind === "notes" || kind === "other_educational") return true;
+  if (kind && EDUCATIONAL_KINDS.has(kind)) return true;
   if (m.isEducational === true) return true;
   return !m.isNonQuizMaterial;
 }
@@ -106,8 +80,7 @@ export function isReadyMaterial(m: LearningMaterial): boolean {
   return (
     normalized.quizStatus === "ready" ||
     normalized.quizStatus === "limited_ready" ||
-    (normalized.quizGenerationEligible === true &&
-      (normalized.readyForQuiz === true || normalized.quizStatus === "limited_ready"))
+    (normalized.quizGenerationEligible === true && normalized.readyForQuiz === true)
   );
 }
 
@@ -157,16 +130,6 @@ export function cleanMaterialTitle(raw: string): string {
 
   if (/final\s+revision/i.test(s)) return "Final Revision";
 
-  const prefixedLecture = s.match(
-    /^\d+\s+(?:lecture|lec)\s*#?\s*(\d+)\s*(?:[-–—:]\s*)?(.*)$/i,
-  );
-  if (prefixedLecture) {
-    const rest = normalizeTopicLabel(prefixedLecture[2] || "");
-    return rest
-      ? `Lecture ${prefixedLecture[1]} — ${rest}`
-      : `Lecture ${prefixedLecture[1]}`;
-  }
-
   const lecturePart = s.match(
     /\b(?:lecture|lec)\s*#?\s*(\d+)\s+part\s*(\d+)\s*(?:[-–—:]\s*)?(.*)$/i,
   );
@@ -202,6 +165,11 @@ export function cleanMaterialTitle(raw: string): string {
     return n ? `Lab ${n}` : s;
   }
 
+  const topicOnly = inferLabTopic(s);
+  if (topicOnly && /\bnaive|adaboost|bayes/i.test(s)) {
+    return `Lab — ${topicOnly}`;
+  }
+
   if (/revision|review/i.test(s)) {
     const rev = s.match(/revision\s*#?\s*(\d+)?/i);
     if (rev?.[1]) return `Revision ${rev[1]}`;
@@ -220,8 +188,6 @@ export function extractMaterialNumber(m: LearningMaterial): number {
   for (const src of sources) {
     if (!src) continue;
     const cleaned = stripNoise(src);
-    const prefixed = cleaned.match(/^\d+\s+(?:lecture|lec)\s*-?\s*(\d+)/i);
-    if (prefixed) return parseInt(prefixed[1], 10);
     if (kind.includes("lecture") || /\blecture|\blec\b/i.test(cleaned)) {
       const match = cleaned.match(/\b(?:lecture|lec)\s*-?\s*#?\s*(\d+)/i);
       if (match) return parseInt(match[1], 10);
@@ -250,22 +216,20 @@ export function normalizeMaterialForDisplay(m: LearningMaterial): LearningMateri
   const imported =
     m.importedContent === true ||
     m.contentSource === "course_material_import";
-  const core = isCoreDemoKind(m);
 
   let quizStatus = m.quizStatus;
   let quizGenerationEligible = m.quizGenerationEligible;
   let readyForQuiz = m.readyForQuiz;
 
-  if (len > 0 && (imported || core)) {
-    if (len >= MIN_READY_CHARS) {
+  if (imported && len > 0) {
+    if (len >= MIN_READY_CHARS || m.quizStatus === "ready") {
       quizStatus = "ready";
       readyForQuiz = true;
-      quizGenerationEligible = true;
     } else if (len >= MIN_LIMITED_CHARS) {
       quizStatus = "limited_ready";
       readyForQuiz = false;
-      quizGenerationEligible = true;
     }
+    quizGenerationEligible = len >= MIN_LIMITED_CHARS;
   } else if (len > 0 && quizStatus === "not_uploaded") {
     if (len >= MIN_READY_CHARS) {
       quizStatus = "ready";
@@ -285,13 +249,34 @@ export function normalizeMaterialForDisplay(m: LearningMaterial): LearningMateri
   };
 }
 
+function isRevisionMaterial(m: LearningMaterial): boolean {
+  const title = cleanMaterialTitle(m.title).toLowerCase();
+  const kind = (m.materialKind || "").toLowerCase();
+  return kind === "revision" || /revision|final revision/.test(title);
+}
+
+function isNumberedCoreMaterial(m: LearningMaterial): boolean {
+  const kind = (m.materialKind || "").toLowerCase();
+  const num = extractMaterialNumber(m);
+  return (
+    (kind.includes("lecture") || kind.includes("lab")) && num < 9999
+  );
+}
+
 export function isMainListLearningMaterial(m: LearningMaterial): boolean {
-  if (!isCoreDemoKind(m)) return false;
+  if (isStandaloneExercise(m)) return false;
+  if (!isEducationalKind(m)) return false;
   const n = normalizeMaterialForDisplay(m);
   if (!isReadyMaterial(n)) return false;
 
   const len = n.contentTextLength ?? 0;
-  if (len < MIN_LIMITED_CHARS) return false;
+  if (len < MIN_MAIN_LIST_CHARS) return false;
+
+  if (len < MIN_TOPIC_SNIPPET_CHARS) {
+    if (!isRevisionMaterial(n) && !isNumberedCoreMaterial(n)) {
+      return false;
+    }
+  }
 
   if (n.visibleInMainList === false) return false;
   return true;
@@ -308,10 +293,6 @@ function dedupeKey(m: LearningMaterial): string {
   if (kind.includes("lab") && num < 9999) return `lab:${num}`;
   if (kind === "revision") {
     return title.includes("final") ? "revision:final" : `revision:${num}`;
-  }
-  if (num < 9999) {
-    if (/\blecture|\blec\b/i.test(title)) return `lecture:${num}`;
-    if (/\blab\b/i.test(title)) return `lab:${num}`;
   }
   return `${kind}:${title}`;
 }
@@ -347,7 +328,7 @@ export function deduplicateMaterials(
     }
   }
 
-  return materials.map((m) => {
+    return materials.map((m) => {
     if (!hiddenIds.has(m.id)) return m;
     return {
       ...m,

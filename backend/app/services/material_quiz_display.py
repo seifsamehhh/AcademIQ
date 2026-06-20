@@ -249,10 +249,6 @@ _STANDALONE_EXERCISE_PHRASE_RE = re.compile(
 )
 _EXERCISE_PREFIX_RE = re.compile(r"(?i)^exercise\s*#?\s*\d+")
 
-_DEMO_MAIN_HIDDEN_RE = re.compile(
-    r"(?i)^(?:test\s+notes|algorithm\s+steps|multi\s+class\s+classification(?:\s+problem)?)\s*$"
-)
-
 # Numbers after lecture/lab/lec — Lecture2, Lecture 2, Lab-8 all match.
 _LECTURE_NUM_RE = re.compile(r"(?i)\b(?:lecture|lec)\s*-?\s*#?(\d+)")
 _LAB_NUM_RE = re.compile(r"(?i)\blab(?:\s+(?:assignment\s*)?)?\s*-?\s*#?(\d+)")
@@ -313,54 +309,6 @@ def is_standalone_exercise_title(title: str) -> bool:
     return False
 
 
-def is_demo_hidden_title(title: str) -> bool:
-    """Titles excluded from demo main list (Test Notes, Summary, tiny topic snippets)."""
-    t = (title or "").strip()
-    if not t:
-        return False
-    normalized = _normalize_title_text(t)
-    for src in (t, normalized):
-        if _DEMO_MAIN_HIDDEN_RE.match(src.strip()):
-            return True
-        if re.match(r"(?i)^summary\s*$", src.strip()):
-            return True
-        if re.match(r"(?i)^summary\b", src.strip()) and "revision" not in src.lower():
-            return True
-    return False
-
-
-def is_core_demo_material_kind(material_kind: str, title: str) -> bool:
-    """Only lecture, lab, revision / final revision appear in demo main list."""
-    if is_demo_hidden_title(title) or is_standalone_exercise_title(title):
-        return False
-    k = (material_kind or "").lower()
-    if k in ("lecture", "lecture_link", "lab", "lab_link", "revision"):
-        return True
-    t = title or ""
-    if re.search(r"(?i)final\s+revision", t):
-        return True
-    if _REVISION_TYPE_RE.search(t) and not is_demo_hidden_title(t):
-        return True
-    return False
-
-
-def _is_core_demo_material(
-    doc: Dict[str, Any],
-    title: str,
-    material_kind: str,
-) -> bool:
-    if is_core_demo_material_kind(material_kind, title):
-        return True
-    for src in (title, str(doc.get("original_filename") or "")):
-        if not src:
-            continue
-        if _LECTURE_TYPE_RE.search(src) or _LAB_TYPE_RE.search(src):
-            return True
-        if _REVISION_TYPE_RE.search(src) and not is_demo_hidden_title(src):
-            return True
-    return False
-
-
 def matches_educational_title(title: str) -> bool:
     t = title or ""
     normalized = _normalize_title_text(t)
@@ -389,9 +337,6 @@ def classify_non_quiz_material(title: str, file_type: str) -> Tuple[bool, Option
 
     if is_standalone_exercise_title(t):
         return True, "Standalone exercise — quiz uses full lab/lecture materials only"
-
-    if is_demo_hidden_title(t):
-        return True, "Not quiz material — notes/summary snippet excluded from demo list"
 
     # A: Hard admin phrases always win.
     if matches_hard_admin_title(t):
@@ -510,9 +455,6 @@ def resolve_material_number(
 
 
 _IMPORT_SOURCE = "course_material_import"
-_DEMO_READY_MIN_CHARS = 301
-_DEMO_LIMITED_MIN_CHARS = 100
-_DEMO_STANDALONE_NOTE_MAX_CHARS = 1000
 
 
 def _apply_import_content_status(
@@ -520,66 +462,87 @@ def _apply_import_content_status(
     content_len: int,
     raw_file_type: str,
     content: str,
-    title: str = "",
-    material_kind: str = "",
 ) -> Optional[Dict[str, Any]]:
     """
-    Demo readiness for imported or merged lecture/lab/revision content.
-    Never show Not uploaded when readable content exists on core materials.
+    When materials were imported locally, trust stored content for quiz UI status.
+    Never show Not uploaded when content_text exists.
     """
     if content_len <= 0:
         return None
-
     is_import = doc.get("content_source") == _IMPORT_SOURCE or bool(doc.get("imported_at"))
     stored_ready = bool(doc.get("ready_for_quiz")) or str(doc.get("quiz_status") or "") in (
         "ready",
         "limited_ready",
     )
-    is_core = _is_core_demo_material(doc, title, material_kind)
-
-    if not is_core:
-        return None
-    if not is_import and not stored_ready and content_len < _DEMO_LIMITED_MIN_CHARS:
+    if not is_import and not stored_ready:
         return None
 
     probe_count = 0
     eligibility_meta: Dict[str, Any] = {}
     if content:
-        _, _reason_code, eligibility_meta = assess_quiz_eligibility(
+        _, reason_code, eligibility_meta = assess_quiz_eligibility(
             content,
             file_type=raw_file_type,
             probe=True,
         )
         probe_count = int(eligibility_meta.get("probe_question_count") or 0)
 
-    if content_len < _DEMO_LIMITED_MIN_CHARS:
+    if is_import and content_len < 100:
         return {
             "quiz_status": "extraction_too_short",
             "quiz_status_reason": (
-                f"Only {content_len} characters (need at least {_DEMO_LIMITED_MIN_CHARS})."
+                f"Only {content_len} characters imported (need at least 100 for quiz)."
             ),
-            "reason": f"Only {content_len} characters.",
+            "reason": f"Only {content_len} characters imported.",
             "is_educational_material": True,
             "is_non_quiz_material": False,
             "quiz_generation_eligible": False,
             "ready_for_quiz": False,
             "will_generate_successfully": False,
-            "why_not_ready": "Too little text for quiz generation.",
+            "why_not_ready": "Too little imported text for quiz generation.",
             "visible_in_main_list": False,
             "visible_in_other_items": False,
             "selectable": False,
             "probe_question_count": probe_count,
             "question_count_possible": probe_count,
             "probe_failure_reason": eligibility_meta.get("probe_failure_reason"),
+            "eligibility_meta": {
+                k: eligibility_meta.get(k)
+                for k in (
+                    "probe_engine",
+                    "lecture_concept_count",
+                    "definition_pair_count",
+                    "total_concepts",
+                    "concept_candidate_count",
+                    "cleaned_text_length",
+                )
+                if eligibility_meta.get(k) is not None
+            },
         }
 
-    if content_len > _DEMO_READY_MIN_CHARS - 1:
+    stored_qs = str(doc.get("quiz_status") or "")
+    if stored_qs in ("ready", "limited_ready") and stored_ready and not is_import:
+        quiz_status = stored_qs
+    elif probe_count >= MIN_READY_QUESTIONS or content_len >= MIN_QUIZ_CONTENT_CHARS:
         quiz_status = "ready"
+    elif (
+        probe_count >= MIN_LIMITED_QUESTIONS
+        or content_len >= 100
+        or (is_import and content_len > 0)
+    ):
+        quiz_status = "limited_ready"
     else:
         quiz_status = "limited_ready"
 
-    content_note = LIMITED_QUIZ_NOTE if quiz_status == "limited_ready" else None
-    selectable = True
+    content_note = None
+    if quiz_status == "limited_ready":
+        content_note = LIMITED_QUIZ_NOTE
+
+    selectable = quiz_status in ("ready", "limited_ready")
+    visible_main = content_len >= 100
+    if is_standalone_exercise_title(str(doc.get("title") or "")):
+        visible_main = False
+        selectable = False
 
     return {
         "quiz_status": quiz_status,
@@ -589,10 +552,10 @@ def _apply_import_content_status(
         "is_non_quiz_material": False,
         "quiz_generation_eligible": selectable,
         "ready_for_quiz": quiz_status == "ready",
-        "will_generate_successfully": True,
-        "why_not_ready": None,
-        "visible_in_main_list": True,
-        "visible_in_other_items": False,
+        "will_generate_successfully": selectable,
+        "why_not_ready": None if selectable else content_note,
+        "visible_in_main_list": visible_main,
+        "visible_in_other_items": not visible_main,
         "selectable": selectable,
         "probe_question_count": probe_count,
         "question_count_possible": probe_count,
@@ -754,29 +717,6 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
     content_len = len(content) if content else _material_stored_content_length(doc)
     extraction_status = (doc.get("extraction_status") or "").strip()
     material_id = str(doc.get("material_id") or "")
-
-    if doc.get("demo_quiz_hidden"):
-        return {
-            **{
-                "material_id": material_id,
-                "title": title,
-                "file_type": raw_file_type,
-                "material_kind": "other_moodle_item",
-                "material_number": 9999,
-                "content_text_length": content_len,
-                "missing_from_db": False,
-            },
-            "quiz_status": "not_quiz_material",
-            "quiz_status_reason": "Excluded from demo quiz list",
-            "is_educational_material": False,
-            "is_non_quiz_material": True,
-            "quiz_generation_eligible": False,
-            "ready_for_quiz": False,
-            "visible_in_main_list": False,
-            "visible_in_other_items": True,
-            "selectable": False,
-            "sort_group": 6,
-        }
 
     is_link_wrapper = detect_link_wrapper(title, raw_file_type)
     is_non_quiz, non_quiz_reason = classify_non_quiz_material(title, raw_file_type)
@@ -966,9 +906,7 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
         "concept_candidate_count": eligibility_meta.get("concept_candidate_count"),
     }
 
-    import_override = _apply_import_content_status(
-        doc, content_len, raw_file_type, content, title=title, material_kind=material_kind,
-    )
+    import_override = _apply_import_content_status(doc, content_len, raw_file_type, content)
     if import_override:
         result.update(import_override)
         result["material_kind"] = material_kind
@@ -977,12 +915,12 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
         result["sort_number"] = material_number
         result["content_text_length"] = content_len
 
-    if is_standalone_exercise_title(title) or is_demo_hidden_title(title):
+    if is_standalone_exercise_title(title):
         result.update(
             {
                 "quiz_status": "not_quiz_material",
                 "quiz_status_reason": (
-                    "Excluded from demo quiz list"
+                    "Standalone exercise — quiz uses full lab/lecture materials only"
                 ),
                 "is_educational_material": False,
                 "is_non_quiz_material": True,
@@ -995,29 +933,28 @@ def _resolve_one_material(doc: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
-    if not is_core_demo_material_kind(material_kind, title):
-        result["visible_in_main_list"] = False
-        result["visible_in_other_items"] = True
-        if not result.get("is_non_quiz_material"):
-            result["selectable"] = False
-            result["quiz_generation_eligible"] = False
-
     clen = int(result.get("content_text_length") or 0)
-    if clen > 0 and clen < _DEMO_LIMITED_MIN_CHARS:
+    if clen > 0 and clen < 100 and result.get("visible_in_main_list"):
         result["visible_in_main_list"] = False
         result["visible_in_other_items"] = False
         result["selectable"] = False
         result["quiz_generation_eligible"] = False
-    elif (
-        clen > 0
-        and clen < _DEMO_STANDALONE_NOTE_MAX_CHARS
-        and result.get("visible_in_main_list")
-        and not is_core_demo_material_kind(material_kind, title)
-    ):
-        result["visible_in_main_list"] = False
-        result["visible_in_other_items"] = True
-        result["selectable"] = False
-        result["quiz_generation_eligible"] = False
+    elif clen > 0 and clen < 300 and result.get("visible_in_main_list"):
+        title_lower = title.lower()
+        is_revision = (
+            material_kind == "revision"
+            or "revision" in title_lower
+            or "final revision" in title_lower
+        )
+        is_numbered_core = (
+            material_kind in ("lecture", "lab", "lecture_link", "lab_link")
+            and material_number < 9999
+        )
+        if not is_revision and not is_numbered_core:
+            result["visible_in_main_list"] = False
+            result["visible_in_other_items"] = True
+            result["selectable"] = False
+            result["quiz_generation_eligible"] = False
 
     return result
 
