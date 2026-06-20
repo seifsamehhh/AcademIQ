@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
+from app.services.quiz_question_quality import QUIZ_GENERATION_GUIDANCE
+
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 _QUIZ_DIR = os.path.join(_REPO, "ai", "quiz_generator-main")
 
@@ -213,6 +215,8 @@ def generate_questions(
     if not text or not text.strip():
         logger.warning("Quiz generation skipped: no content_text")
         return [], "no_text"
+
+    logger.debug("Quiz generation guidance: %s", QUIZ_GENERATION_GUIDANCE)
 
     # Deep-clean: removes emails, ToC lines, name headers, page numbers while
     # PRESERVING newlines so line-aware engines still work correctly.
