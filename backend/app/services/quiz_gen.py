@@ -171,26 +171,16 @@ def _validate_questions(
     questions: List[Dict[str, Any]],
     text: str,
     material_title: Optional[str],
-    target: int = 5,
 ) -> List[Dict[str, Any]]:
     if not questions:
         return questions
     try:
-        from app.services.quiz_question_quality import repair_and_select_questions
+        from app.services.quiz_question_quality import validate_and_improve_questions
 
-        return repair_and_select_questions(questions, text, material_title, target=target)
+        return validate_and_improve_questions(questions, text, material_title)
     except Exception as exc:
         logger.warning("Question validation failed: %s", exc)
         return questions
-
-
-def _finalize_questions(
-    questions: List[Dict[str, Any]],
-    text: str,
-    material_title: Optional[str],
-    num_questions: int,
-) -> List[Dict[str, Any]]:
-    return _validate_questions(questions, text, material_title, target=num_questions)
 
 
 def generate_questions(
@@ -235,17 +225,15 @@ def generate_questions(
     if not text.strip():
         return [], "no_text"
 
-    draft_count = max(num_questions * 2, 10)
-
     # ── 1. Lightweight ────────────────────────────────────────────────────────
     try:
         from app.services.quiz_gen_light import generate_lightweight
 
-        light = generate_lightweight(text, num_questions=draft_count)
+        light = generate_lightweight(text, num_questions=num_questions)
         if light:
             logger.info("Lightweight engine: %d questions", len(light))
-            combined, eng = _supplement_to_target(light, text, draft_count, "light")
-            return _finalize_questions(combined, text, material_title, num_questions), eng
+            combined, eng = _supplement_to_target(light, text, num_questions, "light")
+            return _validate_questions(combined, text, material_title), eng
         logger.warning("Lightweight engine returned 0 questions")
     except Exception as exc:
         logger.error("Lightweight engine failed: %s", exc, exc_info=True)
@@ -254,11 +242,11 @@ def generate_questions(
     try:
         from app.services.quiz_gen_lecture import generate_lecture_quiz
 
-        lecture = generate_lecture_quiz(text, num_questions=draft_count)
+        lecture = generate_lecture_quiz(text, num_questions=num_questions)
         if lecture:
             logger.info("Lecture engine: %d questions", len(lecture))
-            combined, eng = _supplement_to_target(lecture, text, draft_count, "lecture")
-            return _finalize_questions(combined, text, material_title, num_questions), eng
+            combined, eng = _supplement_to_target(lecture, text, num_questions, "lecture")
+            return _validate_questions(combined, text, material_title), eng
         logger.warning("Lecture engine returned 0 questions")
     except Exception as exc:
         logger.error("Lecture engine failed: %s", exc, exc_info=True)
@@ -266,11 +254,11 @@ def generate_questions(
     # ── 3. Heavy NLTK (local dev only) ────────────────────────────────────────
     if available():
         try:
-            heavy = generate_from_text(text, num_questions=draft_count)
+            heavy = generate_from_text(text, num_questions=num_questions)
             if len(heavy) >= 3:
                 logger.info("Heavy engine: %d questions", len(heavy))
-                combined, eng = _supplement_to_target(heavy, text, draft_count, "heavy")
-                return _finalize_questions(combined, text, material_title, num_questions), eng
+                combined, eng = _supplement_to_target(heavy, text, num_questions, "heavy")
+                return _validate_questions(combined, text, material_title), eng
             logger.warning("Heavy engine: only %d questions", len(heavy))
         except Exception as exc:
             logger.warning("Heavy engine failed: %s", exc, exc_info=True)
@@ -279,26 +267,13 @@ def generate_questions(
     try:
         from app.services.quiz_gen_fragment import generate_fragment_quiz
 
-        fragment = generate_fragment_quiz(text, num_questions=draft_count)
+        fragment = generate_fragment_quiz(text, num_questions=num_questions)
         if fragment:
             logger.info("Fragment engine: %d questions", len(fragment))
-            validated = _finalize_questions(fragment, text, material_title, num_questions)
-            if validated:
-                return validated, "fragment"
+            validated = _validate_questions(fragment[:num_questions], text, material_title)
+            return validated, "fragment"
         logger.warning("Fragment engine returned 0 questions")
     except Exception as exc:
         logger.error("Fragment engine failed: %s", exc, exc_info=True)
-
-    # ── 5. Deterministic fallback ─────────────────────────────────────────────
-    try:
-        from app.services.quiz_gen_fallback import generate_deterministic_fallback
-
-        fallback = generate_deterministic_fallback(text, material_title, num_questions)
-        if fallback:
-            finalized = _finalize_questions(fallback, text, material_title, num_questions)
-            if finalized:
-                return finalized, "deterministic_fallback"
-    except Exception as exc:
-        logger.warning("Deterministic fallback failed: %s", exc)
 
     return [], "failed"

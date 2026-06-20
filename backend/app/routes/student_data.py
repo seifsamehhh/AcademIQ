@@ -239,22 +239,7 @@ def generate_quiz(
         material_title=display_title,
     )
 
-    if (not questions or len(questions) < MIN_LIMITED_QUESTIONS) and content_chars > 1000:
-        from app.services.quiz_gen_fallback import generate_deterministic_fallback
-        from app.services.quiz_question_quality import repair_and_select_questions
-
-        fallback = generate_deterministic_fallback(
-            selected_text, display_title, target_questions,
-        )
-        questions = repair_and_select_questions(
-            fallback, selected_text, display_title, target=target_questions,
-        )
-        if questions:
-            engine = "deterministic_fallback"
-
-  if not questions or (
-        len(questions) < MIN_LIMITED_QUESTIONS and content_chars <= 1000
-    ):
+    if not questions or len(questions) < MIN_LIMITED_QUESTIONS:
         raise HTTPException(
             status_code=422,
             detail={
