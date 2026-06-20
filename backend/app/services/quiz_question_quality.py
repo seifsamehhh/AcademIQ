@@ -366,6 +366,10 @@ def is_slide_fragment_concept(concept: str) -> bool:
         return True
     if re.match(r"(?i)^(the\s+)?environment$", low):
         return True
+    if re.match(r"(?i)^(work only if|once the|only if the)\b", low):
+        return True
+    if re.search(r"(?i)work only if the|once the dirt|better and some worse|\bif goal\b", low):
+        return True
     return False
 
 
@@ -1656,7 +1660,9 @@ def finalize_quiz_fast(
         if mcq_options_final_sane(item, material_title)
     ]
 
-    while len(pool) < min_target and teachable_pairs:
+    fill_rounds = 0
+    while len(pool) < min_target and teachable_pairs and fill_rounds < 40:
+        fill_rounds += 1
         if deadline is not None and time.monotonic() >= deadline - 0.2:
             break
         more = _build_sane_mcqs_from_pairs(
@@ -1667,8 +1673,12 @@ def finalize_quiz_fast(
         if not more:
             teachable_pairs = teachable_pairs[1:]
             continue
+        before = len(pool)
         pool = deduplicate_questions(pool + more, validate_text, material_title)
-        fallback_added += len(more)
+        if len(pool) <= before:
+            teachable_pairs = teachable_pairs[1:]
+            continue
+        fallback_added += len(pool) - before
         if len(pool) >= min_target:
             break
 
