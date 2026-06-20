@@ -29,7 +29,7 @@ _VAGUE_GENERIC_RE = re.compile(
     re.I,
 )
 _BROKEN_OPTION_END_RE = re.compile(
-    r"\b(the|about|by|of|a|an|to|in|for|with|and|or|as|on|at|from|approx)\s*\.?\s*$",
+    r"\b(the|about|by|of|a|an|to|in|for|with|and|or|as|on|at|from|approx|include|refers to)\s*\.?\s*$",
     re.I,
 )
 _BROKEN_OPTION_PHRASE_RE = re.compile(
@@ -114,15 +114,26 @@ def is_broken_option(option: str) -> bool:
 
 def is_grammatically_broken_question(question: str) -> bool:
     q = (question or "").strip()
-    if len(q.split()) < 5:
+    if len(q.split()) < 4:
         return True
     if not q.endswith("?"):
         return True
-    if not re.match(r"^(What|Which|How|Why|When|In what|According to)", q, re.I):
-        return True
     if re.search(r"\?\s*\?", q):
         return True
+    if len(q.split()) >= 8:
+        return False
+    if not re.match(r"^(What|Which|How|Why|When|In what|According to)", q, re.I):
+        return True
     return False
+
+
+def clean_option_text(option: str) -> str:
+    o = re.sub(r"\s+", " ", (option or "").strip())
+    if not o:
+        return ""
+    if not re.search(r"[.!?]$", o):
+        o = o + "."
+    return o
 
 
 def uses_filename_as_concept(question: str, material_title: Optional[str] = None) -> bool:
@@ -165,10 +176,42 @@ def is_question_valid(
     if _VAGUE_PURPOSE_RE.match(question or ""):
         return False
     if not question_mentions_topic(question, material_title, keywords):
-        return False
+        if len((question or "").split()) < 8:
+            return False
     if not _options_valid(options):
         return False
     return True
+
+
+def repair_and_select_questions(
+    questions: List[Dict[str, Any]],
+    source_text: str,
+    material_title: Optional[str] = None,
+    target: int = 5,
+) -> List[Dict[str, Any]]:
+    """Validate, repair, and keep the best questions; fallback if needed."""
+    improved = validate_and_improve_questions(questions, source_text, material_title)
+    selected = improved[:target]
+    if len(selected) >= max(3, min(target, 3)):
+        return selected[:target]
+
+    from app.services.quiz_gen_fallback import generate_deterministic_fallback
+
+    fallback = generate_deterministic_fallback(source_text, material_title, target)
+    if fallback:
+        merged = selected + fallback
+        improved2 = validate_and_improve_questions(merged, source_text, material_title)
+        if len(improved2) >= len(selected):
+            selected = improved2[:target]
+
+    if len(selected) < max(3, min(target, 3)):
+        fb_only = generate_deterministic_fallback(source_text, material_title, target)
+        if fb_only:
+            selected = fb_only[:target]
+
+    for j, item in enumerate(selected):
+        item["id"] = f"q{j + 1}"
+    return selected[:target]
 
 
 def _extract_keywords(
