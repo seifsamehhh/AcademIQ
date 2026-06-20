@@ -4,8 +4,11 @@ Validate and repair vague quiz question stems so every question names a concept.
 
 from __future__ import annotations
 
+import logging
 import re
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+logger = logging.getLogger(__name__)
 
 QUIZ_GENERATION_GUIDANCE = (
     "Generate university-level multiple-choice questions from the selected course material only.\n\n"
@@ -44,7 +47,8 @@ _BROKEN_OPTION_PHRASE_RE = re.compile(
     r"for human perception refers to|solution is an use|repeat until goal refers to found|"
     r"\bNNNJ is a So\b|refers to found|refers to natural|refers to given by|"
     r"refers to to |refers to very |refers to specifically|refers to filtered|"
-    r"^pattern it\b|sent to a feature"
+    r"reasons for doing this include refers to|^pattern it\b|sent to a feature|"
+    r"make decisions about patterns"
 )
 _VAGUE_CONCEPT_RE = re.compile(
     r"(?i)^(the|a|an)\s+(features?|information|output|input|value|result|data)$"
@@ -91,6 +95,19 @@ _GENERIC_OPTION_RE = re.compile(
     r"^(none of the above|all of the above|not applicable|n/?a|true|false|yes|no|other)\s*$",
     re.I,
 )
+_WEAK_SINGLE_CONCEPTS = frozenset(
+    {
+        "length", "classifier", "features", "feature", "what", "which", "how",
+        "why", "when", "agent", "agents", "pattern", "patterns", "data", "class",
+        "classes", "model", "models", "input", "output", "algorithm", "method",
+        "methods", "system", "systems", "process", "training", "testing",
+        "learning", "concept", "category", "object", "vector", "vectors", "image",
+        "images", "pixel", "pixels", "set", "sets", "type", "types", "function",
+        "functions", "network", "networks", "node", "nodes", "tree", "trees",
+        "rule", "rules", "terminology", "lightness", "width", "information",
+        "trade", "label", "task", "they", "it", "we", "itself", "result",
+    }
+)
 
 _CONCEPT_FROM_TEXT_RE = re.compile(
     r"(?:^|\n)\s*([A-Z][A-Za-z0-9][A-Za-z0-9 /&\-]{2,55})\s*(?:\n|:)",
@@ -106,6 +123,16 @@ _DEFINITION_RE = re.compile(
     r"([^.\n]{8,120})",
     re.I,
 )
+_CONCEPT_FROM_STEM_RE = re.compile(
+    r"(?i)(?:best describes|purpose of|main purpose of|role of|main idea of|main goal of|"
+    r"definition of|correctly explains|difference between|important in|role does)\s+(.+?)\??\s*$"
+)
+_ROLE_PLAY_RE = re.compile(r"(?i)what role does\s+(.+?)\s+play in")
+_FILE_NOISE_RE = re.compile(
+    r"(?i)\b(?:swe\d+|csc\d+|csc\s*\d+|file|moodle|copy)\b|\.(?:pdf|pptx?|ppsx|docx?)\b"
+)
+_COPY_NUM_RE = re.compile(r"\s*\(\d+\)\s*")
+_DIGIT_PREFIX_RE = re.compile(r"^\d{1,2}\s+")
 
 
 def clean_option_text(option: str) -> str:
@@ -221,6 +248,9 @@ def is_question_valid(
 ) -> bool:
     if is_vague_question(question, material_title):
         return False
+    concept = extract_concept_from_stem(question)
+    if is_weak_concept(concept):
+        return False
     if uses_filename_as_concept(question, material_title):
         return False
     if is_grammatically_broken_question(question):
@@ -237,41 +267,295 @@ def is_question_valid(
     return True
 
 
+def normalize_concept_key(concept: str) -> str:
+    c = re.sub(r"^the\s+", "", (concept or "").lower().strip())
+    return re.sub(r"\s+", " ", c)
+
+
+def extract_concept_from_stem(question: str) -> str:
+    q = (question or "").strip()
+    m = _CONCEPT_FROM_STEM_RE.search(q)
+    if m:
+        return normalize_concept_key(m.group(1).strip())
+    m_role = _ROLE_PLAY_RE.search(q)
+    if m_role:
+        return normalize_concept_key(m_role.group(1).strip())
+    m2 = re.match(r"^what\s+(?:is|are)\s+(?:the\s+)?(.+?)\s*\??\s*$", q, re.I)
+    if m2:
+        return normalize_concept_key(m2.group(1).strip())
+    tokens = [
+        t.lower()
+        for t in re.findall(r"[A-Za-z][A-Za-z0-9\-]{3,}", q)
+        if t.lower() not in _GENERIC_WORDS
+    ]
+    return normalize_concept_key(" ".join(tokens[:3]))
+
+
+def normalize_stem(stem: str) -> str:
+    s = re.sub(r"\s+", " ", (stem or "").lower().strip().rstrip("?"))
+    return re.sub(r"[^\w\s]", "", s)
+
+
+def _question_signature(q: Dict[str, Any]) -> Tuple[str, str, str]:
+    stem = normalize_stem(str(q.get("question") or ""))
+    concept = extract_concept_from_stem(str(q.get("question") or ""))
+    opts = q.get("options") or []
+    idx = int(q.get("correctIndex") or 0)
+    correct = ""
+    if opts and 0 <= idx < len(opts):
+        correct = normalize_stem(str(opts[idx]))
+    return concept, stem[:70], correct[:70]
+
+
+def _score_question(
+    q: Dict[str, Any],
+    source_text: str,
+    material_title: Optional[str],
+) -> int:
+    stem = str(q.get("question") or "")
+    opts = [clean_option_text(o) for o in q.get("options") or []]
+    keywords = _extract_keywords(source_text, material_title)
+    score = 0
+    if is_question_valid(stem, opts, source_text, material_title, keywords):
+        score += 1000
+    score += len(stem.split()) * 5
+    concept = extract_concept_from_stem(stem)
+    if concept:
+        score += min(len(concept.split()) * 25, 75)
+    if is_weak_concept(concept):
+        score -= 800
+    if re.search(r"(?i)which statement best describes", stem):
+        score += 50
+    if re.search(r"(?i)what is the (main purpose|purpose|role)", stem):
+        score += 40
+    if re.search(r"(?i)which of the following", stem):
+        score -= 200
+    return score
+
+
+def deduplicate_questions(
+    questions: List[Dict[str, Any]],
+    source_text: str,
+    material_title: Optional[str],
+) -> List[Dict[str, Any]]:
+    best_by_concept: Dict[str, Dict[str, Any]] = {}
+    best_score: Dict[str, int] = {}
+    seen_stems: Set[str] = set()
+    out: List[Dict[str, Any]] = []
+
+    for q in questions:
+        concept, stem_key, _ = _question_signature(q)
+        if not concept or len(concept) < 2:
+            concept = stem_key[:40]
+        if stem_key in seen_stems:
+            continue
+        score = _score_question(q, source_text, material_title)
+        prev = best_by_concept.get(concept)
+        if prev is not None and best_score.get(concept, 0) >= score:
+            continue
+        if prev is not None:
+            out = [x for x in out if extract_concept_from_stem(str(x.get("question") or "")) != concept]
+        best_by_concept[concept] = q
+        best_score[concept] = score
+        seen_stems.add(stem_key)
+        out.append(q)
+
+    return out
+
+
+def extract_educational_sentences(text: str, limit: int = 40) -> List[str]:
+    """Clean sentences from selected material (8–35 words, no OCR noise)."""
+    out: List[str] = []
+    seen: Set[str] = set()
+    noise = re.compile(
+        r"(?i)(?:\[Page\s*\d|Page\s*\d+\])|postprocessing:|image algebra|"
+        r"visual example|course outline|\d{1,2}/\d{1,2}/\d{4}"
+    )
+    for m in re.finditer(r"[A-Za-z][^.!?]{15,280}[.!?]", text or ""):
+        raw = re.sub(r"\s+", " ", m.group(0)).strip()
+        words = raw.split()
+        if len(words) < 8 or len(words) > 35:
+            continue
+        if noise.search(raw):
+            continue
+        s = clean_option_text(raw)
+        if is_broken_option(s):
+            continue
+        key = s.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def clean_concept_label(raw: str) -> str:
+    """Strip file/OCR prefixes from a concept label."""
+    c = (raw or "").strip()
+    c = _FILE_NOISE_RE.sub(" ", c)
+    c = _COPY_NUM_RE.sub(" ", c)
+    c = _DIGIT_PREFIX_RE.sub("", c)
+    c = re.sub(r"[_|]+", " ", c)
+    c = re.sub(r"\s+", " ", c).strip()
+    if not c:
+        return ""
+    if c.isupper() and 1 <= len(c.split()) <= 4:
+        c = c.title()
+    c = c[:55].strip()
+    if is_weak_concept(c):
+        return ""
+    return c
+
+
+def is_weak_concept(concept: str) -> bool:
+    """True when a stem concept is too generic, OCR-noisy, or truncated."""
+    c = re.sub(r"\s+", " ", (concept or "").strip())
+    if not c or len(c) < 3:
+        return True
+    low = c.lower()
+    if low in _WEAK_SINGLE_CONCEPTS:
+        return True
+    words = low.split()
+    if len(words) == 1:
+        return words[0] in _WEAK_SINGLE_CONCEPTS
+    if len(words) <= 2 and all(
+        w in _WEAK_SINGLE_CONCEPTS or w in {"the", "a", "an"} for w in words
+    ):
+        return True
+    if re.search(
+        r"category to which|object belon|which a given|play in|recogntit|"
+        r"pattern recognition algorithm$|information from a single|"
+        r"^(number of|task of|example of|extractor whose|a typical|summary some|weak notions)|"
+        r"summary summary|image\s+\d+\s+image|change pixel|dealing with image",
+        low,
+    ):
+        return True
+    if low.endswith(" that") or "whose purpose" in low:
+        return True
+    if low.startswith("itself from") or "from one machine" in low:
+        return True
+    if re.search(r"operatio\s+n|result image|origi\s*nx|smoothed image thresholded|"
+                 r"look-up table for|in others the|rationality but what|current square", low):
+        return True
+    if re.match(r"(?i)(suck|but what)", low):
+        return True
+    if len(re.findall(r"\b[A-Z][a-z]{2,}", c)) >= 4:
+        return True
+    if _SHOUTY_STEM_RE.search(c) and len(words) >= 3:
+        return True
+    if len(words) > 7:
+        return True
+    if words[0] in {"what", "which", "how", "why", "when", "the"} and len(words) <= 3:
+        return True
+    last = words[-1]
+    if len(last) <= 5 and re.search(r"(lon|rec|tit)$", last):
+        return True
+    return False
+
+
+def clean_question_stem(question: str, material_title: Optional[str] = None) -> str:
+    q = (question or "").strip()
+    m = _CONCEPT_FROM_STEM_RE.search(q)
+    if m:
+        cleaned = clean_concept_label(m.group(1))
+        if cleaned:
+            q = q[:m.start(1)] + cleaned + q[m.end(1):]
+    topic_m = re.search(r"(?i)in\s+(.+?)\??\s*$", q)
+    if topic_m:
+        topic = clean_concept_label(topic_m.group(1))
+        if topic:
+            q = q[:topic_m.start(1)] + topic + q[topic_m.end(1):]
+    return q
+
+
+def log_quiz_generation_stats(
+    material_title: Optional[str],
+    content_length: int,
+    ai_attempted: bool,
+    ai_time_seconds: float,
+    valid_ai_count: int,
+    fallback_count: int,
+    final_count: int,
+) -> None:
+    logger.info(
+        "Quiz stats title=%s content_len=%d ai_attempted=%s ai_time_seconds=%.2f "
+        "valid_ai_count=%d fallback_count=%d final_count=%d",
+        (material_title or "")[:80],
+        content_length,
+        ai_attempted,
+        ai_time_seconds,
+        valid_ai_count,
+        fallback_count,
+        final_count,
+    )
+
+
+def finalize_quiz_fast(
+    questions: List[Dict[str, Any]],
+    source_text: str,
+    material_title: Optional[str] = None,
+    target: int = 5,
+    deadline: Optional[float] = None,
+    fallback_text: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], int, int]:
+    """Fast validate, dedupe, single fallback fill — no repeated loops."""
+    import time
+
+    fb_source = (fallback_text or source_text or "").strip()
+    validate_text = fb_source if len(fb_source) >= len((source_text or "").strip()) else source_text
+    content_len = len((source_text or "").strip())
+    min_target = target if content_len > 1000 else min(3, target)
+
+    pool = _post_filter_acceptable(questions, validate_text, material_title)
+    valid_primary = len(pool)
+    pool = deduplicate_questions(pool, validate_text, material_title)
+
+    fallback_added = 0
+    if (deadline is None or time.monotonic() < deadline - 0.5):
+        from app.services.quiz_gen_fallback import generate_deterministic_fallback
+
+        fb = generate_deterministic_fallback(
+            fb_source, material_title, target + 4,
+        )
+        fb_filtered = _post_filter_acceptable(fb, validate_text, material_title)
+        before = len(pool)
+        pool = deduplicate_questions(fb_filtered + pool, validate_text, material_title)
+        fallback_added = max(0, len(pool) - before)
+
+    if len(pool) < min_target and (deadline is None or time.monotonic() < deadline - 0.3):
+        from app.services.quiz_gen_fallback import generate_deterministic_fallback
+
+        fb2 = generate_deterministic_fallback(
+            fb_source, material_title, min_target + 6,
+        )
+        fb2_filtered = _post_filter_acceptable(fb2, validate_text, material_title)
+        before = len(pool)
+        pool = deduplicate_questions(pool + fb2_filtered, validate_text, material_title)
+        fallback_added += max(0, len(pool) - before)
+
+    for q in pool:
+        q["question"] = clean_question_stem(str(q.get("question") or ""), material_title)
+
+    pool = deduplicate_questions(pool, validate_text, material_title)
+    pool = _post_filter_acceptable(pool, validate_text, material_title)
+    pool = pool[:target]
+
+    for j, item in enumerate(pool):
+        item["id"] = f"q{j + 1}"
+
+    return pool, valid_primary, fallback_added
+
+
 def repair_and_select_questions(
     questions: List[Dict[str, Any]],
     source_text: str,
     material_title: Optional[str] = None,
     target: int = 5,
 ) -> List[Dict[str, Any]]:
-    """Validate, repair, fallback-fill, and return the best MCQs (up to target)."""
-    min_good = min(3, target)
-    improved = validate_and_improve_questions(questions, source_text, material_title)
-    selected = improved[:target]
-
-    if len(selected) >= min_good:
-        for j, item in enumerate(selected):
-            item["id"] = f"q{j + 1}"
-        return selected[:target]
-
-    from app.services.quiz_gen_fallback import generate_deterministic_fallback
-
-    fallback = generate_deterministic_fallback(source_text, material_title, target)
-    if fallback:
-        merged = selected + fallback
-        improved2 = validate_and_improve_questions(merged, source_text, material_title)
-        if len(improved2) > len(selected):
-            selected = improved2[:target]
-
-    if len(selected) < min_good and len((source_text or "").strip()) > 1000:
-        relaxed = generate_deterministic_fallback(
-            source_text, material_title, target, relax_validation=True,
-        )
-        if relaxed:
-            selected = relaxed[:target]
-
-    for j, item in enumerate(selected):
-        item["id"] = f"q{j + 1}"
-    return selected[:target]
+    final, _, _ = finalize_quiz_fast(questions, source_text, material_title, target=target)
+    return final
 
 
 def _extract_keywords(
@@ -350,22 +634,23 @@ def is_vague_question(question: str, material_title: Optional[str] = None) -> bo
     substantive = [t for t in tokens if t.lower() not in skip]
     if len(substantive) < 1 and len(q.split()) <= 6:
         return True
-    concept_m = re.search(
-        r"(?i)(?:best describes|definition of|role of|main idea of)\s+(.+?)\??\s*$",
-        q,
-    )
+    concept_m = _CONCEPT_FROM_STEM_RE.search(q) or _ROLE_PLAY_RE.search(q)
     if concept_m:
-        concept = concept_m.group(1).strip()
+        concept = clean_concept_label(concept_m.group(1).strip())
+        if not concept or len(concept) < 3:
+            return True
         if _VAGUE_CONCEPT_RE.match(concept):
             return True
-        if re.search(r"which the|category\s+to which|lies\??\s*$", concept, re.I):
+        if re.search(r"category\s+to which|which the|belon$|lies\??\s*$", concept, re.I):
+            return True
+        if concept.lower() in {"what", "which", "how", "why", "when"}:
             return True
         if concept.lower().startswith("change pixel"):
             return True
-        if len(concept.split()) == 1 and concept.lower() in {
-            "length", "classifier", "features", "feature", "length",
-        }:
+        if len(concept.split()) == 1 and concept.lower() in _GENERIC_WORDS:
             return True
+    if re.match(r"(?i)which statement best describes what\??\s*$", q):
+        return True
     return False
 
 

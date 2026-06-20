@@ -1,19 +1,26 @@
 """
-Deterministic MCQ fallback from headings and clean sentences in selected material only.
+Fast deterministic MCQ fallback — template-based, selected material only.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.services.quiz_question_quality import (
+    clean_concept_label,
     clean_option_text,
+    deduplicate_questions,
+    extract_concept_from_stem,
+    extract_educational_sentences,
     is_broken_option,
     is_question_valid,
     is_vague_question,
+    is_weak_concept,
+    normalize_concept_key,
     uses_filename_as_concept,
     _extract_keywords,
+    _SHOUTY_STEM_RE,
 )
 
 _HEADING_RE = re.compile(
@@ -23,99 +30,120 @@ _HEADING_RE = re.compile(
 _DEF_RE = re.compile(
     r"\b([A-Za-z][A-Za-z0-9 /&\-]{3,50})\s+"
     r"(?:is|are|refers to|means|used to|helps|defined as|consists of|includes)\s+"
-    r"([^.\n]{12,140})\.",
+    r"([^.\n]{12,140})\.?",
     re.I,
 )
-_SENTENCE_RE = re.compile(r"[A-Za-z][^.!?]{25,220}[.!?]")
 _SKIP_HEADING = re.compile(
     r"(?i)^(summary|introduction|contents|outline|references|agenda|objectives)$"
 )
 
-
-def _clean_sentences(text: str) -> List[str]:
-    out: List[str] = []
-    seen: Set[str] = set()
-    for m in _SENTENCE_RE.finditer(text or ""):
-        s = clean_option_text(re.sub(r"\s+", " ", m.group(0)).strip())
-        if len(s) < 25 or len(s) > 220:
-            continue
-        if is_broken_option(s):
-            continue
-        if re.search(r"(?i)(?:\[Page\s*\d|Page\s*\d+\])|postprocessing:|image algebra|visual example", s):
-            continue
-        if re.search(r"\d\.\s*$", s) and len(s.split()) <= 6:
-            continue
-        key = s.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(s)
-    return out
+_PRIORITY_TERMS = [
+    "pattern recognition", "supervised learning", "unsupervised learning",
+    "classification", "regression", "feature extraction", "training set",
+    "test set", "decision theory", "feature vector", "edge detection",
+    "image segmentation", "image enhancement", "naive bayes", "bayes theorem",
+    "intelligent agent", "multi-agent system", "swarm intelligence",
+    "riverpod", "flutter", "state management", "prior probability",
+    "posterior probability", "likelihood", "bayesian classification",
+    "conditional independence", "maximum likelihood",
+]
 
 
-def _extract_concepts(text: str, limit: int = 24) -> List[str]:
+def _topic_label(material_title: Optional[str], text: Optional[str] = None) -> str:
+    low = (text or "").lower()
+    for term in _PRIORITY_TERMS:
+        if term in low:
+            return term.title() if term != "naive bayes" else "Naive Bayes"
+    if material_title:
+        t = re.sub(r"\b[A-Z]{2,6}\s*\d{3,4}\b", "", material_title)
+        t = re.sub(r"\b(File|Moodle|Copy|Lecture)\b", "", t, flags=re.I).strip()
+        t = re.sub(r"^\d{1,2}\s+", "", t)
+        t = re.sub(r"(?i)lecture\s*\d+\s*", "", t).strip()
+        t = clean_concept_label(t)
+        if t and not is_weak_concept(t):
+            return t[:50]
+    return "this topic"
+
+
+def _stem_templates(concept: str, topic: str, index: int) -> str:
+    c = clean_concept_label(concept) or concept
+    templates = [
+        f"Which statement best describes {c}?",
+        f"What is the main purpose of {c}?",
+        f"What role does {c} play in {topic}?",
+        f"Which option correctly explains {c}?",
+        f"Why is {c} important in {topic}?",
+    ]
+    return templates[index % len(templates)]
+
+
+def _is_good_concept(term: str) -> bool:
+    t = clean_concept_label(term)
+    if not t or is_weak_concept(t):
+        return False
+    if _SHOUTY_STEM_RE.search(t) and len(t.split()) >= 3:
+        return False
+    if re.match(r"(?i)^(what|which|how|why|when)\b", t):
+        return False
+    if "?" in t or " if its " in t.lower():
+        return False
+    if re.search(r"(?i)image\s*\d|resize$|types of spatial", t):
+        return False
+    return True
+
+
+def _extract_concepts(text: str, limit: int = 20) -> List[str]:
     concepts: List[str] = []
     seen: Set[str] = set()
-    priority = [
-        "pattern recognition",
-        "supervised learning",
-        "unsupervised learning",
-        "classification",
-        "regression",
-        "feature extraction",
-        "training set",
-        "test set",
-        "decision theory",
-        "feature vector",
-        "edge detection",
-        "image segmentation",
-        "sobel operator",
-        "laplacian",
-    ]
     low = (text or "").lower()
-    for term in priority:
-        if term in low and term not in seen:
-            seen.add(term)
-            concepts.append(term)
+    for term in _PRIORITY_TERMS:
+        if term in low and _is_good_concept(term):
+            key = normalize_concept_key(term)
+            if key not in seen:
+                seen.add(key)
+                concepts.append(term)
     for m in _HEADING_RE.finditer(text or ""):
-        term = (m.group(1) or "").strip()
-        if len(term) < 4 or len(term) > 55:
+        term = clean_concept_label((m.group(1) or "").strip())
+        if not _is_good_concept(term) or _SKIP_HEADING.match(term):
             continue
-        if _SKIP_HEADING.match(term):
-            continue
-        if re.search(r"\b(page|slide|file|moodle)\b", term, re.I):
-            continue
-        key = term.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        concepts.append(term)
+        key = normalize_concept_key(term)
+        if key not in seen:
+            seen.add(key)
+            concepts.append(term)
     for m in _DEF_RE.finditer(text or ""):
-        term = (m.group(1) or "").strip()
-        if len(term) >= 4 and term.lower() not in seen:
-            seen.add(term.lower())
+        term = clean_concept_label((m.group(1) or "").strip())
+        key = normalize_concept_key(term)
+        if _is_good_concept(term) and key not in seen:
+            seen.add(key)
             concepts.append(term)
     return concepts[:limit]
 
 
-def _short_material_label(material_title: Optional[str]) -> str:
-    if not material_title:
-        return "this material"
-    t = re.sub(r"\b[A-Z]{2,6}\s*\d{3,4}\b", "", material_title)
-    t = re.sub(r"\b(File|Moodle|Copy)\b", "", t, flags=re.I).strip()
-    return t[:60] if t else "this material"
+def _definition_pairs(text: str, limit: int = 15) -> List[Tuple[str, str]]:
+    pairs: List[Tuple[str, str]] = []
+    seen: Set[str] = set()
+    for m in _DEF_RE.finditer(text or ""):
+        concept = clean_concept_label((m.group(1) or "").strip())
+        answer = clean_option_text((m.group(2) or "").strip())
+        key = normalize_concept_key(concept)
+        if not _is_good_concept(concept) or key in seen or is_broken_option(answer):
+            continue
+        seen.add(key)
+        pairs.append((concept, answer))
+        if len(pairs) >= limit:
+            break
+    return pairs
 
 
-def _answer_for_concept(concept: str, text: str, sentences: List[str]) -> Optional[str]:
-    dm = _DEF_RE.search(text)
-    if dm and dm.group(1).strip().lower() == concept.lower():
-        ans = clean_option_text(dm.group(2).strip())
-        if ans and not is_broken_option(ans):
-            return ans
+def _answer_for_concept(
+    concept: str,
+    text: str,
+    sentences: List[str],
+) -> Optional[str]:
     pattern = re.compile(
         rf"\b{re.escape(concept)}\b\s+"
         r"(?:is|are|refers to|means|used to|helps|defined as|consists of|includes)\s+"
-        r"([^.\n]{12,140})\.",
+        r"([^.\n]{12,140})\.?",
         re.I,
     )
     hit = pattern.search(text)
@@ -123,67 +151,95 @@ def _answer_for_concept(concept: str, text: str, sentences: List[str]) -> Option
         ans = clean_option_text(hit.group(1).strip())
         if ans and not is_broken_option(ans):
             return ans
+    concept_low = concept.lower()
     for s in sentences:
-        if concept.lower() in s.lower():
+        if concept_low in s.lower():
+            return s
+    words = [w for w in concept_low.split() if len(w) > 3]
+    for s in sentences:
+        if len(words) >= 2 and sum(1 for w in words if w in s.lower()) >= 2:
+            return s
+    if len(words) == 1:
+        for s in sentences:
+            if words[0] in s.lower():
+                return s
+    for m in re.finditer(r"[A-Za-z][^.!?]{15,280}[.!?]", text or ""):
+        raw = re.sub(r"\s+", " ", m.group(0)).strip()
+        if concept_low not in raw.lower():
+            continue
+        words_n = raw.split()
+        if len(words_n) < 8 or len(words_n) > 35:
+            continue
+        s = clean_option_text(raw)
+        if s and not is_broken_option(s):
             return s
     return None
 
 
-def _build_question(
+def _build_mcq(
     concept: str,
     answer: str,
     distractors: List[str],
+    template_idx: int,
     source_text: str,
     material_title: Optional[str],
-    relax_validation: bool = False,
+    topic: str,
 ) -> Optional[Dict[str, Any]]:
-    label = _short_material_label(material_title)
-    stems = [
-        f"Which statement best describes {concept}?",
-        f"What is the main idea of {concept} in {label}?",
-    ]
-    question = None
-    for stem in stems:
-        if not is_vague_question(stem, material_title) and not uses_filename_as_concept(
-            stem, material_title
-        ):
-            question = stem
-            break
-    if not question:
+    c = clean_concept_label(concept)
+    if not c or is_weak_concept(c):
+        return None
+    question = _stem_templates(c, topic, template_idx)
+    if is_vague_question(question, material_title) or uses_filename_as_concept(
+        question, material_title,
+    ):
         return None
 
-    options: List[str] = []
     correct = clean_option_text(answer)
-    if correct and not is_broken_option(correct):
-        options.append(correct)
+    if not correct or is_broken_option(correct):
+        return None
+
+    options: List[str] = [correct]
+    used: Set[str] = {correct.lower()}
+    c_low = c.lower()
     for d in distractors:
-        cleaned = clean_option_text(d)
-        if cleaned and cleaned not in options and not is_broken_option(cleaned):
-            options.append(cleaned)
+        o = clean_option_text(d)
+        if not o or o.lower() in used or is_broken_option(o):
+            continue
+        if c_low not in o.lower()[:30]:
+            options.append(o)
+            used.add(o.lower())
         if len(options) >= 4:
             break
-    while len(options) < 4 and distractors:
-        filler = clean_option_text(distractors[len(options) % len(distractors)])
-        if filler and filler not in options:
-            options.append(filler)
+    for d in distractors:
+        if len(options) >= 4:
+            break
+        o = clean_option_text(d)
+        if o and o.lower() not in used and not is_broken_option(o):
+            options.append(o)
+            used.add(o.lower())
+
+    if len(options) < 4:
+        extra = extract_educational_sentences(source_text, limit=80)
+        for d in extra:
+            o = clean_option_text(d)
+            if o and o.lower() not in used and not is_broken_option(o):
+                options.append(o)
+                used.add(o.lower())
+            if len(options) >= 4:
+                break
+
     if len(options) < 4:
         return None
 
-    if relax_validation:
-        return {
-            "question": question,
-            "options": options[:4],
-            "correctIndex": 0,
-        }
-
     keywords = _extract_keywords(source_text, material_title)
-    if is_question_valid(question, options[:4], source_text, material_title, keywords):
-        return {
-            "question": question,
-            "options": options[:4],
-            "correctIndex": 0,
-        }
-    return None
+    if not is_question_valid(question, options[:4], source_text, material_title, keywords):
+        return None
+
+    return {
+        "question": question,
+        "options": options[:4],
+        "correctIndex": 0,
+    }
 
 
 def generate_deterministic_fallback(
@@ -192,76 +248,67 @@ def generate_deterministic_fallback(
     num_questions: int = 5,
     relax_validation: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Build MCQs from headings and definition sentences in the selected text only."""
+    """Fast template-based MCQs from clean sentences in the selected text only."""
     if not text or not text.strip():
         return []
 
-    sentences = _clean_sentences(text)
-    concepts = _extract_concepts(text)
-    if not concepts and sentences:
-        concepts = ["pattern recognition", "supervised learning", "classification"]
-
+    sentences = extract_educational_sentences(text, limit=50)
+    topic = _topic_label(material_title, text)
     used: Set[str] = set()
-    used_distractors: Set[str] = set()
     out: List[Dict[str, Any]] = []
-    keywords = _extract_keywords(text, material_title)
+    template_idx = 0
 
-    for concept in concepts:
-        if concept.lower() in used:
+    for concept in _extract_concepts(text):
+        key = normalize_concept_key(concept)
+        if key in used:
             continue
         answer = _answer_for_concept(concept, text, sentences)
         if not answer:
+            for c2, a2 in _definition_pairs(text):
+                if normalize_concept_key(c2) == key:
+                    answer = a2
+                    break
+        if not answer:
             continue
-        distractors = [
-            s for s in sentences
-            if s != answer and s.lower() not in used_distractors
-        ]
-        q = _build_question(
-            concept, answer, distractors, text, material_title, relax_validation=relax_validation
-        )
-        if not q:
+        distractors = [s for s in sentences if s.lower() != answer.lower()]
+        built: Optional[Dict[str, Any]] = None
+        for try_idx in range(5):
+            q = _build_mcq(
+                concept, answer, distractors, template_idx + try_idx,
+                text, material_title, topic,
+            )
+            if q:
+                built = q
+                template_idx += try_idx + 1
+                break
+        if not built:
             continue
-        if not relax_validation and not is_question_valid(
-            q["question"],
-            q["options"],
-            text,
-            material_title,
-            keywords,
-        ):
-            continue
-        for opt in q.get("options") or []:
-            if opt != q["options"][0]:
-                used_distractors.add(opt.lower())
-        used.add(concept.lower())
-        q["id"] = f"q{len(out) + 1}"
-        out.append(q)
+        used.add(extract_concept_from_stem(built["question"]) or key)
+        out.append(built)
         if len(out) >= num_questions:
             break
 
-    if len(out) < num_questions and len(sentences) >= 4:
-        for i, sent in enumerate(sentences):
-            if len(out) >= num_questions:
-                break
-            concept_match = re.match(r"^([A-Za-z][\w\s/&\-]{3,40}?)\s+(?:is|are)\b", sent, re.I)
-            concept = concept_match.group(1).strip() if concept_match else f"topic {len(out) + 1}"
-            if concept.lower() in used:
-                continue
-            others = [s for j, s in enumerate(sentences) if j != i][:6]
-            q = _build_question(
-                concept, sent, others, text, material_title, relax_validation=relax_validation
+    for concept, answer in _definition_pairs(text):
+        key = normalize_concept_key(concept)
+        if key in used:
+            continue
+        distractors = [s for s in sentences if s.lower() != answer.lower()]
+        built = None
+        for try_idx in range(5):
+            q = _build_mcq(
+                concept, answer, distractors, template_idx + try_idx,
+                text, material_title, topic,
             )
-            if not q:
-                continue
-            if not relax_validation and not is_question_valid(
-                q["question"],
-                q["options"],
-                text,
-                material_title,
-                keywords,
-            ):
-                continue
-            used.add(concept.lower())
-            q["id"] = f"q{len(out) + 1}"
-            out.append(q)
+            if q:
+                built = q
+                template_idx += try_idx + 1
+                break
+        if not built:
+            continue
+        used.add(extract_concept_from_stem(built["question"]) or key)
+        out.append(built)
+        if len(out) >= num_questions:
+            break
 
+    out = deduplicate_questions(out, text, material_title)
     return out[:num_questions]
