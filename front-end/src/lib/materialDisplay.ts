@@ -241,11 +241,24 @@ export function normalizeMaterialForDisplay(m: LearningMaterial): LearningMateri
     }
   }
 
+  const kind = (m.materialKind || "").toLowerCase();
+  if (kind.includes("lab") && len > 300) {
+    quizStatus = "ready";
+    readyForQuiz = true;
+    quizGenerationEligible = true;
+  }
+
+  const visibleInMainList =
+    kind.includes("lab") && len > 300 && readyForQuiz
+      ? true
+      : m.visibleInMainList;
+
   return {
     ...m,
     quizStatus,
     quizGenerationEligible,
     readyForQuiz,
+    visibleInMainList,
   };
 }
 
@@ -263,7 +276,20 @@ function isNumberedCoreMaterial(m: LearningMaterial): boolean {
   );
 }
 
+function isReadyLabForMainList(m: LearningMaterial): boolean {
+  if (isStandaloneExercise(m)) return false;
+  const kind = (m.materialKind || "").toLowerCase();
+  if (!kind.includes("lab")) return false;
+  const num = m.materialNumber ?? extractMaterialNumber(m);
+  if (num >= 9999) return false;
+  const n = normalizeMaterialForDisplay(m);
+  const len = n.contentTextLength ?? 0;
+  if (len <= 300) return false;
+  return n.readyForQuiz === true || n.quizStatus === "ready";
+}
+
 export function isMainListLearningMaterial(m: LearningMaterial): boolean {
+  if (isReadyLabForMainList(m)) return true;
   if (isStandaloneExercise(m)) return false;
   if (!isEducationalKind(m)) return false;
   const n = normalizeMaterialForDisplay(m);
@@ -300,7 +326,10 @@ function dedupeKey(m: LearningMaterial): string {
 function dedupeScore(m: LearningMaterial): number {
   const n = normalizeMaterialForDisplay(m);
   let score = n.contentTextLength ?? 0;
-  if (n.importedContent || n.contentSource === "course_material_import") {
+  const kind = (n.materialKind || "").toLowerCase();
+  if (kind.includes("lab") && (n.contentTextLength ?? 0) > 300 && n.readyForQuiz) {
+    score += 150000;
+  } else if (n.importedContent || n.contentSource === "course_material_import") {
     score += 100000;
   }
   if (n.quizStatus === "ready") score += 5000;

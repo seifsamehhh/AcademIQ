@@ -8,14 +8,12 @@ import re
 from typing import Any, Dict, List, Optional, Set
 
 QUIZ_GENERATION_GUIDANCE = (
-    "You are generating a university MCQ quiz from one selected course material only. "
-    "Use the material title and headings to make every question specific. "
-    "Every question must mention the exact concept being tested. "
-    "Never generate vague questions like 'What is the definition?'. "
-    "Never generate broken answer fragments. "
-    "Each option must be complete and readable. "
-    "If the content is not enough to create good MCQs, return a clear error "
-    "instead of bad questions."
+    "Generate university-level MCQs from the selected material only. "
+    "Every question must mention a specific concept from the selected material. "
+    "Do not use the file name as the concept. "
+    "Do not ask vague questions. "
+    "Every answer option must be a complete, grammatically correct phrase or sentence. "
+    "Return only valid MCQs."
 )
 
 _VAGUE_EXACT_RE = re.compile(
@@ -31,11 +29,22 @@ _VAGUE_GENERIC_RE = re.compile(
     re.I,
 )
 _BROKEN_OPTION_END_RE = re.compile(
-    r"\b(the|about|by|of|a|an|to|in|for|with|and|or|as|on|at|from)\s*\.?\s*$",
+    r"\b(the|about|by|of|a|an|to|in|for|with|and|or|as|on|at|from|approx)\s*\.?\s*$",
     re.I,
 )
 _BROKEN_OPTION_PHRASE_RE = re.compile(
-    r"(?i)practically it refers to|described by An\b|it refers to described",
+    r"(?i)practically it refers to|described by An\b|it refers to described|"
+    r"for human perception refers to|solution is an use|repeat until goal refers to found|"
+    r"\bNNNJ is a So\b|refers to found"
+)
+_FILENAME_CONCEPT_RE = re.compile(
+    r"(?i)\.(pdf|pptx?|ppsx)|_|lecture\s*\d+|lab\s*\d+|test\s+notes|algorithm\s+steps"
+)
+_VAGUE_TITLE_CONCEPT_RE = re.compile(
+    r"(?i)^what\s+is\s+(summary|algorithm\s+steps(?:\s+for\s+search)?|test\s+notes)\s*\??$"
+)
+_VAGUE_PURPOSE_RE = re.compile(
+    r"(?i)^what\s+is\s+(?:the\s+)?purpose\s*\??\s*$"
 )
 _GENERIC_WORDS = frozenset(
     {
@@ -53,7 +62,12 @@ _GENERIC_WORDS = frozenset(
         "used",
         "meaning",
         "genghis",
-        "genghis",
+        "summary",
+        "algorithm",
+        "steps",
+        "notes",
+        "test",
+        "search",
     }
 )
 _GENERIC_OPTION_RE = re.compile(
@@ -91,7 +105,70 @@ def is_broken_option(option: str) -> bool:
         return True
     if o.endswith("...") and len(o) < 40:
         return True
+    if re.search(r"(?i)\brefers to\s*$", o):
+        return True
+    if re.search(r"(?i)^\w+ is a So\b", o):
+        return True
     return False
+
+
+def is_grammatically_broken_question(question: str) -> bool:
+    q = (question or "").strip()
+    if len(q.split()) < 5:
+        return True
+    if not q.endswith("?"):
+        return True
+    if not re.match(r"^(What|Which|How|Why|When|In what|According to)", q, re.I):
+        return True
+    if re.search(r"\?\s*\?", q):
+        return True
+    return False
+
+
+def uses_filename_as_concept(question: str, material_title: Optional[str] = None) -> bool:
+    q = (question or "").strip()
+    if _VAGUE_TITLE_CONCEPT_RE.match(q):
+        return True
+    m = re.match(r"^what\s+(?:is|are)\s+(?:the\s+)?(.+?)\s*\??\s*$", q, re.I)
+    if not m:
+        return False
+    concept = m.group(1).strip()
+    if _FILENAME_CONCEPT_RE.search(concept):
+        return True
+    if material_title and concept.lower() == clean_title_token(material_title).lower():
+        return True
+    if len(concept.split()) <= 2 and concept.lower() in _GENERIC_WORDS:
+        return True
+    return False
+
+
+def clean_title_token(title: str) -> str:
+    t = re.sub(r"\b[A-Z]{2,6}\s*\d{3,4}\b", "", title or "")
+    t = re.sub(r"\b(File|Moodle|Copy|Lab|Lecture)\b", "", t, flags=re.I)
+    t = re.sub(r"\.(pdf|pptx?|ppsx)\b", "", t, flags=re.I)
+    return t.strip()
+
+
+def is_question_valid(
+    question: str,
+    options: List[str],
+    source_text: str,
+    material_title: Optional[str],
+    keywords: List[str],
+) -> bool:
+    if is_vague_question(question, material_title):
+        return False
+    if uses_filename_as_concept(question, material_title):
+        return False
+    if is_grammatically_broken_question(question):
+        return False
+    if _VAGUE_PURPOSE_RE.match(question or ""):
+        return False
+    if not question_mentions_topic(question, material_title, keywords):
+        return False
+    if not _options_valid(options):
+        return False
+    return True
 
 
 def _extract_keywords(
@@ -151,6 +228,12 @@ def is_vague_question(question: str, material_title: Optional[str] = None) -> bo
         return True
     if re.search(r"\badvantages?\s*\??\s*$", q, re.I) and " of " not in q.lower():
         return True
+    if _VAGUE_PURPOSE_RE.match(q):
+        return True
+    if uses_filename_as_concept(q, material_title):
+        return True
+    if _VAGUE_TITLE_CONCEPT_RE.match(q):
+        return True
     if re.match(r"^what\s+are\s+\w+\s*\??\s*$", q, re.I) and " of " not in q.lower():
         word = re.sub(r"^what\s+are\s+|\s*\??\s*$", "", q, flags=re.I).strip()
         if len(word.split()) <= 2:
@@ -177,6 +260,8 @@ def _extract_concepts(text: str, limit: int = 50) -> List[str]:
             if key in seen:
                 continue
             if re.search(r"\b(page|slide)\s*\d", key):
+                continue
+            if key in _GENERIC_WORDS or _FILENAME_CONCEPT_RE.search(term):
                 continue
             seen.add(key)
             concepts.append(term)
@@ -271,6 +356,8 @@ def _build_concept_question(
     if not _options_valid(options):
         return None
     question = f"What is the definition of {c}?"
+    if uses_filename_as_concept(question) or is_vague_question(question):
+        return None
     return {
         "question": question,
         "options": options,
@@ -278,17 +365,46 @@ def _build_concept_question(
     }
 
 
+def _fill_valid_questions_from_concepts(
+    source_text: str,
+    material_title: Optional[str],
+    needed: int,
+    used: Set[str],
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    keywords = _extract_keywords(source_text, material_title)
+    for concept in _extract_concepts(source_text, 40):
+        if concept.lower() in used:
+            continue
+        built = _build_concept_question(concept, source_text, used)
+        if not built:
+            continue
+        if not is_question_valid(
+            built["question"],
+            built["options"],
+            source_text,
+            material_title,
+            keywords,
+        ):
+            continue
+        used.add(concept.lower())
+        out.append(built)
+        if len(out) >= needed:
+            break
+    return out
+
+
 def validate_and_improve_questions(
     questions: List[Dict[str, Any]],
     source_text: str,
     material_title: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Return questions with vague stems rewritten or replaced; no vague stems remain."""
+    """Return only valid MCQs; drop bad questions rather than returning them."""
+    keywords = _extract_keywords(source_text, material_title)
     if not questions:
-        return []
+        return _fill_valid_questions_from_concepts(source_text, material_title, 5, set())
 
     concepts = _extract_concepts(source_text)
-    keywords = _extract_keywords(source_text, material_title)
     if material_title:
         title_clean = re.sub(r"\b[A-Z]{2,6}\s*\d{3,4}\b", "", material_title).strip()
         title_clean = re.sub(r"\b(File|Moodle)\b", "", title_clean, flags=re.I).strip()
@@ -306,6 +422,8 @@ def validate_and_improve_questions(
 
         vague = (
             is_vague_question(question, material_title)
+            or uses_filename_as_concept(question, material_title)
+            or is_grammatically_broken_question(question)
             or _options_too_generic(options)
             or not _options_valid(options)
             or not question_mentions_topic(question, material_title, keywords)
@@ -321,7 +439,13 @@ def validate_and_improve_questions(
                     break
             if concept:
                 new_q = _build_concept_question(concept, source_text, used_concepts)
-                if new_q and not is_vague_question(new_q["question"], material_title):
+                if new_q and is_question_valid(
+                    new_q["question"],
+                    new_q["options"],
+                    source_text,
+                    material_title,
+                    keywords,
+                ):
                     used_concepts.add(concept.lower())
                     new_q["id"] = q.get("id") or f"q{i + 1}"
                     improved.append(new_q)
@@ -335,11 +459,10 @@ def validate_and_improve_questions(
 
         if is_vague_question(question, material_title):
             continue
-        if not question_mentions_topic(question, material_title, keywords):
-            if concepts:
-                question = _rewrite_vague_stem(question, concepts[min(i, len(concepts) - 1)])
-            if not question_mentions_topic(question, material_title, keywords):
-                continue
+        if uses_filename_as_concept(question, material_title):
+            continue
+        if is_grammatically_broken_question(question):
+            continue
 
         if not _options_valid(options):
             concept = concepts[min(i, len(concepts) - 1)] if concepts else None
@@ -351,14 +474,24 @@ def validate_and_improve_questions(
             continue
 
         if len(options) >= 4 and 0 <= correct_idx < len(options):
-            improved.append(
-                {
-                    "id": q.get("id") or f"q{i + 1}",
-                    "question": question,
-                    "options": options[:4],
-                    "correctIndex": correct_idx,
-                }
-            )
+            if is_question_valid(question, options[:4], source_text, material_title, keywords):
+                improved.append(
+                    {
+                        "id": q.get("id") or f"q{i + 1}",
+                        "question": question,
+                        "options": options[:4],
+                        "correctIndex": correct_idx,
+                    }
+                )
+
+    if len(improved) < len(questions):
+        extra = _fill_valid_questions_from_concepts(
+            source_text,
+            material_title,
+            max(len(questions) - len(improved), 0),
+            used_concepts,
+        )
+        improved.extend(extra)
 
     for j, item in enumerate(improved):
         item["id"] = f"q{j + 1}"
