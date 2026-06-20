@@ -127,6 +127,7 @@ _CONCEPT_FROM_STEM_RE = re.compile(
     r"(?i)(?:best describes|purpose of|main purpose of|role of|main idea of|main goal of|"
     r"definition of|correctly explains|difference between|important in|role does)\s+(.+?)\??\s*$"
 )
+_HOW_DOES_RE = re.compile(r"(?i)how does (.+?) support")
 _ROLE_PLAY_RE = re.compile(r"(?i)what role does\s+(.+?)\s+play in")
 _FILE_NOISE_RE = re.compile(
     r"(?i)\b(?:swe\d+|csc\d+|csc\s*\d+|file|moodle|copy)\b|\.(?:pdf|pptx?|ppsx|docx?)\b"
@@ -144,18 +145,84 @@ _MATERIAL_TITLE_PREFIX_RE = re.compile(
 _IMPORT_DEF_PREFIX_RE = re.compile(
     r"(?i)^(?:test\s+import\s+definition|import\s+definition)\s*:\s*"
 )
+_MERGED_CAMEL_RE = re.compile(r"([a-z])([A-Z])")
+_COORD_JUNK_RE = re.compile(r"\(x,\s*y\).*\(x,\s*y\)", re.I)
+_PROMPT_OPTION_RE = re.compile(
+    r"(?i)(?:which of the following|suppose that|sample input|sample output|"
+    r"input\s*/?\s*output|input output|operation\s*\?|origi|exercise|"
+    r"\bquestion\b|\bsolve\b|\bcalculate\b|table contains|given table|"
+    r"shown in the following|resize 2nd image|njnj|nnnj|for motion detection|"
+    r"sample input/output|points\s*\)|algorithm steps for search)"
+)
+_JUNK_LINE_RE = re.compile(
+    r"(?i)(?:sample input|sample output|input/output|input output|"
+    r"which of the following|suppose that|operation\s*\?|origi\s*nx|"
+    r"points\s*\)|table contains|given table|shown in the following|"
+    r"resize 2nd image|njnj|nnnj|\(x,\s*y\)\(x,\s*y\))"
+)
+MAX_FALLBACK_ATTEMPTS = 10
+MAX_OPTION_WORDS = 35
+MIN_OPTION_WORDS = 5
+
+
+def normalize_merged_words(text: str) -> str:
+    """Insert spaces in OCR-merged tokens like LuminosityGray -> Luminosity Gray."""
+    s = (text or "").strip()
+    if not s:
+        return ""
+    s = _MERGED_CAMEL_RE.sub(r"\1 \2", s)
+    for pair in (
+        ("LuminosityGray", "Luminosity Gray"),
+        ("GrayScale", "Gray Scale"),
+        ("Origi nx", "Origin"),
+        ("OrigiNx", "Origin"),
+        ("Image f", "Image f"),
+    ):
+        s = re.sub(re.escape(pair[0]), pair[1], s, flags=re.I)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def prepare_source_text_for_quiz(text: str) -> str:
+    """Clean source text before concept/option extraction."""
+    if not text:
+        return ""
+    cleaned_lines: List[str] = []
+    for line in (text or "").splitlines():
+        line = normalize_merged_words(line.strip())
+        if not line or len(line) < 12:
+            continue
+        if _JUNK_LINE_RE.search(line):
+            continue
+        if _COORD_JUNK_RE.search(line):
+            continue
+        if line.strip().endswith("?"):
+            continue
+        if re.match(r"(?i)^(which|what|how|why|when|suppose)\b", line):
+            continue
+        if len(re.findall(r"[^\w\s]", line)) > max(8, len(line.split()) * 2):
+            continue
+        cleaned_lines.append(line)
+    body = "\n".join(cleaned_lines)
+    if not body.strip():
+        body = normalize_merged_words(text)
+    return re.sub(r"\s+", " ", body).strip()
 
 
 def clean_option_text(option: str) -> str:
-    """Normalize an MCQ option into a complete readable sentence."""
+    """Normalize an MCQ option — never a question; ends with a period."""
     o = re.sub(r"[\uf000-\uf8ff\ufffd•▪]", " ", (option or ""))
     o = re.sub(r"\s+", " ", o).strip()
     if not o:
         return ""
+    o = o.replace("?", ".")
     o = o.rstrip(",;:")
+    o = normalize_merged_words(o)
     if o and o[0].islower():
         o = o[0].upper() + o[1:]
-    if o and not o.endswith((".", "!", "?")):
+    words = o.split()
+    if len(words) > MAX_OPTION_WORDS:
+        o = " ".join(words[:MAX_OPTION_WORDS]).rstrip(",;:")
+    if o and not o.endswith((".", "!")):
         o += "."
     if len(o) > 120:
         o = o[:117].rsplit(" ", 1)[0] + "."
@@ -195,26 +262,57 @@ def strip_material_title_from_option(option: str) -> str:
     return clean_option_text(o)
 
 
+def _generic_wrong_option(
+    concept: str,
+    source_text: str,
+    used: Set[str],
+) -> str:
+    """Fallback distractor from a different concept in the same material."""
+    prepared = prepare_source_text_for_quiz(source_text)
+    for other in _extract_concepts(prepared, 25):
+        key = normalize_concept_key(other)
+        if key in used or normalize_concept_key(concept) == key:
+            continue
+        if is_weak_concept(other):
+            continue
+        phrase = clean_option_text(
+            f"In this material, {other} is discussed separately from {concept}."
+        )
+        if not is_broken_option(phrase):
+            return phrase
+    return clean_option_text(
+        "This statement does not accurately reflect the selected course material."
+    )
+
+
 def _pick_replacement_option(
     source_text: str,
     used: Set[str],
     material_title: Optional[str] = None,
+    avoid_concept: Optional[str] = None,
+    global_used: Optional[Set[str]] = None,
 ) -> str:
-    for s in extract_educational_sentences(source_text, limit=80):
+    prepared = prepare_source_text_for_quiz(source_text)
+    blocked = set(used)
+    if global_used:
+        blocked |= global_used
+    for s in extract_educational_sentences(prepared, limit=80):
         candidate = strip_material_title_from_option(s)
-        if not candidate or candidate.lower() in used:
+        if not candidate or candidate.lower() in blocked:
+            continue
+        if avoid_concept and avoid_concept.lower() in candidate.lower()[:40]:
             continue
         if is_broken_option(candidate) or is_material_title_option(candidate, material_title):
             continue
         return candidate
-    for s in _extract_clean_sentences(source_text, limit=40):
+    for s in _extract_clean_sentences(prepared, limit=40):
         candidate = strip_material_title_from_option(s)
-        if not candidate or candidate.lower() in used:
+        if not candidate or candidate.lower() in blocked:
             continue
         if is_broken_option(candidate) or is_material_title_option(candidate, material_title):
             continue
         return candidate
-    return "This concept is explained in the selected course material."
+    return _generic_wrong_option(avoid_concept or "this topic", source_text, blocked)
 
 
 def sanitize_quiz_options(
@@ -222,24 +320,30 @@ def sanitize_quiz_options(
     correct_index: int,
     source_text: str,
     material_title: Optional[str] = None,
+    global_used: Optional[Set[str]] = None,
 ) -> Tuple[List[str], int]:
     """Clean options; replace title/import junk with material sentences."""
-    used: Set[str] = set()
+    used: Set[str] = set(global_used or [])
     cleaned: List[str] = []
     correct_idx = max(0, min(int(correct_index or 0), max(0, len(options) - 1)))
     correct_raw = options[correct_idx] if options else ""
+    concept = ""
 
     for opt in options:
         o = strip_material_title_from_option(clean_option_text(opt))
         if is_material_title_option(o, material_title) or is_broken_option(o):
-            o = _pick_replacement_option(source_text, used, material_title)
+            o = _pick_replacement_option(
+                source_text, used, material_title, concept, global_used,
+            )
         if o.lower() in used:
-            o = _pick_replacement_option(source_text, used, material_title)
+            o = _pick_replacement_option(
+                source_text, used, material_title, concept, global_used,
+            )
         used.add(o.lower())
         cleaned.append(o)
 
     if not cleaned:
-        cleaned = [_pick_replacement_option(source_text, set(), material_title)]
+        cleaned = [_pick_replacement_option(source_text, set(), material_title, None, global_used)]
 
     correct_clean = strip_material_title_from_option(clean_option_text(correct_raw))
     if (
@@ -251,6 +355,8 @@ def sanitize_quiz_options(
             source_text,
             {x.lower() for x in cleaned},
             material_title,
+            concept,
+            global_used,
         )
         if correct_idx < len(cleaned):
             cleaned[correct_idx] = replacement
@@ -260,16 +366,27 @@ def sanitize_quiz_options(
 
     while len(cleaned) < 4:
         extra = _pick_replacement_option(
-            source_text, {x.lower() for x in cleaned}, material_title,
+            source_text, {x.lower() for x in cleaned}, material_title, concept, global_used,
         )
         cleaned.append(extra)
+
+    if global_used is not None:
+        global_used.update(x.lower() for x in cleaned)
 
     return cleaned[:4], correct_idx
 
 
 def is_broken_option(option: str) -> bool:
-    """True when an MCQ option is a fragment or unreadable."""
+    """True when an MCQ option is a fragment, prompt, question, or unreadable."""
     o = (option or "").strip()
+    if not o:
+        return True
+    if "?" in o:
+        return True
+    if _PROMPT_OPTION_RE.search(o):
+        return True
+    if _COORD_JUNK_RE.search(o):
+        return True
     if len(o) < 12:
         return True
     if _GENERIC_OPTION_RE.match(o):
@@ -279,7 +396,14 @@ def is_broken_option(option: str) -> bool:
     if _BROKEN_OPTION_PHRASE_RE.search(o):
         return True
     words = o.split()
-    if len(words) < 4 and not _TECH_TERM_RE.match(o):
+    if len(words) < MIN_OPTION_WORDS and not _TECH_TERM_RE.match(o):
+        return True
+    if len(words) > MAX_OPTION_WORDS:
+        return True
+    if re.match(r"(?i)^(which|what|how|why|when|suppose)\b", o):
+        return True
+    sym = len(re.findall(r"[^\w\s]", o))
+    if sym > max(6, len(words)):
         return True
     if o.endswith("...") and len(o) < 40:
         return True
@@ -301,7 +425,76 @@ def is_broken_option(option: str) -> bool:
         return True
     if re.search(r"\d\.\s*$", o) and len(words) <= 6:
         return True
+    if re.search(r"(?i)\bex:\s|ex\d:|pixel operat|sort, square|change pixel position|"
+                 r"given by:|depends on non\s*-?\s*linear|\)f\(|\)=m", o):
+        return True
+    if "…" in o or "..." in o:
+        return True
+    if has_merged_ocr_words(o):
+        return True
     return False
+
+
+def has_merged_ocr_words(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if re.search(r"[a-z][A-Z][a-z]", t):
+        return True
+    if re.search(r"(?i)luminositygray|grayscale(?!\s)|origi\s*nx", t):
+        return True
+    return False
+
+
+def is_broken_question_stem(question: str, material_title: Optional[str] = None) -> bool:
+    q = (question or "").strip()
+    if not q:
+        return True
+    if has_merged_ocr_words(q):
+        return True
+    if _PROMPT_OPTION_RE.search(q):
+        return True
+    if re.search(r"(?i)sample input/output|sample input|sample output|"
+                 r"magnitude the magnitude|direction the direction", q):
+        return True
+    concept = extract_concept_from_stem(q)
+    if concept and has_merged_ocr_words(concept):
+        return True
+    if is_vague_question(q, material_title):
+        return True
+    if is_grammatically_broken_question(q):
+        return True
+    return False
+
+
+def rewrite_broken_question(
+    question: str,
+    source_text: str,
+    material_title: Optional[str] = None,
+) -> Optional[str]:
+    """Rewrite a bad stem using a clean concept from the material."""
+    prepared = prepare_source_text_for_quiz(source_text)
+    concept = clean_concept_label(normalize_merged_words(extract_concept_from_stem(question)))
+    if not concept or is_weak_concept(concept) or has_merged_ocr_words(concept):
+        concept = ""
+        for candidate in _extract_concepts(prepared, 20):
+            c = clean_concept_label(candidate)
+            if c and not is_weak_concept(c) and not has_merged_ocr_words(c):
+                concept = c
+                break
+    if not concept:
+        return None
+    topic = clean_concept_label(clean_title_token(material_title or "")) or "this topic"
+    templates = [
+        f"Which statement best describes {concept}?",
+        f"What is the main purpose of {concept}?",
+        f"Why is {concept} important in {topic}?",
+        f"How does {concept} support {topic}?",
+    ]
+    for stem in templates:
+        if not is_broken_question_stem(stem, material_title):
+            return stem
+    return None
 
 
 def is_grammatically_broken_question(question: str) -> bool:
@@ -364,16 +557,14 @@ def is_question_valid(
     material_title: Optional[str],
     keywords: List[str],
 ) -> bool:
-    if is_vague_question(question, material_title):
-        return False
-    concept = extract_concept_from_stem(question)
-    if is_weak_concept(concept):
+    if is_broken_question_stem(question, material_title):
         return False
     if uses_filename_as_concept(question, material_title):
         return False
-    if is_grammatically_broken_question(question):
-        return False
     if _VAGUE_PURPOSE_RE.match(question or ""):
+        return False
+    concept = extract_concept_from_stem(question)
+    if is_weak_concept(concept):
         return False
     if not question_mentions_topic(question, material_title, keywords):
         return False
@@ -398,6 +589,9 @@ def extract_concept_from_stem(question: str) -> str:
     m_role = _ROLE_PLAY_RE.search(q)
     if m_role:
         return normalize_concept_key(m_role.group(1).strip())
+    m_how = _HOW_DOES_RE.search(q)
+    if m_how:
+        return normalize_concept_key(m_how.group(1).strip())
     m2 = re.match(r"^what\s+(?:is|are)\s+(?:the\s+)?(.+?)\s*\??\s*$", q, re.I)
     if m2:
         return normalize_concept_key(m2.group(1).strip())
@@ -482,7 +676,8 @@ def deduplicate_questions(
 
 
 def extract_educational_sentences(text: str, limit: int = 40) -> List[str]:
-    """Clean sentences from selected material (8–35 words, no OCR noise)."""
+    """Clean sentences from selected material (8–35 words, no OCR noise or prompts)."""
+    text = prepare_source_text_for_quiz(text)
     out: List[str] = []
     seen: Set[str] = set()
     noise = re.compile(
@@ -491,8 +686,14 @@ def extract_educational_sentences(text: str, limit: int = 40) -> List[str]:
     )
     for m in re.finditer(r"[A-Za-z][^.!?]{15,280}[.!?]", text or ""):
         raw = re.sub(r"\s+", " ", m.group(0)).strip()
+        if raw.endswith("?"):
+            continue
+        if re.match(r"(?i)^(which|what|how|why|when|suppose)\b", raw):
+            continue
+        if _JUNK_LINE_RE.search(raw) or _PROMPT_OPTION_RE.search(raw):
+            continue
         words = raw.split()
-        if len(words) < 8 or len(words) > 35:
+        if len(words) < 8 or len(words) > MAX_OPTION_WORDS:
             continue
         if noise.search(raw):
             continue
@@ -511,7 +712,7 @@ def extract_educational_sentences(text: str, limit: int = 40) -> List[str]:
 
 def clean_concept_label(raw: str) -> str:
     """Strip file/OCR prefixes from a concept label."""
-    c = (raw or "").strip()
+    c = normalize_merged_words((raw or "").strip())
     c = _FILE_NOISE_RE.sub(" ", c)
     c = _COPY_NUM_RE.sub(" ", c)
     c = _DIGIT_PREFIX_RE.sub("", c)
@@ -555,7 +756,12 @@ def is_weak_concept(concept: str) -> bool:
     if low.startswith("itself from") or "from one machine" in low:
         return True
     if re.search(r"operatio\s+n|result image|origi\s*nx|smoothed image thresholded|"
-                 r"look-up table for|in others the|rationality but what|current square", low):
+                 r"look-up table for|in others the|rationality but what|current square|"
+                 r"sample input|sample output|has one histogram|luminositygray|"
+                 r"at the edges|pixels closer|such that|"
+                 r"magnitude the magnitude|direction the direction", low):
+        return True
+    if low.endswith(" we") or low.endswith(" we?"):
         return True
     if re.match(r"(?i)(suck|but what)", low):
         return True
@@ -610,6 +816,53 @@ def log_quiz_generation_stats(
     )
 
 
+def _sanitize_mcq_item(
+    item: Dict[str, Any],
+    source_text: str,
+    material_title: Optional[str],
+    global_used: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
+    q = clean_question_stem(str(item.get("question") or ""), material_title)
+    if is_broken_question_stem(q, material_title):
+        rewritten = rewrite_broken_question(q, source_text, material_title)
+        if rewritten:
+            q = rewritten
+    opts, idx = sanitize_quiz_options(
+        list(item.get("options") or []),
+        int(item.get("correctIndex") or 0),
+        source_text,
+        material_title,
+        global_used,
+    )
+    item["question"] = q
+    item["options"] = opts
+    item["correctIndex"] = idx
+    return item
+
+
+def mcq_passes_final_sanity(
+    item: Dict[str, Any],
+    source_text: str,
+    material_title: Optional[str],
+) -> bool:
+    q = str(item.get("question") or "").strip()
+    opts = list(item.get("options") or [])
+    idx = int(item.get("correctIndex") or 0)
+    if is_broken_question_stem(q, material_title):
+        return False
+    if len(opts) != 4:
+        return False
+    if len({o.lower() for o in opts}) != 4:
+        return False
+    if not (0 <= idx < 4):
+        return False
+    for o in opts:
+        if "?" in o or is_broken_option(o):
+            return False
+    keywords = _extract_keywords(source_text, material_title)
+    return is_question_valid(q, opts, source_text, material_title, keywords)
+
+
 def finalize_quiz_fast(
     questions: List[Dict[str, Any]],
     source_text: str,
@@ -658,17 +911,41 @@ def finalize_quiz_fast(
 
     pool = deduplicate_questions(pool, validate_text, material_title)
     pool = _post_filter_acceptable(pool, validate_text, material_title)
-    pool = pool[:target]
 
+    sanitized: List[Dict[str, Any]] = []
+    global_used: Set[str] = set()
     for item in pool:
-        opts, idx = sanitize_quiz_options(
-            list(item.get("options") or []),
-            int(item.get("correctIndex") or 0),
-            validate_text,
-            material_title,
+        item = _sanitize_mcq_item(item, validate_text, material_title, global_used)
+        if mcq_passes_final_sanity(item, validate_text, material_title):
+            sanitized.append(item)
+    pool = sanitized
+
+    fallback_attempts = 0
+    while (
+        len(pool) < min_target
+        and fallback_attempts < MAX_FALLBACK_ATTEMPTS
+        and (deadline is None or time.monotonic() < deadline - 0.25)
+    ):
+        fallback_attempts += 1
+        from app.services.quiz_gen_fallback import generate_deterministic_fallback
+
+        need = min_target - len(pool) + 2
+        fb = generate_deterministic_fallback(
+            fb_source, material_title, need,
         )
-        item["options"] = opts
-        item["correctIndex"] = idx
+        for raw_q in fb:
+            item = _sanitize_mcq_item(raw_q, validate_text, material_title, global_used)
+            if not mcq_passes_final_sanity(item, validate_text, material_title):
+                continue
+            merged = deduplicate_questions(pool + [item], validate_text, material_title)
+            if len(merged) > len(pool):
+                pool = merged
+                fallback_added += 1
+            if len(pool) >= min_target:
+                break
+
+    pool = [q for q in pool if mcq_passes_final_sanity(q, validate_text, material_title)]
+    pool = pool[:target]
 
     for j, item in enumerate(pool):
         item["id"] = f"q{j + 1}"
