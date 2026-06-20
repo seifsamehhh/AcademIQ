@@ -167,20 +167,100 @@ def _supplement_to_target(
         return primary, primary_engine
 
 
+def _questions_meet_minimum_quality(
+    questions: List[Dict[str, Any]],
+    source_text: str,
+    material_title: Optional[str],
+) -> bool:
+    from app.services.quiz_question_quality import (
+        clean_option_text,
+        is_broken_option,
+        is_grammatically_broken_question,
+        is_vague_question,
+    )
+    if len(questions) < 3:
+        return False
+    good = 0
+    for q in questions:
+        stem = str(q.get("question") or "")
+        opts = [clean_option_text(o) for o in q.get("options") or []]
+        if is_vague_question(stem, material_title):
+            continue
+        if is_grammatically_broken_question(stem):
+            continue
+        if len(opts) < 4 or any(is_broken_option(o) for o in opts):
+            continue
+        good += 1
+    return good >= 3
+
+
 def _validate_questions(
     questions: List[Dict[str, Any]],
     text: str,
     material_title: Optional[str],
+    target: int = 5,
 ) -> List[Dict[str, Any]]:
-    if not questions:
+    if not questions and not text:
         return questions
     try:
-        from app.services.quiz_question_quality import validate_and_improve_questions
+        from app.services.quiz_question_quality import repair_and_select_questions
 
-        return validate_and_improve_questions(questions, text, material_title)
+        return repair_and_select_questions(questions, text, material_title, target=target)
     except Exception as exc:
         logger.warning("Question validation failed: %s", exc)
         return questions
+
+
+def _finalize_questions(
+    questions: List[Dict[str, Any]],
+    text: str,
+    material_title: Optional[str],
+    num_questions: int,
+) -> List[Dict[str, Any]]:
+    return _validate_questions(questions, text, material_title, target=num_questions)
+
+
+def _guarantee_questions_for_long_content(
+    questions: List[Dict[str, Any]],
+    text: str,
+    material_title: Optional[str],
+    num_questions: int,
+    engine: str,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """Never return empty for substantial selected material (>1000 chars)."""
+    min_good = min(3, num_questions)
+    if len(questions) >= min_good:
+        return questions[:num_questions], engine
+
+    if len(text.strip()) <= 1000:
+        return questions, engine
+
+    try:
+        from app.services.quiz_gen_fallback import generate_deterministic_fallback
+        from app.services.quiz_question_quality import repair_and_select_questions
+
+        fallback = generate_deterministic_fallback(text, material_title, num_questions)
+        repaired = repair_and_select_questions(
+            fallback, text, material_title, target=num_questions,
+        )
+        if len(repaired) >= min_good:
+            return repaired[:num_questions], "deterministic_fallback"
+
+        relaxed = generate_deterministic_fallback(
+            text, material_title, num_questions, relax_validation=True,
+        )
+        if relaxed:
+            from app.services.quiz_question_quality import _post_filter_acceptable
+
+            filtered = _post_filter_acceptable(relaxed, text, material_title)
+            if len(filtered) >= min_good:
+                return filtered[:num_questions], "deterministic_fallback_relaxed"
+            if filtered:
+                return filtered[:num_questions], "deterministic_fallback_partial"
+    except Exception as exc:
+        logger.warning("Long-content fallback failed: %s", exc)
+
+    return questions[:num_questions], engine
 
 
 def generate_questions(
@@ -225,16 +305,29 @@ def generate_questions(
     if not text.strip():
         return [], "no_text"
 
+    draft_count = max(num_questions * 2, 10)
+    collected: List[Dict[str, Any]] = []
+    last_engine = "failed"
+
     # ── 1. Lightweight ────────────────────────────────────────────────────────
     try:
         from app.services.quiz_gen_light import generate_lightweight
 
-        light = generate_lightweight(text, num_questions=num_questions)
+        light = generate_lightweight(text, num_questions=draft_count)
         if light:
             logger.info("Lightweight engine: %d questions", len(light))
-            combined, eng = _supplement_to_target(light, text, num_questions, "light")
-            return _validate_questions(combined, text, material_title), eng
-        logger.warning("Lightweight engine returned 0 questions")
+            combined, eng = _supplement_to_target(light, text, draft_count, "light")
+            finalized = _finalize_questions(combined, text, material_title, num_questions)
+            if finalized and _questions_meet_minimum_quality(
+                finalized, text, material_title,
+            ):
+                return _guarantee_questions_for_long_content(
+                    finalized, text, material_title, num_questions, eng,
+                )
+            if finalized:
+                collected = finalized
+                last_engine = eng
+        logger.warning("Lightweight engine returned 0 valid questions after validation")
     except Exception as exc:
         logger.error("Lightweight engine failed: %s", exc, exc_info=True)
 
@@ -242,23 +335,41 @@ def generate_questions(
     try:
         from app.services.quiz_gen_lecture import generate_lecture_quiz
 
-        lecture = generate_lecture_quiz(text, num_questions=num_questions)
+        lecture = generate_lecture_quiz(text, num_questions=draft_count)
         if lecture:
             logger.info("Lecture engine: %d questions", len(lecture))
-            combined, eng = _supplement_to_target(lecture, text, num_questions, "lecture")
-            return _validate_questions(combined, text, material_title), eng
-        logger.warning("Lecture engine returned 0 questions")
+            combined, eng = _supplement_to_target(lecture, text, draft_count, "lecture")
+            finalized = _finalize_questions(combined, text, material_title, num_questions)
+            if finalized and _questions_meet_minimum_quality(
+                finalized, text, material_title,
+            ):
+                return _guarantee_questions_for_long_content(
+                    finalized, text, material_title, num_questions, eng,
+                )
+            if finalized:
+                collected = finalized
+                last_engine = eng
+        logger.warning("Lecture engine returned 0 valid questions after validation")
     except Exception as exc:
         logger.error("Lecture engine failed: %s", exc, exc_info=True)
 
     # ── 3. Heavy NLTK (local dev only) ────────────────────────────────────────
     if available():
         try:
-            heavy = generate_from_text(text, num_questions=num_questions)
+            heavy = generate_from_text(text, num_questions=draft_count)
             if len(heavy) >= 3:
                 logger.info("Heavy engine: %d questions", len(heavy))
-                combined, eng = _supplement_to_target(heavy, text, num_questions, "heavy")
-                return _validate_questions(combined, text, material_title), eng
+                combined, eng = _supplement_to_target(heavy, text, draft_count, "heavy")
+                finalized = _finalize_questions(combined, text, material_title, num_questions)
+                if finalized and _questions_meet_minimum_quality(
+                    finalized, text, material_title,
+                ):
+                    return _guarantee_questions_for_long_content(
+                        finalized, text, material_title, num_questions, eng,
+                    )
+                if finalized:
+                    collected = finalized
+                    last_engine = eng
             logger.warning("Heavy engine: only %d questions", len(heavy))
         except Exception as exc:
             logger.warning("Heavy engine failed: %s", exc, exc_info=True)
@@ -267,13 +378,45 @@ def generate_questions(
     try:
         from app.services.quiz_gen_fragment import generate_fragment_quiz
 
-        fragment = generate_fragment_quiz(text, num_questions=num_questions)
+        fragment = generate_fragment_quiz(text, num_questions=draft_count)
         if fragment:
             logger.info("Fragment engine: %d questions", len(fragment))
-            validated = _validate_questions(fragment[:num_questions], text, material_title)
-            return validated, "fragment"
-        logger.warning("Fragment engine returned 0 questions")
+            finalized = _finalize_questions(
+                fragment[:draft_count], text, material_title, num_questions,
+            )
+            if finalized and _questions_meet_minimum_quality(
+                finalized, text, material_title,
+            ):
+                return _guarantee_questions_for_long_content(
+                    finalized, text, material_title, num_questions, "fragment",
+                )
+            if finalized:
+                collected = finalized
+                last_engine = "fragment"
+        logger.warning("Fragment engine returned 0 valid questions after validation")
     except Exception as exc:
         logger.error("Fragment engine failed: %s", exc, exc_info=True)
 
-    return [], "failed"
+    # ── 5. Deterministic fallback (selected material only) ────────────────────
+    if collected:
+        finalized = _finalize_questions(collected, text, material_title, num_questions)
+        if finalized:
+            return _guarantee_questions_for_long_content(
+                finalized, text, material_title, num_questions, last_engine,
+            )
+
+    try:
+        from app.services.quiz_gen_fallback import generate_deterministic_fallback
+
+        fallback = generate_deterministic_fallback(text, material_title, num_questions)
+        finalized = _finalize_questions(fallback, text, material_title, num_questions)
+        if finalized:
+            return _guarantee_questions_for_long_content(
+                finalized, text, material_title, num_questions, "deterministic_fallback",
+            )
+    except Exception as exc:
+        logger.error("Deterministic fallback failed: %s", exc, exc_info=True)
+
+    return _guarantee_questions_for_long_content(
+        [], text, material_title, num_questions, "failed",
+    )
