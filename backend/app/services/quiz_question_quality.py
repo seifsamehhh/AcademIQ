@@ -133,6 +133,17 @@ _FILE_NOISE_RE = re.compile(
 )
 _COPY_NUM_RE = re.compile(r"\s*\(\d+\)\s*")
 _DIGIT_PREFIX_RE = re.compile(r"^\d{1,2}\s+")
+_MATERIAL_TITLE_OPTION_RE = re.compile(
+    r"(?i)(?:\blecture\s*\d|\blab\s*\d|test\s+import\s+definition|import\s+definition|"
+    r"ready\s+for\s+quiz|selected\s+material|\.pdf\b|\.pptx\b|\.ppsx\b|\bfile\b|\bmoodle\b)"
+)
+_MATERIAL_TITLE_PREFIX_RE = re.compile(
+    r"(?i)^(?:lecture|lab)\s*\d+\s*[—–\-]\s*"
+    r"(?:test\s+import\s+definition|import\s+definition)?\s*:\s*"
+)
+_IMPORT_DEF_PREFIX_RE = re.compile(
+    r"(?i)^(?:test\s+import\s+definition|import\s+definition)\s*:\s*"
+)
 
 
 def clean_option_text(option: str) -> str:
@@ -149,6 +160,111 @@ def clean_option_text(option: str) -> str:
     if len(o) > 120:
         o = o[:117].rsplit(" ", 1)[0] + "."
     return o
+
+
+def is_material_title_option(
+    option: str,
+    material_title: Optional[str] = None,
+) -> bool:
+    """True when an option looks like a file/material title, not an answer."""
+    o = (option or "").strip()
+    if not o:
+        return True
+    if _MATERIAL_TITLE_OPTION_RE.search(o):
+        return True
+    if re.match(r"(?i)^lecture\s*\d+\s*[—–\-]", o):
+        return True
+    if re.match(r"(?i)^lab\s*\d+\s*[—–\-]", o):
+        return True
+    if material_title:
+        title_clean = clean_title_token(material_title).lower()
+        if title_clean and len(title_clean) >= 8 and title_clean in o.lower():
+            return True
+    return False
+
+
+def strip_material_title_from_option(option: str) -> str:
+    """Remove lecture/lab/test-import title prefixes; keep answer body only."""
+    o = (option or "").strip()
+    m = _MATERIAL_TITLE_PREFIX_RE.match(o)
+    if m:
+        o = o[m.end() :]
+    m2 = _IMPORT_DEF_PREFIX_RE.match(o)
+    if m2:
+        o = o[m2.end() :]
+    return clean_option_text(o)
+
+
+def _pick_replacement_option(
+    source_text: str,
+    used: Set[str],
+    material_title: Optional[str] = None,
+) -> str:
+    for s in extract_educational_sentences(source_text, limit=80):
+        candidate = strip_material_title_from_option(s)
+        if not candidate or candidate.lower() in used:
+            continue
+        if is_broken_option(candidate) or is_material_title_option(candidate, material_title):
+            continue
+        return candidate
+    for s in _extract_clean_sentences(source_text, limit=40):
+        candidate = strip_material_title_from_option(s)
+        if not candidate or candidate.lower() in used:
+            continue
+        if is_broken_option(candidate) or is_material_title_option(candidate, material_title):
+            continue
+        return candidate
+    return "This concept is explained in the selected course material."
+
+
+def sanitize_quiz_options(
+    options: List[str],
+    correct_index: int,
+    source_text: str,
+    material_title: Optional[str] = None,
+) -> Tuple[List[str], int]:
+    """Clean options; replace title/import junk with material sentences."""
+    used: Set[str] = set()
+    cleaned: List[str] = []
+    correct_idx = max(0, min(int(correct_index or 0), max(0, len(options) - 1)))
+    correct_raw = options[correct_idx] if options else ""
+
+    for opt in options:
+        o = strip_material_title_from_option(clean_option_text(opt))
+        if is_material_title_option(o, material_title) or is_broken_option(o):
+            o = _pick_replacement_option(source_text, used, material_title)
+        if o.lower() in used:
+            o = _pick_replacement_option(source_text, used, material_title)
+        used.add(o.lower())
+        cleaned.append(o)
+
+    if not cleaned:
+        cleaned = [_pick_replacement_option(source_text, set(), material_title)]
+
+    correct_clean = strip_material_title_from_option(clean_option_text(correct_raw))
+    if (
+        is_material_title_option(correct_clean, material_title)
+        or is_broken_option(correct_clean)
+        or correct_clean.lower() not in {x.lower() for x in cleaned}
+    ):
+        replacement = _pick_replacement_option(
+            source_text,
+            {x.lower() for x in cleaned},
+            material_title,
+        )
+        if correct_idx < len(cleaned):
+            cleaned[correct_idx] = replacement
+        else:
+            cleaned[0] = replacement
+            correct_idx = 0
+
+    while len(cleaned) < 4:
+        extra = _pick_replacement_option(
+            source_text, {x.lower() for x in cleaned}, material_title,
+        )
+        cleaned.append(extra)
+
+    return cleaned[:4], correct_idx
 
 
 def is_broken_option(option: str) -> bool:
@@ -180,6 +296,8 @@ def is_broken_option(option: str) -> bool:
     if re.search(r"(?i)make decisions about patterns", o):
         return True
     if re.search(r"(?i)postprocessing:|image algebra|visual example", o):
+        return True
+    if is_material_title_option(o):
         return True
     if re.search(r"\d\.\s*$", o) and len(words) <= 6:
         return True
@@ -541,6 +659,16 @@ def finalize_quiz_fast(
     pool = deduplicate_questions(pool, validate_text, material_title)
     pool = _post_filter_acceptable(pool, validate_text, material_title)
     pool = pool[:target]
+
+    for item in pool:
+        opts, idx = sanitize_quiz_options(
+            list(item.get("options") or []),
+            int(item.get("correctIndex") or 0),
+            validate_text,
+            material_title,
+        )
+        item["options"] = opts
+        item["correctIndex"] = idx
 
     for j, item in enumerate(pool):
         item["id"] = f"q{j + 1}"
