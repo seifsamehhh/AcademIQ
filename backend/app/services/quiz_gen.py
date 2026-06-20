@@ -74,8 +74,11 @@ def generate_questions(
             engine = "light"
 
     from app.services.quiz_question_quality import (
+        emergency_quiz_fill,
         finalize_quiz_fast,
         log_quiz_generation_stats,
+        MIN_QUIZ_RETURN,
+        RICH_CONTENT_CHARS as RICH_CHARS,
     )
 
     final, valid_ai, fallback_count = finalize_quiz_fast(
@@ -86,6 +89,17 @@ def generate_questions(
         deadline=deadline,
         fallback_text=raw_text,
     )
+
+    if len(final) < MIN_QUIZ_RETURN and len(raw_text) > RICH_CHARS:
+        extra = emergency_quiz_fill(raw_text, material_title, max(target, MIN_QUIZ_RETURN))
+        if extra:
+            final = extra if not final else (final + extra)[:target]
+            engine = f"{engine}+emergency" if engine else "emergency"
+            fallback_count += len(extra)
+
+    if not final and len(raw_text) > RICH_CHARS:
+        final = emergency_quiz_fill(raw_text, material_title, target)
+        engine = "emergency"
 
     if not primary_drafts or fallback_count > 0:
         engine = "fallback" if not primary_drafts else f"{engine}+fallback"

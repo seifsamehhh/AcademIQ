@@ -70,9 +70,8 @@ def _stem_templates(concept: str, topic: str, index: int) -> str:
     templates = [
         f"Which statement best describes {c}?",
         f"What is the main purpose of {c}?",
-        f"What role does {c} play in {topic}?",
-        f"Which option correctly explains {c}?",
         f"Why is {c} important in {topic}?",
+        f"Which option correctly explains {c}?",
     ]
     return templates[index % len(templates)]
 
@@ -231,8 +230,7 @@ def _build_mcq(
     if len(options) < 4:
         return None
 
-    keywords = _extract_keywords(source_text, material_title)
-    if not is_question_valid(question, options[:4], source_text, material_title, keywords):
+    if len(options) < 4:
         return None
 
     return {
@@ -272,7 +270,7 @@ def generate_deterministic_fallback(
             continue
         distractors = [s for s in sentences if s.lower() != answer.lower()]
         built: Optional[Dict[str, Any]] = None
-        for try_idx in range(5):
+        for try_idx in range(4):
             q = _build_mcq(
                 concept, answer, distractors, template_idx + try_idx,
                 text, material_title, topic,
@@ -294,7 +292,7 @@ def generate_deterministic_fallback(
             continue
         distractors = [s for s in sentences if s.lower() != answer.lower()]
         built = None
-        for try_idx in range(5):
+        for try_idx in range(4):
             q = _build_mcq(
                 concept, answer, distractors, template_idx + try_idx,
                 text, material_title, topic,

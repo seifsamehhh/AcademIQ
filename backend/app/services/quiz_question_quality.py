@@ -144,18 +144,74 @@ _MATERIAL_TITLE_PREFIX_RE = re.compile(
 _IMPORT_DEF_PREFIX_RE = re.compile(
     r"(?i)^(?:test\s+import\s+definition|import\s+definition)\s*:\s*"
 )
+_MERGED_CAMEL_RE = re.compile(r"([a-z])([A-Z])")
+_OPTION_BLACKLIST_RE = re.compile(
+    r"(?i)(?:which of the following|suppose that|why\?|sample input|sample output|"
+    r"input\s*/?\s*output|input output|operation\s*\?|origi|points\s*\)|\bexercise\b|"
+    r"given table|shown in the following|resize 2nd image|nnnj|njnj|"
+    r"test import definition|\.pdf\b|\.pptx\b|\.ppsx\b)"
+)
+_GENERIC_SAFE_DISTRACTORS = [
+    "It improves the visual quality or interpretability of the input data.",
+    "It helps transform raw data into a more useful representation.",
+    "It supports analysis by highlighting meaningful patterns in the data.",
+    "It is used to prepare information for later processing steps.",
+]
+MIN_QUIZ_RETURN = 3
+MAX_FALLBACK_FILL = 5
+RICH_CONTENT_CHARS = 1000
+
+
+def normalize_merged_words(text: str) -> str:
+    """Light OCR merge fix — LuminosityGray -> Luminosity Gray, etc."""
+    s = (text or "").strip()
+    if not s:
+        return ""
+    s = _MERGED_CAMEL_RE.sub(r"\1 \2", s)
+    for old, new in (
+        ("LuminosityGray", "Luminosity Gray"),
+        ("GrayScale", "Gray Scale"),
+        ("NonLinear", "Non-Linear"),
+        ("InputOutput", "Input Output"),
+    ):
+        s = re.sub(re.escape(old), new, s, flags=re.I)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def option_needs_replacement(
+    option: str,
+    material_title: Optional[str] = None,
+) -> bool:
+    """True when an option should be swapped (never fails the whole quiz)."""
+    o = (option or "").strip()
+    if not o or len(o) < 8:
+        return True
+    if "?" in o:
+        return True
+    if _OPTION_BLACKLIST_RE.search(o):
+        return True
+    if is_material_title_option(o, material_title):
+        return True
+    if is_broken_option(o):
+        return True
+    return False
 
 
 def clean_option_text(option: str) -> str:
-    """Normalize an MCQ option into a complete readable sentence."""
+    """Normalize an MCQ option — statements only, never questions."""
     o = re.sub(r"[\uf000-\uf8ff\ufffd•▪]", " ", (option or ""))
     o = re.sub(r"\s+", " ", o).strip()
     if not o:
         return ""
+    o = o.replace("?", ".")
+    o = normalize_merged_words(o)
     o = o.rstrip(",;:")
     if o and o[0].islower():
         o = o[0].upper() + o[1:]
-    if o and not o.endswith((".", "!", "?")):
+    words = o.split()
+    if len(words) > 35:
+        o = " ".join(words[:35]).rstrip(",;:")
+    if o and not o.endswith((".", "!")):
         o += "."
     if len(o) > 120:
         o = o[:117].rsplit(" ", 1)[0] + "."
@@ -195,26 +251,33 @@ def strip_material_title_from_option(option: str) -> str:
     return clean_option_text(o)
 
 
+def _generic_safe_distractor(used: Set[str]) -> str:
+    for d in _GENERIC_SAFE_DISTRACTORS:
+        if d.lower() not in used:
+            return d
+    return "This statement does not match the selected course material."
+
+
 def _pick_replacement_option(
     source_text: str,
     used: Set[str],
     material_title: Optional[str] = None,
 ) -> str:
-    for s in extract_educational_sentences(source_text, limit=80):
+    for s in extract_educational_sentences(source_text, limit=60):
         candidate = strip_material_title_from_option(s)
         if not candidate or candidate.lower() in used:
             continue
-        if is_broken_option(candidate) or is_material_title_option(candidate, material_title):
+        if option_needs_replacement(candidate, material_title):
             continue
         return candidate
-    for s in _extract_clean_sentences(source_text, limit=40):
+    for s in _extract_clean_sentences(source_text, limit=30):
         candidate = strip_material_title_from_option(s)
         if not candidate or candidate.lower() in used:
             continue
-        if is_broken_option(candidate) or is_material_title_option(candidate, material_title):
+        if option_needs_replacement(candidate, material_title):
             continue
         return candidate
-    return "This concept is explained in the selected course material."
+    return _generic_safe_distractor(used)
 
 
 def sanitize_quiz_options(
@@ -231,7 +294,7 @@ def sanitize_quiz_options(
 
     for opt in options:
         o = strip_material_title_from_option(clean_option_text(opt))
-        if is_material_title_option(o, material_title) or is_broken_option(o):
+        if option_needs_replacement(o, material_title):
             o = _pick_replacement_option(source_text, used, material_title)
         if o.lower() in used:
             o = _pick_replacement_option(source_text, used, material_title)
@@ -243,8 +306,7 @@ def sanitize_quiz_options(
 
     correct_clean = strip_material_title_from_option(clean_option_text(correct_raw))
     if (
-        is_material_title_option(correct_clean, material_title)
-        or is_broken_option(correct_clean)
+        option_needs_replacement(correct_clean, material_title)
         or correct_clean.lower() not in {x.lower() for x in cleaned}
     ):
         replacement = _pick_replacement_option(
@@ -270,6 +332,8 @@ def sanitize_quiz_options(
 def is_broken_option(option: str) -> bool:
     """True when an MCQ option is a fragment or unreadable."""
     o = (option or "").strip()
+    if "?" in o:
+        return True
     if len(o) < 12:
         return True
     if _GENERIC_OPTION_RE.match(o):
@@ -511,7 +575,7 @@ def extract_educational_sentences(text: str, limit: int = 40) -> List[str]:
 
 def clean_concept_label(raw: str) -> str:
     """Strip file/OCR prefixes from a concept label."""
-    c = (raw or "").strip()
+    c = normalize_merged_words((raw or "").strip())
     c = _FILE_NOISE_RE.sub(" ", c)
     c = _COPY_NUM_RE.sub(" ", c)
     c = _DIGIT_PREFIX_RE.sub("", c)
@@ -588,6 +652,98 @@ def clean_question_stem(question: str, material_title: Optional[str] = None) -> 
     return q
 
 
+def light_cleanup_question(
+    question: str,
+    source_text: str,
+    material_title: Optional[str] = None,
+) -> str:
+    """Non-blocking stem cleanup; rewrite only when clearly vague."""
+    q = normalize_merged_words((question or "").strip())
+    q = _FILE_NOISE_RE.sub(" ", q)
+    q = re.sub(r"(?i)^lecture\s*\d+\s*[—–\-]\s*", "", q).strip()
+    q = clean_question_stem(q, material_title)
+    if q and not q.endswith("?"):
+        q = q.rstrip(".") + "?"
+    vague = (
+        is_vague_question(q, material_title)
+        or uses_filename_as_concept(q, material_title)
+        or is_grammatically_broken_question(q)
+    )
+    if vague:
+        for candidate in _extract_concepts(source_text, 20):
+            c = clean_concept_label(candidate)
+            if c and not is_weak_concept(c):
+                q = f"Which statement best describes {c}?"
+                break
+        else:
+            topic = clean_concept_label(clean_title_token(material_title or ""))
+            if topic and not is_weak_concept(topic):
+                q = f"Which statement best describes {topic}?"
+    return q or "Which statement best describes this topic?"
+
+
+def light_cleanup_mcq(
+    item: Dict[str, Any],
+    source_text: str,
+    material_title: Optional[str] = None,
+    global_used: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
+    """Clean one MCQ in place — never drop it."""
+    item["question"] = light_cleanup_question(
+        str(item.get("question") or ""), source_text, material_title,
+    )
+    raw_opts = list(item.get("options") or [])
+    if not raw_opts:
+        raw_opts = [_pick_replacement_option(source_text, set(), material_title)]
+    opts, idx = sanitize_quiz_options(
+        raw_opts,
+        int(item.get("correctIndex") or 0),
+        source_text,
+        material_title,
+    )
+    opts = [o.replace("?", ".") for o in opts]
+    item["options"] = opts[:4]
+    item["correctIndex"] = max(0, min(idx, len(item["options"]) - 1))
+    if global_used is not None:
+        global_used.update(o.lower() for o in item["options"])
+    return item
+
+
+def _accept_drafts(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep draft MCQs with minimal structure — do not apply strict validation."""
+    out: List[Dict[str, Any]] = []
+    for q in questions or []:
+        stem = str(q.get("question") or "").strip()
+        opts = [str(o) for o in (q.get("options") or []) if str(o).strip()]
+        if not stem and not opts:
+            continue
+        out.append(
+            {
+                "id": q.get("id"),
+                "question": stem or "Which statement best describes this topic?",
+                "options": opts if opts else ["See the selected course material."],
+                "correctIndex": int(q.get("correctIndex") or 0),
+            }
+        )
+    return out
+
+
+def emergency_quiz_fill(
+    source_text: str,
+    material_title: Optional[str] = None,
+    target: int = 5,
+) -> List[Dict[str, Any]]:
+    """Last-resort fill so rich materials never return an empty quiz."""
+    from app.services.quiz_gen_fallback import generate_deterministic_fallback
+
+    fb = generate_deterministic_fallback(source_text, material_title, target + 2)
+    global_used: Set[str] = set()
+    out: List[Dict[str, Any]] = []
+    for item in _accept_drafts(fb):
+        out.append(light_cleanup_mcq(item, source_text, material_title, global_used))
+    return out[:target]
+
+
 def log_quiz_generation_stats(
     material_title: Optional[str],
     content_length: int,
@@ -618,58 +774,60 @@ def finalize_quiz_fast(
     deadline: Optional[float] = None,
     fallback_text: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int, int]:
-    """Fast validate, dedupe, single fallback fill — no repeated loops."""
+    """Non-blocking finalize: clean every draft, fill to target, never return empty for rich text."""
     import time
 
     fb_source = (fallback_text or source_text or "").strip()
     validate_text = fb_source if len(fb_source) >= len((source_text or "").strip()) else source_text
     content_len = len((source_text or "").strip())
-    min_target = target if content_len > 1000 else min(3, target)
+    min_target = target if content_len > RICH_CONTENT_CHARS else min(MIN_QUIZ_RETURN, target)
 
-    pool = _post_filter_acceptable(questions, validate_text, material_title)
+    pool = _accept_drafts(questions)
     valid_primary = len(pool)
-    pool = deduplicate_questions(pool, validate_text, material_title)
+    if pool:
+        pool = deduplicate_questions(pool, validate_text, material_title)
 
     fallback_added = 0
-    if (deadline is None or time.monotonic() < deadline - 0.5):
-        from app.services.quiz_gen_fallback import generate_deterministic_fallback
+    from app.services.quiz_gen_fallback import generate_deterministic_fallback
 
-        fb = generate_deterministic_fallback(
-            fb_source, material_title, target + 4,
-        )
-        fb_filtered = _post_filter_acceptable(fb, validate_text, material_title)
+    if (deadline is None or time.monotonic() < deadline - 0.5):
+        fb = generate_deterministic_fallback(fb_source, material_title, target + 4)
         before = len(pool)
-        pool = deduplicate_questions(fb_filtered + pool, validate_text, material_title)
+        pool = deduplicate_questions(_accept_drafts(fb) + pool, validate_text, material_title)
         fallback_added = max(0, len(pool) - before)
 
-    if len(pool) < min_target and (deadline is None or time.monotonic() < deadline - 0.3):
-        from app.services.quiz_gen_fallback import generate_deterministic_fallback
-
-        fb2 = generate_deterministic_fallback(
-            fb_source, material_title, min_target + 6,
-        )
-        fb2_filtered = _post_filter_acceptable(fb2, validate_text, material_title)
+    fill_attempts = 0
+    while (
+        len(pool) < min_target
+        and fill_attempts < MAX_FALLBACK_FILL
+        and (deadline is None or time.monotonic() < deadline - 0.3)
+    ):
+        fill_attempts += 1
+        need = min(min_target - len(pool) + 2, 4)
+        fb = generate_deterministic_fallback(fb_source, material_title, need)
         before = len(pool)
-        pool = deduplicate_questions(pool + fb2_filtered, validate_text, material_title)
+        pool = deduplicate_questions(_accept_drafts(fb) + pool, validate_text, material_title)
         fallback_added += max(0, len(pool) - before)
 
-    for q in pool:
-        q["question"] = clean_question_stem(str(q.get("question") or ""), material_title)
-
-    pool = deduplicate_questions(pool, validate_text, material_title)
-    pool = _post_filter_acceptable(pool, validate_text, material_title)
+    global_used: Set[str] = set()
+    cleaned: List[Dict[str, Any]] = []
+    for item in pool:
+        cleaned.append(light_cleanup_mcq(item, validate_text, material_title, global_used))
+    pool = deduplicate_questions(cleaned, validate_text, material_title)
     pool = pool[:target]
 
-    for item in pool:
-        opts, idx = sanitize_quiz_options(
-            list(item.get("options") or []),
-            int(item.get("correctIndex") or 0),
-            validate_text,
-            material_title,
-        )
-        item["options"] = opts
-        item["correctIndex"] = idx
+    if len(pool) < min_target and content_len > RICH_CONTENT_CHARS:
+        extra = emergency_quiz_fill(validate_text, material_title, min_target)
+        for item in extra:
+            if len(pool) >= min_target:
+                break
+            item = light_cleanup_mcq(item, validate_text, material_title, global_used)
+            merged = deduplicate_questions(pool + [item], validate_text, material_title)
+            if len(merged) > len(pool):
+                pool = merged
+                fallback_added += 1
 
+    pool = pool[:target]
     for j, item in enumerate(pool):
         item["id"] = f"q{j + 1}"
 
