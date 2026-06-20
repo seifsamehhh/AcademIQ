@@ -152,7 +152,8 @@ _OPTION_BLACKLIST_RE = re.compile(
     r"input\s*/?\s*output|input output|operation\s*\?|origi|points\s*\)|\bexercise\b|"
     r"given table|shown in the following|resize 2nd image|nnnj|njnj|"
     r"test import definition|\.pdf\b|\.pptx\b|\.ppsx\b|\bslide\b|\[slide|lab\s*#|"
-    r"\bquestion\b|for example|e\.g\.|example of)"
+    r"\bquestion\b|for example|e\.g\.|example of|model only answers|what is inside this image|"
+    r"chapter\s+\d|pattern classification,\s*chapter|encoder-decoder architecture)"
 )
 _GENERIC_SAFE_DISTRACTORS = [
     "It improves the visual quality or interpretability of the input data.",
@@ -161,10 +162,10 @@ _GENERIC_SAFE_DISTRACTORS = [
     "It is used to prepare information for later processing steps.",
 ]
 _CONCEPT_GENERIC_DISTRACTORS = [
-    "It mainly describes a general preprocessing step rather than the selected concept.",
-    "It focuses on changing the input format without addressing the main concept.",
-    "It represents a different technique from the one described in the question.",
-    "It is related to the topic but does not correctly explain the selected concept.",
+    "It describes preprocessing, not the concept asked about.",
+    "It changes input format but not the main idea.",
+    "It is a different technique from the one in the question.",
+    "It is related to the topic but does not explain this concept.",
 ]
 _EXAMPLE_ONLY_WORDS = frozenset(
     {
@@ -184,6 +185,30 @@ _HEADING_SHAPE_RE = re.compile(
     r"edge filters$|results of)"
 )
 _SLIDE_MARKER_RE = re.compile(r"(?i)\[?\s*slide\s*\d+\s*\]?|lab\s*#\s*\d+|page\s*\d+")
+_TABLE_ROW_OPTION_RE = re.compile(
+    r"(?i)\|"
+    r"|chapter\s+\d+\s+\d+"
+    r"|chapter\s+\d+\s+classification"
+    r"|pattern classification,\s*chapter"
+    r"|model only answers"
+    r"|what is inside this image"
+    r"|u-net\s*\|"
+    r"|seg\s*net\s*\|"
+    r"|deep\s*lab"
+    r"|res\s*net\s*\|"
+    r"|mobile\s*net\s*\|"
+    r"|efficient\s*net\s*\|"
+    r"|convolutional network\s+u-net"
+    r"|encoder-decoder architecture"
+    r"|very famous in medical imaging"
+)
+_BROKEN_OPTION_START_RE = re.compile(
+    r"(?i)^(parated|ification|y\s+convolutional|e\s+res\s|separated and)"
+)
+_INCOMPLETE_OPTION_END_RE = re.compile(
+    r"(?i)(?:\bthe main\s*\.?\s*$|\bthe main\s*$|\|\s*\w+\s*\.?\s*$|"
+    r"\bhigh\s*\.?\s*$|\bfeature\s*\.?\s*$|\bpattern\s*\.?\s*$)"
+)
 _CROSS_CONCEPT_OPTION_RE = re.compile(
     r"(?i)^[A-Za-z][\w\s/&\-]{2,45}\s+(?:is|are|refers to|means)\s+"
 )
@@ -289,6 +314,8 @@ def is_broken_definition_answer(answer: str) -> bool:
     if re.search(r"f\s*\(|\(x,\s*y\)|\\frac|coordinates\s*\(", a):
         return True
     if re.search(r"(?i)edge\s*-\s*based point", a):
+        return True
+    if is_table_or_slide_junk_option(a):
         return True
     if re.search(r"\d\s*-\s*[A-Za-z]", a):
         return True
@@ -512,14 +539,49 @@ def option_needs_replacement(
         return True
     if is_material_title_option(o, material_title):
         return True
+    if is_table_or_slide_junk_option(o):
+        return True
     if is_broken_option(o):
         return True
     return False
 
 
+def is_table_or_slide_junk_option(option: str) -> bool:
+    """Slide tables, chapter headers, model catalogues, meta-AI lines."""
+    o = (option or "").strip()
+    if not o:
+        return True
+    if "|" in o:
+        return True
+    if _TABLE_ROW_OPTION_RE.search(o):
+        return True
+    if _BROKEN_OPTION_START_RE.search(o):
+        return True
+    if _INCOMPLETE_OPTION_END_RE.search(o):
+        return True
+    if re.search(r"(?i)select the length of the fish", o):
+        return True
+    if re.search(r"(?i)should not overlap pattern", o):
+        return True
+    pipe_segments = [p.strip() for p in o.split("|") if p.strip()]
+    if len(pipe_segments) >= 2:
+        return True
+    return False
+
+
+def rewrite_known_bad_option(option: str) -> str:
+    """Rewrite common ugly OCR/meta fragments into clean answer lines."""
+    o = (option or "").strip()
+    low = o.lower()
+    if "model only answers" in low or "what is inside this image" in low:
+        return "The model predicts the category of objects present in the image."
+    return o
+
+
 def clean_option_text(option: str) -> str:
     """Normalize an MCQ option — statements only, never questions."""
-    o = re.sub(r"[\uf000-\uf8ff\ufffd•▪]", " ", (option or ""))
+    o = rewrite_known_bad_option(option)
+    o = re.sub(r"[\uf000-\uf8ff\ufffd\u2022\u25aa\"'\u201c\u201d]", " ", o)
     o = re.sub(r"\s+", " ", o).strip()
     if not o:
         return ""
@@ -534,7 +596,13 @@ def clean_option_text(option: str) -> str:
     if o and not o.endswith((".", "!")):
         o += "."
     if len(o) > 120:
-        o = o[:117].rsplit(" ", 1)[0] + "."
+        cut = o[:117].rsplit(" ", 1)[0]
+        if len(cut.split()) >= MIN_OPTION_WORDS:
+            o = cut.rstrip(".,;:") + "."
+        else:
+            o = o[:117].rstrip(".,;:") + "."
+    if is_table_or_slide_junk_option(o):
+        return ""
     return o
 
 
@@ -704,6 +772,8 @@ def is_broken_option(option: str) -> bool:
     if re.search(r"(?i)process:|moving window|\[ convolution|response=", o):
         return True
     if is_material_title_option(o):
+        return True
+    if is_table_or_slide_junk_option(o):
         return True
     if re.search(r"\d\.\s*$", o) and len(words) <= 6:
         return True
@@ -893,10 +963,14 @@ def extract_educational_sentences(text: str, limit: int = 40) -> List[str]:
     seen: Set[str] = set()
     noise = re.compile(
         r"(?i)(?:\[Page\s*\d|Page\s*\d+\])|postprocessing:|image algebra|"
-        r"visual example|course outline|\d{1,2}/\d{1,2}/\d{4}"
+        r"visual example|course outline|\d{1,2}/\d{1,2}/\d{4}|"
+        r"chapter\s+\d|pattern classification,\s*chapter|\|"
+        r"|model only answers|u-net|seg\s*net|res\s*net|mobile\s*net"
     )
     for m in re.finditer(r"[A-Za-z][^.!?]{15,280}[.!?]", text or ""):
         raw = re.sub(r"\s+", " ", m.group(0)).strip()
+        if is_table_or_slide_junk_option(raw):
+            continue
         words = raw.split()
         if len(words) < 8 or len(words) > 35:
             continue
@@ -1039,6 +1113,8 @@ def mcq_options_final_sane(item: Dict[str, Any], material_title: Optional[str] =
         return False
     for o in opts:
         if "?" in o or option_needs_replacement(o, material_title):
+            return False
+        if is_table_or_slide_junk_option(o):
             return False
     stem = str(item.get("question") or "")
     if is_grammatically_broken_question(stem):
