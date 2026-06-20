@@ -38,8 +38,7 @@ _VAGUE_GENERIC_RE = re.compile(
     re.I,
 )
 _BROKEN_OPTION_END_RE = re.compile(
-    r"(?:\b(the|about|by|of|a|an|to|in|for|with|and|or|as|on|at|from|approx|include|refers to)\s*\.?\s*$"
-    r"|[,:\{\(]\s*$)",
+    r"\b(the|about|by|of|a|an|to|in|for|with|and|or|as|on|at|from|approx|include|refers to)\s*\.?\s*$",
     re.I,
 )
 _TECH_TERM_RE = re.compile(r"^[A-Z]{2,10}$")
@@ -150,48 +149,14 @@ _OPTION_BLACKLIST_RE = re.compile(
     r"(?i)(?:which of the following|suppose that|why\?|sample input|sample output|"
     r"input\s*/?\s*output|input output|operation\s*\?|origi|points\s*\)|\bexercise\b|"
     r"given table|shown in the following|resize 2nd image|nnnj|njnj|"
-    r"test import definition|\.pdf\b|\.pptx\b|\.ppsx\b|\bslide\b|\[slide|lab\s*#|"
-    r"iff\s*\.|does not end\s*,|states\s*\{|sample input/output|\bquestion\b|"
-    r"\bex\d*\s*:|^ex\d|page\s*\d+|lab overview|computer vision tasks|"
-    r"sort,\s*square|moving window transform|depends on non|"
-    r"set the pixel value|midpoint value|variance of pixels)"
+    r"test import definition|\.pdf\b|\.pptx\b|\.ppsx\b)"
 )
-_SLIDE_MARKER_RE = re.compile(
-    r"(?i)\[?\s*slide\s*\d+\s*\]?|lab\s*#\s*\d+|page\s*\d+"
-)
-_BROKEN_PREFIX_RE = re.compile(
-    r"(?i)^(?:points\s*\)|question:|exercise:|sample input/output|"
-    r"ex\d*\s*:|process:|page\s*\d+\s*)"
-)
-_HEADING_OPTION_RE = re.compile(
-    r"(?i)^(?:non\s*-?\s*linear filters|global he|local he|original image|"
-    r"origin\s*x\s*y|process)\s*[:]?\s*"
-)
-_MATH_JUNK_RE = re.compile(
-    r"[=∑∏√−𝑫𝑮𝒙𝒚𝐆]|==\s*\w|\)f\(|tan−|tan\s*−|partial derivative|"
-    r"direction of this vector|simplified as:|third colum|\bmag\b|"
-    r"for practical reasons this can be|1st derivative|2nd derivative|"
-    r"the formula for|main applications:"
-)
-_FORMULA_HEADING_RE = re.compile(
-    r"(?i)–\s*(line|example)\s*–|hough transform.*example|"
-    r"derivative\s*–\s*second derivative|smoothing filters main"
-)
-_FRAGMENT_START_RE = re.compile(r"(?i)^(en by|ction|roximating|edg)\b")
 _GENERIC_SAFE_DISTRACTORS = [
     "It improves the visual quality or interpretability of the input data.",
     "It helps transform raw data into a more useful representation.",
     "It supports analysis by highlighting meaningful patterns in the data.",
     "It is used to prepare information for later processing steps.",
 ]
-_CONCEPT_GENERIC_DISTRACTORS = [
-    "It mainly describes a general preprocessing step rather than the selected concept.",
-    "It focuses on changing the input format without addressing the main concept.",
-    "It represents a different technique from the one described in the question.",
-    "It is related to the topic but does not correctly explain the selected concept.",
-]
-MIN_OPTION_WORDS = 6
-MAX_OPTION_WORDS = 35
 MIN_QUIZ_RETURN = 3
 MAX_FALLBACK_FILL = 5
 RICH_CONTENT_CHARS = 1000
@@ -213,95 +178,17 @@ def normalize_merged_words(text: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _rewrite_known_broken_patterns(option: str) -> str:
-    """Rewrite common ugly OCR/slide fragments into clean answer sentences."""
-    o = (option or "").strip()
-    low = o.lower()
-    if "thermostat" in low and ("reactive" in low or "states" in low or "environment" in low):
-        return (
-            "A thermostat can be modeled as a reactive agent that chooses actions "
-            "based on the current state of its environment."
-        )
-    if "image classification" in low and "single label" in low:
-        return "Image classification predicts a single label for the entire image."
-    if "behaviorally equivalent" in low:
-        return (
-            "Two agents are behaviorally equivalent when they produce the same "
-            "actions in the same states."
-        )
-    if "what is inside this image" in low or "model only answers" in low:
-        return "The model predicts the category of objects present in the image."
-    if "does not end" in low and "environment" in low:
-        return (
-            "In general, agents continue interacting with their environment over time."
-        )
-    return o
-
-
-def sanitize_option_text(raw: str) -> str:
-    """Strip slide markers, broken prefixes, and dangling symbols from an option."""
-    o = re.sub(r"[\uf000-\uf8ff\ufffd•▪…]", " ", (raw or ""))
-    o = re.sub(r"\s+", " ", o).strip()
-    if not o:
-        return ""
-    o = o.replace("?", ".")
-    o = _SLIDE_MARKER_RE.sub(" ", o)
-    o = _BROKEN_PREFIX_RE.sub("", o)
-    o = _HEADING_OPTION_RE.sub("", o)
-    o = re.sub(r"(?i)\bex\d*\s*:", " ", o)
-    o = re.sub(r"(?i)sort,\s*square[^.]*\)\s*", " ", o)
-    o = re.sub(r"\(\s*[a-z]\s*\.?\s*$", "", o)
-    o = re.sub(r"[\{\}\[\]]", " ", o)
-    o = re.sub(r'"{2,}|\'{2,}', '"', o)
-    o = re.sub(r"\.{2,}", ".", o)
-    o = re.sub(r",\s*,", ",", o)
-    o = re.sub(r"\s+-\s+", "-", o)
-    o = re.sub(r"(?i)\bnon\s+-\s*linear", "non-linear", o)
-    o = _rewrite_known_broken_patterns(o)
-    embedded_q = re.search(r"(?i)\bwhat is\b", o)
-    if embedded_q and embedded_q.start() > 0:
-        suffix = o[embedded_q.start():].strip()
-        if len(suffix.split()) >= MIN_OPTION_WORDS:
-            o = suffix
-        else:
-            prefix = o[:embedded_q.start()].strip()
-            if len(prefix.split()) >= MIN_OPTION_WORDS:
-                o = prefix
-    o = re.sub(r"(?i)\s*–\s*\(cont\.[^.]*\.?\s*$", "", o).strip()
-    o = re.sub(r"(?i)\s+smooth(ing)?\s+filters\s+smooth(ing)?\s+filters.*$", "", o).strip()
-    if _SLIDE_MARKER_RE.search(o) or re.search(r"(?i)\bslide\b", o):
-        colon = re.search(r":\s*(.+)$", o)
-        if colon and len(colon.group(1).split()) >= MIN_OPTION_WORDS:
-            o = colon.group(1).strip()
-    label_colon = re.match(r"^[^:]{3,80}:\s*(.+)$", o)
-    if label_colon and len(label_colon.group(1).split()) >= MIN_OPTION_WORDS:
-        prefix = o[:label_colon.start(1)].lower()
-        if any(
-            k in prefix
-            for k in ("slide", "agent", "classification", "lab", "overview", "pattern")
-        ):
-            o = label_colon.group(1).strip()
-    o = _rewrite_known_broken_patterns(o)
-    o = normalize_merged_words(o)
-    o = re.sub(r"\s+", " ", o).strip()
-    o = o.rstrip(",;:{([ ")
-    return o
-
-
 def option_needs_replacement(
     option: str,
     material_title: Optional[str] = None,
 ) -> bool:
     """True when an option should be swapped (never fails the whole quiz)."""
-    o = sanitize_option_text(option)
-    o = clean_option_text(o) if o else ""
-    if not o or len(o) < 12:
+    o = (option or "").strip()
+    if not o or len(o) < 8:
         return True
     if "?" in o:
         return True
     if _OPTION_BLACKLIST_RE.search(o):
-        return True
-    if _SLIDE_MARKER_RE.search(o) or re.search(r"(?i)\bslide\b", o):
         return True
     if is_material_title_option(o, material_title):
         return True
@@ -312,15 +199,18 @@ def option_needs_replacement(
 
 def clean_option_text(option: str) -> str:
     """Normalize an MCQ option — statements only, never questions."""
-    o = sanitize_option_text(option)
+    o = re.sub(r"[\uf000-\uf8ff\ufffd•▪]", " ", (option or ""))
+    o = re.sub(r"\s+", " ", o).strip()
     if not o:
         return ""
+    o = o.replace("?", ".")
+    o = normalize_merged_words(o)
     o = o.rstrip(",;:")
     if o and o[0].islower():
         o = o[0].upper() + o[1:]
     words = o.split()
-    if len(words) > MAX_OPTION_WORDS:
-        o = " ".join(words[:MAX_OPTION_WORDS]).rstrip(",;:")
+    if len(words) > 35:
+        o = " ".join(words[:35]).rstrip(",;:")
     if o and not o.endswith((".", "!")):
         o += "."
     if len(o) > 120:
@@ -350,8 +240,8 @@ def is_material_title_option(
 
 
 def strip_material_title_from_option(option: str) -> str:
-    """Remove lecture/lab/test-import/slide prefixes; keep answer body only."""
-    o = sanitize_option_text(option)
+    """Remove lecture/lab/test-import title prefixes; keep answer body only."""
+    o = (option or "").strip()
     m = _MATERIAL_TITLE_PREFIX_RE.match(o)
     if m:
         o = o[m.end() :]
@@ -361,63 +251,33 @@ def strip_material_title_from_option(option: str) -> str:
     return clean_option_text(o)
 
 
-def _generic_concept_distractor(concept: str, used: Set[str]) -> str:
-    for d in _CONCEPT_GENERIC_DISTRACTORS:
+def _generic_safe_distractor(used: Set[str]) -> str:
+    for d in _GENERIC_SAFE_DISTRACTORS:
         if d.lower() not in used:
             return d
-    return _generic_safe_distractor(used)
-
-
-def _unique_distractor_for_slot(slot: int, used: Set[str]) -> str:
-    """Pick a distinct generic distractor for option slot 0-3."""
-    pool = _CONCEPT_GENERIC_DISTRACTORS + _GENERIC_SAFE_DISTRACTORS
-    candidate = pool[slot % len(pool)]
-    if candidate.lower() not in used:
-        return candidate
-    for j in range(1, len(pool)):
-        candidate = pool[(slot + j) % len(pool)]
-        if candidate.lower() not in used:
-            return candidate
-    suffixes = (" in this context.", " for this topic.", " in the material.", " here.")
-    base = pool[slot % len(pool)].rstrip(".")
-    for suffix in suffixes:
-        candidate = base + suffix
-        if candidate.lower() not in used:
-            return candidate
-    return f"It does not correctly explain the concept in option {slot + 1}."
-
-
-def _generic_safe_distractor(used: Set[str]) -> str:
-    return _unique_distractor_for_slot(0, used)
+    return "This statement does not match the selected course material."
 
 
 def _pick_replacement_option(
     source_text: str,
     used: Set[str],
     material_title: Optional[str] = None,
-    concept: Optional[str] = None,
-    global_used: Optional[Set[str]] = None,
 ) -> str:
-    combined_used = set(used)
-    if global_used:
-        combined_used.update(global_used)
     for s in extract_educational_sentences(source_text, limit=60):
         candidate = strip_material_title_from_option(s)
-        if not candidate or candidate.lower() in combined_used:
+        if not candidate or candidate.lower() in used:
             continue
         if option_needs_replacement(candidate, material_title):
             continue
         return candidate
     for s in _extract_clean_sentences(source_text, limit=30):
         candidate = strip_material_title_from_option(s)
-        if not candidate or candidate.lower() in combined_used:
+        if not candidate or candidate.lower() in used:
             continue
         if option_needs_replacement(candidate, material_title):
             continue
         return candidate
-    if concept:
-        return _generic_concept_distractor(concept, combined_used)
-    return _generic_safe_distractor(combined_used)
+    return _generic_safe_distractor(used)
 
 
 def sanitize_quiz_options(
@@ -425,37 +285,26 @@ def sanitize_quiz_options(
     correct_index: int,
     source_text: str,
     material_title: Optional[str] = None,
-    question: Optional[str] = None,
-    global_used: Optional[Set[str]] = None,
 ) -> Tuple[List[str], int]:
-    """Clean options; replace bad choices without failing the quiz."""
-    concept = extract_concept_from_stem(question or "")
+    """Clean options; replace title/import junk with material sentences."""
     used: Set[str] = set()
-    if global_used:
-        used.update(global_used)
     cleaned: List[str] = []
     correct_idx = max(0, min(int(correct_index or 0), max(0, len(options) - 1)))
     correct_raw = options[correct_idx] if options else ""
 
-    for i, opt in enumerate(options):
-        o = strip_material_title_from_option(opt)
+    for opt in options:
+        o = strip_material_title_from_option(clean_option_text(opt))
         if option_needs_replacement(o, material_title):
-            o = _pick_replacement_option(
-                source_text, used, material_title, concept, global_used,
-            )
+            o = _pick_replacement_option(source_text, used, material_title)
         if o.lower() in used:
-            o = _unique_distractor_for_slot(i, used | (global_used or set()))
+            o = _pick_replacement_option(source_text, used, material_title)
         used.add(o.lower())
         cleaned.append(o)
 
     if not cleaned:
-        cleaned = [
-            _pick_replacement_option(
-                source_text, set(), material_title, concept, global_used,
-            )
-        ]
+        cleaned = [_pick_replacement_option(source_text, set(), material_title)]
 
-    correct_clean = strip_material_title_from_option(correct_raw)
+    correct_clean = strip_material_title_from_option(clean_option_text(correct_raw))
     if (
         option_needs_replacement(correct_clean, material_title)
         or correct_clean.lower() not in {x.lower() for x in cleaned}
@@ -464,8 +313,6 @@ def sanitize_quiz_options(
             source_text,
             {x.lower() for x in cleaned},
             material_title,
-            concept,
-            global_used,
         )
         if correct_idx < len(cleaned):
             cleaned[correct_idx] = replacement
@@ -475,35 +322,9 @@ def sanitize_quiz_options(
 
     while len(cleaned) < 4:
         extra = _pick_replacement_option(
-            source_text,
-            {x.lower() for x in cleaned},
-            material_title,
-            concept,
-            global_used,
+            source_text, {x.lower() for x in cleaned}, material_title,
         )
-        if extra.lower() in {x.lower() for x in cleaned}:
-            extra = _generic_safe_distractor(
-                {x.lower() for x in cleaned} | (global_used or set()),
-            )
         cleaned.append(extra)
-
-    # Ensure four unique options
-    seen_opts: Set[str] = set()
-    unique: List[str] = []
-    for slot, o in enumerate(cleaned[:4]):
-        if o.lower() in seen_opts:
-            o = _pick_replacement_option(
-                source_text,
-                seen_opts | (global_used or set()),
-                material_title,
-                concept,
-                global_used,
-            )
-        if o.lower() in seen_opts:
-            o = _unique_distractor_for_slot(slot, seen_opts | (global_used or set()))
-        seen_opts.add(o.lower())
-        unique.append(o)
-    cleaned = unique
 
     return cleaned[:4], correct_idx
 
@@ -513,53 +334,16 @@ def is_broken_option(option: str) -> bool:
     o = (option or "").strip()
     if "?" in o:
         return True
-    if _SLIDE_MARKER_RE.search(o) or re.search(r"(?i)\bslide\b|\[slide", o):
-        return True
-    if re.search(r"(?i)lab overview|computer vision tasks\s+\d", o):
-        return True
-    if re.search(r"(?i)\bex\d*\s*:|sort,\s*square|set the pixel value|midpoint value", o):
-        return True
-    if re.search(r"(?i)depends on non|moving window transform|variance of pixels", o):
-        return True
-    if re.search(r"(?i)^(?:global he|local he|origin\s*x\s*y|original image)\b", o):
-        return True
-    if _MATH_JUNK_RE.search(o) or _FRAGMENT_START_RE.search(o):
-        return True
-    if _FORMULA_HEADING_RE.search(o):
-        return True
-    if re.search(r"(?i)^can cause some strange", o):
-        return True
-    if re.search(r"(?i)\bwhat is\b", o) and not re.match(r"(?i)^what is\b", o):
-        return True
-    if re.search(r"(?i)\(cont\.|–\s*\(cont|smooth(ing)?\s+filters\s+smooth", o):
-        return True
-    if re.search(r"==\d|iiz\s*r\b|mask size|→|𝐺|𝑅|𝑖", o):
-        return True
-    if re.search(
-        r"(?i)sharpen filter|spatial filtering|local hist equalization|"
-        r"sharpening.*edge filters|linear-averaging filter|weighted mean",
-        o,
-    ):
-        return True
-    if re.search(r"(?i)model only answers", o):
-        return True
-    if re.search(r"^\w+\s*\([^)]{3,40}\)[A-Z]", o):
-        return True
     if len(o) < 12:
         return True
-    words = o.split()
     if _GENERIC_OPTION_RE.match(o):
         return True
     if _BROKEN_OPTION_END_RE.search(o):
         return True
     if _BROKEN_OPTION_PHRASE_RE.search(o):
         return True
-    if len(words) < MIN_OPTION_WORDS and not _TECH_TERM_RE.match(o):
-        return True
-    if len(words) > MAX_OPTION_WORDS:
-        return True
-    sym = len(re.findall(r"[^\w\s]", o))
-    if sym > max(6, len(words)):
+    words = o.split()
+    if len(words) < 4 and not _TECH_TERM_RE.match(o):
         return True
     if o.endswith("...") and len(o) < 40:
         return True
@@ -767,18 +551,14 @@ def extract_educational_sentences(text: str, limit: int = 40) -> List[str]:
     seen: Set[str] = set()
     noise = re.compile(
         r"(?i)(?:\[Page\s*\d|Page\s*\d+\])|postprocessing:|image algebra|"
-        r"visual example|course outline|\d{1,2}/\d{1,2}/\d{4}|"
-        r"\bex\d*\s*:|sort,\s*square|set the pixel value|depends on non|"
-        r"moving window transform|lab overview|computer vision tasks|"
-        r"partial derivative|direction of this vector|simplified as:|"
-        r"for practical reasons this can be|third colum"
+        r"visual example|course outline|\d{1,2}/\d{1,2}/\d{4}"
     )
     for m in re.finditer(r"[A-Za-z][^.!?]{15,280}[.!?]", text or ""):
         raw = re.sub(r"\s+", " ", m.group(0)).strip()
         words = raw.split()
         if len(words) < 8 or len(words) > 35:
             continue
-        if noise.search(raw) or _MATH_JUNK_RE.search(raw):
+        if noise.search(raw):
             continue
         s = clean_option_text(raw)
         if is_broken_option(s):
@@ -902,82 +682,6 @@ def light_cleanup_question(
     return q or "Which statement best describes this topic?"
 
 
-def mcq_options_final_sane(
-    item: Dict[str, Any],
-    material_title: Optional[str] = None,
-) -> bool:
-    opts = list(item.get("options") or [])
-    if len(opts) != 4:
-        return False
-    if len({o.lower() for o in opts}) != 4:
-        return False
-    idx = int(item.get("correctIndex") or 0)
-    if not (0 <= idx < 4):
-        return False
-    for o in opts:
-        if "?" in o or option_needs_replacement(o, material_title):
-            return False
-    return True
-
-
-def final_repair_mcq_options(
-    item: Dict[str, Any],
-    source_text: str,
-    material_title: Optional[str] = None,
-    global_used: Optional[Set[str]] = None,
-) -> Dict[str, Any]:
-    """Run option sanitizer twice; replace any option that still fails checks."""
-    question = str(item.get("question") or "")
-    for _ in range(2):
-        opts, idx = sanitize_quiz_options(
-            list(item.get("options") or []),
-            int(item.get("correctIndex") or 0),
-            source_text,
-            material_title,
-            question=question,
-            global_used=global_used,
-        )
-        opts = [o.replace("?", ".") for o in opts]
-        item["options"] = opts[:4]
-        item["correctIndex"] = max(0, min(idx, len(item["options"]) - 1))
-        seen_opts: Set[str] = set()
-        for slot, opt in enumerate(item["options"]):
-            if opt.lower() in seen_opts:
-                replacement = _unique_distractor_for_slot(
-                    slot, seen_opts | (global_used or set()),
-                )
-                item["options"][slot] = replacement
-            seen_opts.add(item["options"][slot].lower())
-        if mcq_options_final_sane(item, material_title):
-            break
-    return item
-
-
-def final_repair_mcq(
-    item: Dict[str, Any],
-    source_text: str,
-    material_title: Optional[str] = None,
-    global_used: Optional[Set[str]] = None,
-) -> Dict[str, Any]:
-    """Final MCQ option pass; swap entire MCQ only if options stay ugly."""
-    item = final_repair_mcq_options(item, source_text, material_title, global_used)
-    if mcq_options_final_sane(item, material_title):
-        return item
-    from app.services.quiz_gen_fallback import generate_deterministic_fallback
-
-    fb = generate_deterministic_fallback(source_text, material_title, 1)
-    if fb:
-        replacement = light_cleanup_mcq(
-            dict(fb[0]), source_text, material_title, global_used,
-        )
-        replacement = final_repair_mcq_options(
-            replacement, source_text, material_title, global_used,
-        )
-        if mcq_options_final_sane(replacement, material_title):
-            return replacement
-    return final_repair_mcq_options(item, source_text, material_title, global_used)
-
-
 def light_cleanup_mcq(
     item: Dict[str, Any],
     source_text: str,
@@ -990,22 +694,16 @@ def light_cleanup_mcq(
     )
     raw_opts = list(item.get("options") or [])
     if not raw_opts:
-        raw_opts = [
-            _pick_replacement_option(
-                source_text, set(), material_title, None, global_used,
-            )
-        ]
+        raw_opts = [_pick_replacement_option(source_text, set(), material_title)]
     opts, idx = sanitize_quiz_options(
         raw_opts,
         int(item.get("correctIndex") or 0),
         source_text,
         material_title,
-        question=item["question"],
-        global_used=global_used,
     )
-    item["options"] = [o.replace("?", ".") for o in opts[:4]]
+    opts = [o.replace("?", ".") for o in opts]
+    item["options"] = opts[:4]
     item["correctIndex"] = max(0, min(idx, len(item["options"]) - 1))
-    item = final_repair_mcq_options(item, source_text, material_title, global_used)
     if global_used is not None:
         global_used.update(o.lower() for o in item["options"])
     return item
@@ -1130,15 +828,6 @@ def finalize_quiz_fast(
                 fallback_added += 1
 
     pool = pool[:target]
-    repaired: List[Dict[str, Any]] = []
-    repair_used: Set[str] = set(global_used) if global_used else set()
-    for item in pool:
-        repaired.append(
-            final_repair_mcq(item, validate_text, material_title, repair_used),
-        )
-        repair_used.update(o.lower() for o in repaired[-1].get("options") or [])
-    pool = repaired[:target]
-
     for j, item in enumerate(pool):
         item["id"] = f"q{j + 1}"
 
@@ -1317,10 +1006,7 @@ def _extract_clean_sentences(text: str, limit: int = 30) -> List[str]:
     out: List[str] = []
     seen: Set[str] = set()
     for m in re.finditer(r"[A-Za-z][^.!?]{25,200}[.!?]", text or ""):
-        raw = re.sub(r"\s+", " ", m.group(0)).strip()
-        if _MATH_JUNK_RE.search(raw) or _FRAGMENT_START_RE.search(raw):
-            continue
-        s = clean_option_text(raw)
+        s = clean_option_text(re.sub(r"\s+", " ", m.group(0)).strip())
         if is_broken_option(s):
             continue
         key = s.lower()
