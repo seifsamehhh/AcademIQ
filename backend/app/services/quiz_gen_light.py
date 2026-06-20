@@ -327,13 +327,14 @@ def _add_pair(
     concept_raw: str,
     defn_raw: str,
 ) -> None:
+    from app.services.quiz_question_quality import is_teachable_concept
+
     concept = _normalize_concept(concept_raw)
     definition = _normalize_definition(defn_raw)
-    # Reject pairs that contain PDF-extraction artifact characters
     if _ARTIFACT_RE.search(concept) or _ARTIFACT_RE.search(definition):
         return
     key = concept.lower()
-    if not _valid_concept(concept) or not _valid_definition(definition):
+    if not is_teachable_concept(concept) or not _valid_definition(definition):
         return
     if key in seen:
         return
@@ -343,7 +344,9 @@ def _add_pair(
 
 def _extract_colon_pairs(text: str, seen: set[str], pairs: List[Tuple[str, str]]) -> None:
     for concept_raw, defn_raw in _COLON_PATTERN.findall(text):
-        _add_pair(pairs, seen, concept_raw, defn_raw)
+        concept = _normalize_concept(concept_raw)
+        if len(concept.split()) <= 2 and len(defn_raw.split()) >= 8:
+            _add_pair(pairs, seen, concept_raw, defn_raw)
 
 
 def _extract_paren_skip(text: str, seen: set[str], pairs: List[Tuple[str, str]]) -> None:
@@ -408,25 +411,19 @@ def _extract_slide_pairs(text: str, seen: set[str], pairs: List[Tuple[str, str]]
 
 
 def extract_definitions(text: str) -> List[Tuple[str, str]]:
-    """Pull concept/definition pairs from lecture-style prose and slide PDFs."""
+    """Pull teachable concept/definition pairs — no slide headings."""
     seen: set[str] = set()
     pairs: List[Tuple[str, str]] = []
 
-    # ── Line-aware extractions (use original line structure) ──────────────────
     structured = _strip_section_headers(_structure_normalize(text))
-    _extract_qa_adjacent(structured, seen, pairs)       # "What is X?\n Answer"
-    _extract_colon_pairs(structured, seen, pairs)        # "Heading: description."
-    _extract_slide_pairs(structured, seen, pairs)        # "Title\n long sentence"
+    _extract_qa_adjacent(structured, seen, pairs)
 
-    # ── Blob extractions (use fully normalised text) ──────────────────────────
     source = _normalize_source_text(text)
     blob = re.sub(r"\s+", " ", source)
-    _extract_paren_skip(blob, seen, pairs)               # "X (qual) is a Y."
-    _extract_abbrev_is(blob, seen, pairs)                # "Name (ABB) is a Y."
+    _extract_paren_skip(blob, seen, pairs)
+    _extract_abbrev_is(blob, seen, pairs)
 
-    normalized = blob
-    sentences = re.split(r"(?<=[.!?])\s+", normalized)
-
+    sentences = re.split(r"(?<=[.!?])\s+", blob)
     for sentence in sentences:
         if len(sentence.split()) < 6:
             continue
@@ -441,25 +438,27 @@ def extract_definitions(text: str) -> List[Tuple[str, str]]:
                     continue
                 _add_pair(pairs, seen, concept_raw, defn_raw)
 
-    # Deduplicate by concept: if the same concept was extracted multiple times
-    # (different phrasings), keep the longest definition to avoid near-duplicate
-    # options appearing in the same question.
     best: dict[str, tuple[str, str]] = {}
     for concept, definition in pairs:
         key = concept.lower().strip()
         if key not in best or len(definition) > len(best[key][1]):
             best[key] = (concept, definition)
-    return list(best.values())
+    ranked = list(best.values())
+    ranked.sort(key=lambda p: -len(p[1]))
+    return ranked
 
 
-def _question_prompt(concept: str) -> str:
-    words = concept.split()
-    if words and words[-1].lower().endswith("s") and len(words) <= 3:
-        return f"What are {concept}?"
-    article = "an" if concept[:1].lower() in "aeiou" else "a"
-    if len(words) == 1:
-        return f"What is {article} {concept}?"
-    return f"Which statement best describes {concept}?"
+def _definition_option(concept: str, definition: str) -> str:
+    """Definition body as option — question stem names the concept."""
+    body = definition.strip().rstrip(".")
+    body = re.sub(r"^(a|an|the)\s+", "", body, flags=re.IGNORECASE)
+    return _format_option(body)
+
+
+def _question_prompt(concept: str, index: int = 0) -> str:
+    from app.services.quiz_question_quality import stem_template_for_concept
+
+    return stem_template_for_concept(concept, index)
 
 
 def _stable_shuffle(options: List[str], salt: str) -> Tuple[List[str], int]:
@@ -481,68 +480,26 @@ def _pick_distractors(
     used_global: Set[str],
     n: int = 3,
     material_sentences: Optional[List[str]] = None,
+    source_text: Optional[str] = None,
 ) -> List[str]:
-    """
-    Build distinct wrong answers grounded entirely in the same material.
+    """Same-topic wrong answers — not definitions of other concepts."""
+    from app.services.quiz_question_quality import (
+        pick_same_topic_distractors,
+        rival_concept_names,
+    )
 
-    Priority:
-      1. Definitions from OTHER pairs in the same material.
-      2. Sentence fragments extracted from the same material text.
-
-    No generic/hardcoded distractors — every option is grounded in the
-    selected material's own content so questions stay domain-relevant
-    (electronics, hardware, biology, etc. — whatever the material covers).
-    """
-    correct_key = _option_key(correct)
-    candidates: List[str] = []
-
-    # Primary: other concept definitions from the same material
-    for other_concept, other_def in pool:
-        if other_concept.lower() == concept.lower():
-            continue
-        option = _definition_option(other_concept, other_def)
-        # Hard-cap option length (applies after _format_option already trimmed)
-        if len(option) > _MAX_OPTION_LEN:
-            option = _format_option(option, max_len=_MAX_OPTION_LEN)
-        key = _option_key(option)
-        if key == correct_key or key in used_global or option in candidates:
-            continue
-        candidates.append(option)
-
-    # Fallback: sentence fragments from the same material (content-grounded)
-    if len(candidates) < n and material_sentences:
-        concept_lower = concept.lower()
-        # Track which concept names are already represented in candidates so we
-        # don't add a sentence fragment about the same concept as an existing option.
-        _concept_prefix_re = re.compile(
-            r"^([A-Za-z][A-Za-z\s]{2,40}?)\s+(?:refers to|is a|is an|is the|are)\b",
-            re.IGNORECASE,
-        )
-        covered: Set[str] = set()
-        for cand in candidates:
-            m = _concept_prefix_re.match(cand)
-            if m:
-                covered.add(m.group(1).lower().strip())
-
-        for fragment in material_sentences:
-            if len(candidates) >= n:
-                break
-            key = _option_key(fragment)
-            if key == correct_key or fragment in candidates:
-                continue
-            # Skip fragments about the same concept as the question
-            if fragment.lower().startswith(concept_lower):
-                continue
-            # Skip fragments whose concept is already represented by a candidate
-            m = _concept_prefix_re.match(fragment)
-            if m and m.group(1).lower().strip() in covered:
-                continue
-            candidates.append(fragment)
-            # Track this newly added fragment's concept
-            if m:
-                covered.add(m.group(1).lower().strip())
-
-    return candidates[:n]
+    rivals = rival_concept_names(pool, concept)
+    used = set(used_global)
+    used.add(correct.lower())
+    return pick_same_topic_distractors(
+        concept,
+        correct,
+        source_text or "",
+        rivals,
+        used,
+        material_sentences=material_sentences,
+        n=n,
+    )
 
 
 def _build_question(
@@ -552,13 +509,17 @@ def _build_question(
     pool: List[Tuple[str, str]],
     used_global: Set[str],
     material_sentences: Optional[List[str]] = None,
+    source_text: Optional[str] = None,
 ) -> Dict[str, Any] | None:
     correct = _definition_option(concept, definition)
     if not correct:
         return None
 
-    distractors = _pick_distractors(concept, correct, pool, used_global, n=3,
-                                    material_sentences=material_sentences)
+    distractors = _pick_distractors(
+        concept, correct, pool, used_global, n=3,
+        material_sentences=material_sentences,
+        source_text=source_text,
+    )
     if len(distractors) < 3:
         return None
 
@@ -581,7 +542,7 @@ def _build_question(
 
     return {
         "id": f"q{idx}",
-        "question": _question_prompt(concept),
+        "question": _question_prompt(concept, idx - 1),
         "options": options,
         "correctIndex": correct_idx,
     }
@@ -589,41 +550,45 @@ def _build_question(
 
 def generate_lightweight(text: str, num_questions: int = 8) -> List[Dict[str, Any]]:
     """
-    Build MCQ questions from content_text using definition extraction.
-
-    All distractors are drawn from the SAME material text — either from other
-    extracted definition pairs or from sentence fragments in the same content.
-    No hardcoded or generic distractors are used.
+    Build MCQs from ranked teachable definition pairs in the material.
     """
     from app.services.quiz_material_eligibility import prepare_quiz_generation_text
+    from app.services.quiz_question_quality import (
+        build_mcq_from_teachable_pair,
+        extract_teachable_pairs,
+        final_repair_mcq_options,
+        mcq_options_final_sane,
+    )
 
     prepared = prepare_quiz_generation_text(text)
     if not prepared:
         logger.warning("Lightweight quiz gen: empty text")
         return []
 
-    pairs = extract_definitions(prepared)
-    logger.info("Lightweight quiz gen: extracted %d definition pairs", len(pairs))
+    pairs = extract_teachable_pairs(prepared, limit=num_questions + 8)
+    logger.info("Lightweight quiz gen: %d teachable pairs", len(pairs))
 
-    if len(pairs) < 3:
-        logger.warning("Lightweight quiz gen: insufficient definitions (%d)", len(pairs))
+    if len(pairs) < _MIN_QUESTIONS:
+        logger.warning("Lightweight quiz gen: insufficient teachable pairs (%d)", len(pairs))
         return []
 
-    # Extract sentence fragments from the same material for fallback distractors
     material_sentences = _extract_material_sentences(re.sub(r"\s+", " ", prepared))
-    logger.debug("Lightweight quiz gen: %d material sentence fragments", len(material_sentences))
-
     target = max(_MIN_QUESTIONS, min(num_questions, len(pairs)))
     questions: List[Dict[str, Any]] = []
-    used_global: Set[str] = set()
 
-    for concept, definition in pairs:
+    for i, (concept, definition) in enumerate(pairs):
         if len(questions) >= target:
             break
-        q = _build_question(len(questions) + 1, concept, definition, pairs,
-                            used_global, material_sentences=material_sentences)
-        if q:
-            questions.append(q)
+        built = build_mcq_from_teachable_pair(
+            concept, definition, prepared, pairs, i,
+        )
+        if not built:
+            continue
+        built = final_repair_mcq_options(built, prepared, teachable_pairs=pairs)
+        if not mcq_options_final_sane(built):
+            continue
+        built["id"] = f"q{len(questions) + 1}"
+        questions.append(built)
 
     logger.info("Lightweight quiz gen: produced %d questions", len(questions))
     return questions if len(questions) >= _MIN_QUESTIONS else []
