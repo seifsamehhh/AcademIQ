@@ -62,7 +62,22 @@ _BAD_STEM_RE = re.compile(
     r"purpose of if\b|describes if\b|explains if\b|"
     r"purpose of walk\b|describes walk\b|"
     r"whose goal\b|next can be\b|geography of the\b|"
-    r"purpose of the environment\b|describes the environment\b"
+    r"purpose of the environment\b|describes the environment\b|"
+    r"(?:purpose of|describes|explains)\s+(this|that|these|there|it)\s*\??\s*$|"
+    r"explains\s+and\s+q\s*\??\s*$|margin:\s*it"
+)
+_DEICTIC_WORDS = frozenset(
+    {
+        "this", "that", "these", "there", "those", "here", "then", "so",
+        "because", "and", "or", "but", "when", "where", "why", "how",
+        "it", "its", "they", "them", "their", "same", "such", "svm",
+    }
+)
+_DEICTIC_FRAGMENT_RE = re.compile(
+    r"(?i)^because\s+(it|the)\b|^and\s+q\b|that'?s\s+why|margin:\s*it|"
+    r"so\s+what\s+we\s+do|qis\s+known|^all\s+men$|because\s+the\s+x|"
+    r"these\s+widgets?$|^there$|^this$|^that$|^these$|"
+    r":\s*(this|these|that)\s*$|^thus,\s+if|^a\s+ll\s+men"
 )
 _ARABIC_SCRIPT_RE = re.compile(r"[\u0600-\u06FF]")
 _OCR_SPLIT_CAPS_RE = re.compile(r"(?<![A-Za-z])[B-HJ-Z]\s+[a-z]{2,}")
@@ -75,7 +90,18 @@ _JUNK_OPTION_CONTENT_RE = re.compile(
     r"key characteristics of intelligent agents|one that acts or has the power|"
     r"general definitions of agent|logic based agents it|"
     r"cardmembers maximize their rewards|partially observable\s*,\s*internal state|"
-    r"^:\s*the deduction|chatbots are primarily designed for sharing"
+    r"^:\s*the deduction|chatbots are primarily designed for sharing|"
+    r"no validation data|regularization regularization|➢|"
+    r"called learning after|indeed now raining|components of an agent agent"
+)
+_SLIDE_HEADER_OPTION_RE = re.compile(
+    r"(?i)no validation data|regularization\s+regularization|➢|validation\s+data\s+training"
+)
+_INCOMPLETE_SENTENCE_END_RE = re.compile(
+    r"(?i)(?:\band then\s*\.?\s*$|\busing\s*\.?\s*$|\bthan\s*\.?\s*$|"
+    r"\bto be more\s*\.?\s*$|\bbecomes\s*\.?\s*$|\bwe can infer that p\s*\.?\s*$|"
+    r"\bwe can infer that pis\s*\.?\s*$|\bhave to be more\s*\.?\s*$|"
+    r"\bthat can\s*\.?\s*$|\bspace that can\s*\.?\s*$)"
 )
 _FILENAME_CONCEPT_RE = re.compile(
     r"(?i)\.(pdf|pptx?|ppsx)|_|lecture\s*\d+|lab\s*\d+|test\s+notes|algorithm\s+steps"
@@ -130,6 +156,12 @@ _ALLOWED_COMPOUND_CONCEPTS = frozenset(
         "feature extraction", "decision theory", "bayesian classification",
         "conditional independence", "maximum likelihood", "laplacian operator",
         "sobel operator", "hough transform",
+        "support vector machine", "hyperplane", "soft margin", "hard margin",
+        "regularization", "hyperparameter", "grid search", "feature scaling",
+        "modus tollens", "modus ponens", "predicate calculus",
+        "universal quantification", "logical implication", "conjunctive sentence",
+        "scaffold", "material design", "column widget", "expanded widget",
+        "flutter widget", "accessibility", "agent program", "agent state",
     }
 )
 _WEAK_SINGLE_CONCEPTS = frozenset(
@@ -145,6 +177,8 @@ _WEAK_SINGLE_CONCEPTS = frozenset(
         "trade", "label", "task", "they", "it", "we", "itself", "result",
         "and", "or", "but", "direction", "magnitude", "detector", "vector",
         "walk", "iff", "geography", "users", "next",
+        "this", "that", "these", "there", "those", "here", "then", "so",
+        "because", "svm", "same", "such", "men", "key",
     }
 )
 
@@ -240,7 +274,8 @@ _TABLE_ROW_OPTION_RE = re.compile(
     r"|very famous in medical imaging"
 )
 _BROKEN_OPTION_START_RE = re.compile(
-    r"(?i)^(parated|ification|y\s+convolutional|e\s+res\s|separated and)"
+    r"(?i)^(parated|ification|y\s+convolutional|e\s+res\s|separated and|"
+    r"called learning|java\)|no validation)"
 )
 _INCOMPLETE_OPTION_END_RE = re.compile(
     r"(?i)(?:\bthe main\s*\.?\s*$|\bthe main\s*$|\|\s*\w+\s*\.?\s*$|"
@@ -264,6 +299,14 @@ _PRIORITY_TEACHABLE_TERMS = [
     "goal-based agent", "model-based reflex agent", "simple reflex agent",
     "partially observable environment", "fully observable environment",
     "belief-desire-intention", "chatbot",
+    "support vector machine", "soft margin", "hard margin", "hyperplane",
+    "regularization", "hyperparameter", "grid search", "feature scaling",
+    "modus tollens", "modus ponens", "predicate calculus",
+    "universal quantification", "logical implication",
+    "scaffold", "material design", "column widget", "expanded widget",
+    "flutter widget", "accessibility", "agent program", "agent state",
+    "hyperparameter c", "kernel trick", "kernel function",
+    "fat arrow", "dart", "stateful widget", "widget tree",
 ]
 _EXTRA_GENERIC_DISTRACTORS = [
     "It confuses training data with test data in machine learning.",
@@ -373,6 +416,48 @@ def is_slide_fragment_concept(concept: str) -> bool:
     return False
 
 
+def _normalize_concept_text(raw: str) -> str:
+    s = (raw or "").strip()
+    s = s.replace("\u2019", "'").replace("\u2018", "'").replace("\u201c", '"').replace("\u201d", '"')
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def is_deictic_concept(concept: str) -> bool:
+    """Pronouns and slide fragments — never valid quiz concepts (This, That, Because it)."""
+    c = _normalize_concept_text(concept)
+    if not c:
+        return True
+    low = re.sub(r"[?:.]+$", "", c.lower()).strip()
+    words = low.split()
+    if not words:
+        return True
+    if low in _DEICTIC_WORDS or (len(words) == 1 and words[0] in _DEICTIC_WORDS):
+        return True
+    if _DEICTIC_FRAGMENT_RE.search(low):
+        return True
+    if words[0] in {"this", "that", "these", "there", "because", "and", "so", "then"}:
+        return True
+    if re.match(r"(?i)^(margin|qis|so what|because the|thus, if)", low):
+        return True
+    if re.search(r"(?i)that'?s\s+why", low):
+        return True
+    if ":" in c and re.search(r"(?i)\b(this|these|that|there)\b", c):
+        return True
+    if re.search(r"(?i)the most interesting feature|each time set state", low):
+        return True
+    if re.match(r"(?i)^each\s+", low):
+        return True
+    if re.match(r"(?i)^a\s+fat\s+arrow", low):
+        return True
+    if low in {"sentences", "classification", "regression"} and len(words) == 1:
+        return True
+    if re.match(r"(?i)^(basics|painting|material components|accessibility|effects)", low):
+        return True
+    if re.search(r"(?i)all men are mortal|socrates is mortal", low):
+        return True
+    return False
+
+
 def clean_teachable_answer(raw: str, concept: str = "") -> str:
     """Normalize a material-backed answer line for MCQ options."""
     a = clean_option_text(raw)
@@ -422,6 +507,8 @@ def is_teachable_concept(concept: str) -> bool:
     c = clean_concept_label(concept)
     if not c or is_weak_concept(c):
         return False
+    if is_deictic_concept(c):
+        return False
     if is_slide_fragment_concept(c):
         return False
     if is_heading_concept(c):
@@ -443,6 +530,19 @@ def stem_template_for_concept(concept: str, index: int = 0) -> str:
         f"Which option correctly explains {c}?",
     ]
     return templates[index % len(templates)]
+
+
+def _sentence_covers_priority_term(term: str, sent: str) -> bool:
+    """True when a sentence is a usable definition line for a priority term."""
+    if not sent or not re.search(rf"(?i)\b{re.escape(term)}\b", sent):
+        return False
+    if re.search(
+        rf"(?i)(?:^|\b){re.escape(term)}\b\s+"
+        r"(?:is|are|means|refers to|used to|helps|defined as|consists of|includes|and)",
+        sent,
+    ):
+        return True
+    return len(sent.split()) >= MIN_OPTION_WORDS
 
 
 def extract_teachable_pairs(text: str, limit: int = 25) -> List[Tuple[str, str]]:
@@ -470,10 +570,7 @@ def extract_teachable_pairs(text: str, limit: int = 25) -> List[Tuple[str, str]]
         if not answer or is_broken_definition_answer(answer):
             for m in re.finditer(r"[A-Za-z][^.!?]{25,220}[.!?]", text or ""):
                 sent = re.sub(r"\s+", " ", m.group(0)).strip()
-                if not re.search(
-                    rf"(?i)(?:^|\b){re.escape(term)}\b\s+(?:is|are|means|refers to|used to)",
-                    sent,
-                ):
+                if not _sentence_covers_priority_term(term, sent):
                     continue
                 if re.search(r"f\s*\(|\(x,\s*y\)", sent):
                     continue
@@ -566,10 +663,7 @@ def _mine_thin_content_pairs(
             re.I,
         ):
             sent = clean_teachable_answer(m.group(0), label)
-            if not re.search(
-                rf"(?i)(?:^|\b){re.escape(term)}\b\s+(?:is|are|means|refers to|used to)",
-                sent,
-            ):
+            if not _sentence_covers_priority_term(term, sent):
                 continue
             if is_broken_definition_answer(sent):
                 continue
@@ -739,6 +833,10 @@ def is_table_or_slide_junk_option(option: str) -> bool:
         return True
     if _INCOMPLETE_OPTION_END_RE.search(o):
         return True
+    if _SLIDE_HEADER_OPTION_RE.search(o):
+        return True
+    if _INCOMPLETE_SENTENCE_END_RE.search(o):
+        return True
     if re.search(r"(?i)select the length of the fish", o):
         return True
     if re.search(r"(?i)should not overlap pattern", o):
@@ -747,6 +845,37 @@ def is_table_or_slide_junk_option(option: str) -> bool:
     if len(pipe_segments) >= 2:
         return True
     return False
+
+
+def fix_ocr_token_spacing(text: str) -> str:
+    """Fix logic/OCR splits: Qis -> Q is, A gent -> Agent, Xin -> X in."""
+    s = (text or "").strip()
+    if not s:
+        return ""
+    s = re.sub(r"\b([PQ])is\b", r"\1 is", s)
+    s = re.sub(r"\bXin\b", "X in", s)
+    s = re.sub(r"\bXand\b", "X and", s)
+    s = re.sub(r"\bA\s+gent\b", "Agent", s, flags=re.I)
+    s = re.sub(r"\bA\s+nd\b", "And", s, flags=re.I)
+    s = re.sub(r"\bA\s+ccessibility\b", "Accessibility", s, flags=re.I)
+    s = re.sub(r"\bA\s+n\s", "An ", s, flags=re.I)
+    s = re.sub(r"\bA\s+n\s+([a-z])", r"An \1", s)
+    s = re.sub(r"\bA\s+ll\b", "All", s, flags=re.I)
+    s = re.sub(r"\bagent Agent\b", "Agent", s, flags=re.I)
+    s = re.sub(r"➢", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def collapse_repeated_leading_phrase(text: str) -> str:
+    """Collapse 'Support Vector Machine Support Vector Machine' -> single phrase."""
+    words = (text or "").split()
+    if len(words) < 6:
+        return text
+    for n in range(min(10, len(words) // 2), 2, -1):
+        head = " ".join(words[:n]).lower()
+        if head == " ".join(words[n:2 * n]).lower():
+            return " ".join(words[:n]) + " " + " ".join(words[2 * n:])
+    return text
 
 
 def rewrite_known_bad_option(option: str) -> str:
@@ -761,12 +890,14 @@ def rewrite_known_bad_option(option: str) -> str:
 def clean_option_text(option: str) -> str:
     """Normalize an MCQ option — statements only, never questions."""
     o = rewrite_known_bad_option(option)
-    o = re.sub(r"[\uf000-\uf8ff\ufffd\u2022\u25aa\"'\u201c\u201d]", " ", o)
+    o = re.sub(r"[\uf000-\uf8ff\ufffd\u2022\u25aa\"'\u201c\u201d\u2018\u2019]", " ", o)
     o = re.sub(r"\s+", " ", o).strip()
     if not o:
         return ""
     o = o.replace("?", ".")
+    o = fix_ocr_token_spacing(o)
     o = normalize_merged_words(o)
+    o = collapse_repeated_leading_phrase(o)
     if _ARABIC_SCRIPT_RE.search(o) or _JUNK_OPTION_CONTENT_RE.search(o):
         return ""
     if _OCR_SPLIT_CAPS_RE.search(o):
@@ -961,6 +1092,10 @@ def is_broken_option(option: str) -> bool:
     if is_table_or_slide_junk_option(o):
         return True
     if re.search(r"\d\.\s*$", o) and len(words) <= 6:
+        return True
+    if _SLIDE_HEADER_OPTION_RE.search(o):
+        return True
+    if _INCOMPLETE_SENTENCE_END_RE.search(o):
         return True
     if _ARABIC_SCRIPT_RE.search(o):
         return True
@@ -1187,7 +1322,8 @@ def extract_educational_sentences(text: str, limit: int = 40) -> List[str]:
 
 def clean_concept_label(raw: str) -> str:
     """Strip file/OCR prefixes from a concept label."""
-    c = normalize_merged_words((raw or "").strip())
+    c = _normalize_concept_text(raw)
+    c = normalize_merged_words(c)
     c = _FILE_NOISE_RE.sub(" ", c)
     c = _COPY_NUM_RE.sub(" ", c)
     c = _DIGIT_PREFIX_RE.sub("", c)
