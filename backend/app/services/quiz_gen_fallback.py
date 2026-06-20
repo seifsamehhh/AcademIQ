@@ -18,7 +18,6 @@ from app.services.quiz_question_quality import (
     is_vague_question,
     is_weak_concept,
     normalize_concept_key,
-    prepare_source_text_for_quiz,
     uses_filename_as_concept,
     _extract_keywords,
     _SHOUTY_STEM_RE,
@@ -47,8 +46,6 @@ _PRIORITY_TERMS = [
     "riverpod", "flutter", "state management", "prior probability",
     "posterior probability", "likelihood", "bayesian classification",
     "conditional independence", "maximum likelihood",
-    "luminosity", "histogram", "grayscale", "spatial filtering",
-    "thresholding", "convolution",
 ]
 
 
@@ -73,9 +70,9 @@ def _stem_templates(concept: str, topic: str, index: int) -> str:
     templates = [
         f"Which statement best describes {c}?",
         f"What is the main purpose of {c}?",
-        f"Why is {c} important in {topic}?",
+        f"What role does {c} play in {topic}?",
         f"Which option correctly explains {c}?",
-        f"How does {c} support {topic}?",
+        f"Why is {c} important in {topic}?",
     ]
     return templates[index % len(templates)]
 
@@ -255,7 +252,6 @@ def generate_deterministic_fallback(
     if not text or not text.strip():
         return []
 
-    text = prepare_source_text_for_quiz(text)
     sentences = extract_educational_sentences(text, limit=50)
     topic = _topic_label(material_title, text)
     used: Set[str] = set()
